@@ -78,8 +78,12 @@ jobs:
           # commit, whose own build would overwrite them again. Both steps are
           # silent, and together they leave a release whose tag and contents
           # disagree. So this asks first, and fails loudly when the answer is no.
-          EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.target_commitish' 2>/dev/null || true)"
-          if [ -z "$EXISTING" ]; then
+          # `gh api` writes its 404 body to STDOUT, so "output is empty" is not how
+          # an absent release is detected — the exit status is. Getting this wrong is
+          # how this step first failed: it compared a JSON error message with git.
+          if EXISTING="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.target_commitish' 2>/dev/null)"; then
+            :
+          else
             echo "No release for ${TAG} yet."
             exit 0
           fi
