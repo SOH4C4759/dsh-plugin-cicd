@@ -107,7 +107,7 @@ window.__ModuleLoader__.load({
       'state.noRuns': '还没有运行记录',
       'state.noReleases': '还没有 Release',
       'state.dispatched': '已触发 {workflow}（{repo}）。',
-      'state.releaseDispatched': '已触发发布流程（{repo}）；结束后草稿会出现在这里。',
+      'state.releaseDispatched': '已触发发布流程（{repo}）；它产出的是草稿——草稿对外不可见，展开该行点【公开草稿】即可公开。',
       'state.published': '{tag} 已公开。',
       'state.rerun': '已请求重跑。',
       'state.cancelled': '已请求取消。',
@@ -115,6 +115,8 @@ window.__ModuleLoader__.load({
       'state.registered': '已添加 {repo}。',
       'state.removed': '已移除 {repo}。',
       'state.truncated': '（只显示最后 {lines} 行）',
+      'drafts.title': '有 {count} 个草稿还没公开',
+      'drafts.text': '草稿对外不可见，也不创建 tag，所以在仓库的 Releases 页面看不到——这不是失败。展开下面带【草稿】标记的行，点【公开草稿】即可公开发布。',
       'meta.account': '账号',
       'meta.updated': '更新于 {time}',
       'meta.cached': '缓存',
@@ -204,7 +206,7 @@ window.__ModuleLoader__.load({
       'state.noRuns': 'no runs yet',
       'state.noReleases': 'no releases yet',
       'state.dispatched': 'Triggered {workflow} on {repo}.',
-      'state.releaseDispatched': 'Release workflow triggered for {repo}; the draft appears here when it finishes.',
+      'state.releaseDispatched': 'Release workflow triggered for {repo}. It produces a DRAFT: drafts are invisible to everyone else, so expand that row and press Publish to make it public.',
       'state.published': '{tag} is public now.',
       'state.rerun': 'Re-run requested.',
       'state.cancelled': 'Cancellation requested.',
@@ -212,6 +214,8 @@ window.__ModuleLoader__.load({
       'state.registered': 'Added {repo}.',
       'state.removed': 'Removed {repo}.',
       'state.truncated': '(showing the last {lines} lines)',
+      'drafts.title': '{count} draft(s) not published yet',
+      'drafts.text': 'A draft is invisible to everyone else and creates no tag, so it does not appear on the repository Releases page — that is not a failure. Expand the rows marked Draft below and press Publish to make one public.',
       'meta.account': 'Account',
       'meta.updated': 'Updated {time}',
       'meta.cached': 'cached',
@@ -729,6 +733,17 @@ window.__ModuleLoader__.load({
     function RepoRow(props) {
       const { t, data, busy, onAction, onPublish, logs, onLogs } = props
       const [open, setOpen] = React.useState(false)
+      /**
+       * A draft release is the panel's one invisible outcome: it exists, it is not
+       * a failure, and it cannot be seen anywhere until it is published. So a row
+       * that has one opens itself — the Publish button is the answer to "why is
+       * this not released", and it should not be behind a click that nobody knows
+       * to make. The effect keys on the tag, so collapsing the row by hand stays
+       * collapsed until the draft state actually changes.
+       */
+      React.useEffect(() => {
+        if (data.draftTag !== null && data.draftTag !== undefined) setOpen(true)
+      }, [data.draftTag])
       const [confirming, setConfirming] = React.useState(null)
       const run = data.latestRun
       const local = data.local ?? { available: false }
@@ -1005,6 +1020,7 @@ window.__ModuleLoader__.load({
       const gh = status?.gh ?? {}
       const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
       const setupNeeded = status !== null && (needsAccountSetup(gh) || repos.length === 0)
+      const draftCount = repos.filter((entry) => entry.draftTag !== null && entry.draftTag !== undefined).length
       // The page and the Host half load independently, so they can disagree.
       const stale = status !== null && status.protocol !== PROTOCOL
 
@@ -1036,6 +1052,17 @@ window.__ModuleLoader__.load({
         notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
         stale
           ? h('div', { className: 'dsc-warn', role: 'alert' }, h('strong', null, t('stale.title')), ' — ', t('stale.how'))
+          : null,
+        /* The one outcome the panel could report as "nothing happened". Say it, and
+           say what to press, instead of leaving it inside a collapsed row. */
+        draftCount > 0
+          ? h(
+              'div',
+              { className: 'dsc-warn', role: 'status' },
+              h('strong', null, t('drafts.title', { count: String(draftCount) })),
+              ' — ',
+              t('drafts.text'),
+            )
           : null,
 
         setupNeeded && !stale
