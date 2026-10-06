@@ -583,6 +583,17 @@ window.__ModuleLoader__.load({
       const code = typeof attempt.code === 'string' && attempt.code !== '' ? attempt.code : null
       const url = typeof attempt.url === 'string' && attempt.url !== '' ? attempt.url : 'https://github.com/login/device'
 
+      /**
+       * Nothing left to do.
+       *
+       * Once the credential carries every scope the panel needs, this component has
+       * no button to offer and no status worth reporting. Returning `null` retires
+       * it: leaving a redundant "sign in" button, or the remains of "authorized,
+       * reading the account…", made a finished login look stuck — and it stayed
+       * that way until something else happened to re-render the block.
+       */
+      if (gh.available === true && gh.authenticated === true && missing.length === 0 && !pending) return null
+
       return h(
         'div',
         { className: 'dsc-sub' },
@@ -773,11 +784,13 @@ window.__ModuleLoader__.load({
           { className: 'dsc-row' },
           h('span', { className: 'dsc-dot', 'data-state': state, title: run === null ? t('state.noRuns') : `${run.workflow} · ${run.conclusion || run.status}` }),
           h('span', { className: 'dsc-name' }, data.label),
-          data.version !== null ? h(Chip, { state: 'idle' }, `v${data.version}`) : null,
+          data.versionKnown === true && data.version !== null ? h(Chip, { state: 'idle' }, `v${data.version}`) : null,
           data.draftTag !== null
-            ? h(Chip, { state: 'warn' }, t('chip.draft'))
+            ? h(Chip, { state: 'warn' }, `${t('chip.draft')} ${data.draftTag}`)
             : data.published
-              ? h(Chip, { state: 'success' }, t('chip.published'))
+              // Name the tag: without a local checkout the panel knows the release
+              // from GitHub alone, and the tag is the fact it actually has.
+              ? h(Chip, { state: 'success' }, data.publishedTag === null ? t('chip.published') : `${t('chip.published')} ${data.publishedTag}`)
               : h(Chip, { state: 'idle' }, t('chip.unpublished')),
           chips,
           h('span', { className: 'dsc-grow' }, run === null ? t('state.noRuns') : `${run.workflow} · ${duration(run)} · ${stamp(run.createdAt)}`),
@@ -938,7 +951,31 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [notice, setNotice] = React.useState(null)
       const [logs, setLogs] = React.useState(null)
-      const [managing, setManaging] = React.useState(false)
+      /**
+       * Which view this panel opens in.
+       *
+       * A first visit is about setting the tool up, so it opens on the repository
+       * list; afterwards the last choice wins. Without this, re-entering the panel
+       * dropped back to the setup view every time — even for someone who had just
+       * finished configuring it and wanted to see the repositories.
+       */
+      const [managing, setManaging] = React.useState(() => {
+        try {
+          const stored = globalThis.localStorage?.getItem('dsh-cicd.managing')
+          if (stored === 'true') return true
+          if (stored === 'false') return false
+        } catch {
+          /* storage can be unavailable; the default below is fine */
+        }
+        return true
+      })
+      React.useEffect(() => {
+        try {
+          globalThis.localStorage?.setItem('dsh-cicd.managing', String(managing))
+        } catch {
+          /* a preference that cannot be stored is not worth failing over */
+        }
+      }, [managing])
 
       React.useEffect(() => {
         void loadStatus()

@@ -684,16 +684,32 @@ export async function collectRepo({ config, ghPath, entry }) {
   const version = readLocalVersion(entry.localPath)
   const expectedTag = version === null ? null : `v${version}`
   const matching = expectedTag === null ? null : releases.find((release) => release.tag === expectedTag) ?? null
+  /*
+   * Without a local checkout there is no version to compare against — and that is
+   * the normal state on a fresh install, where not one repository has a
+   * `localPath` yet. GitHub's own release list is then the only truth, so it
+   * decides: a row that reports 未发布 while a published release sits in its own
+   * expanded detail is simply wrong, and it was wrong for exactly this reason.
+   */
+  const publishedRelease = matching !== null
+    ? (matching.draft ? null : matching)
+    : releases.find((release) => !release.draft) ?? null
+  const draftRelease = matching !== null
+    ? (matching.draft ? matching : null)
+    : releases.find((release) => release.draft) ?? null
   const local = await readLocalState(entry.localPath, config.requestTimeoutMs)
 
   return {
     ...base,
     version,
     expectedTag,
-    /** A published release for the local version exists. */
-    published: matching !== null && !matching.draft,
-    /** A draft release for the local version exists, waiting to be published. */
-    draftTag: matching !== null && matching.draft ? matching.tag : null,
+    /** Whether the local version is known; when it is not, the state comes from GitHub. */
+    versionKnown: version !== null,
+    /** A published release exists — for the local version when known, else the newest. */
+    published: publishedRelease !== null,
+    publishedTag: publishedRelease === null ? null : publishedRelease.tag,
+    /** A draft release is waiting, for the local version when known, else the newest. */
+    draftTag: draftRelease === null ? null : draftRelease.tag,
     latestRun: runs[0] ?? null,
     runs,
     releases,
@@ -797,7 +813,10 @@ export function apply(ctx, rawConfig) {
     stopAuth()
     const args = mode === 'refresh'
       ? ['auth', 'refresh', '--hostname', 'github.com', '-s', scopes.join(',')]
-      : ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web']
+      // Ask for everything this plugin needs in the ONE prompt the user is already
+      // looking at. Logging in with gh's defaults and then sending them back for a
+      // second grant is a worse experience for no benefit.
+      : ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web', '--scopes', REQUIRED_SCOPES.join(',')]
     const child = spawn(ghPath, args, {
       windowsHide: true,
       // `GH_PROMPT_DISABLED` must stay unset here: this IS the interactive flow,
