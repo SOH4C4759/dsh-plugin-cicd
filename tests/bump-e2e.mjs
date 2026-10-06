@@ -79,6 +79,12 @@ function makeCheckout({ version = '1.0.0' } = {}) {
      ignore it would otherwise leave an unborn `master` and fail the push below —
      which would read as a product failure instead of a fixture one. */
   git(work, ['branch', '-M', 'main'])
+  /* The route runs `git commit` itself, inheriting the plugin process's
+     environment — so the identity has to exist in the REPOSITORY, not in this
+     file's child-process env. A CI runner has none, and the first Linux run of
+     this suite failed with "Author identity unknown" for exactly that reason. */
+  git(work, ['config', 'user.name', 'bump-e2e'])
+  git(work, ['config', 'user.email', 'bump-e2e@example.invalid'])
   writeFileSync(join(work, 'package.json'), manifestFor(version), 'utf8')
   git(work, ['add', '--', 'package.json'])
   git(work, ['commit', '-m', 'init'])
