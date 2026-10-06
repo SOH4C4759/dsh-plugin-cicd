@@ -92,7 +92,26 @@ dsh plugin --profile desktop add "link:F:\CodeProj\dsh-plugin-cicd"
 
 ## 本仓库自身的 CI/CD
 
-它自己也用同一套：[`ci.yml`](.github/workflows/ci.yml) 每次 push 做契约检查并真造一个发布包，[`release.yml`](.github/workflows/release.yml) 在 `v*` tag 上构建并上传 Release。发布流程见 [RELEASING.md](RELEASING.md)。
+它自己也用同一套：[`ci.yml`](.github/workflows/ci.yml) 每次 push 跑 [`tests/host-checks.mjs`](tests/host-checks.mjs)（29 条离线检查，覆盖入口校验/配置夹取/降级路径）并真造一个发布包，[`release.yml`](.github/workflows/release.yml) 在 `v*` tag 上构建并上传 Release。发布流程见 [RELEASING.md](RELEASING.md)。
+
+`tests/host-checks.mjs` 里另有一半检查需要真实的 `gh` 与特定的仓库状态，用 `DSH_CICD_LIVE=1` 打开：
+
+```powershell
+node tests/host-checks.mjs                    # 离线，CI 跑的就是这个
+$env:DSH_CICD_LIVE = 1; node tests/host-checks.mjs
+```
+
+### 推送通道被阻断时
+
+本机实测：`github.com:443` 会被间歇阻断（`git push` 报 `Connection was reset` 或直接连不上），而 `api.github.com:443` 一直可达——所以 `git` 挂了但 `gh` 一切正常。
+
+[`scripts/push-via-api.ps1`](scripts/push-via-api.ps1) 走 API 造出**逐字节相同 SHA** 的提交对象再移动 ref，因此本地与远程不会分叉，不需要事后 `git reset --hard`：
+
+```powershell
+pwsh -File scripts/push-via-api.ps1 -RepoPath 'F:\CodeProj\dsh-plugin-cicd'
+```
+
+它在每一步比对重建出的 blob / tree / commit SHA 与本地提交，任何一处不一致就中止并**不移动 ref**；成功后连同 `refs/remotes/origin/main` 一起更新，否则 `git status` 会显示一个并不存在的「领先」。仓库已经同步时它什么都不做。
 
 ## 已知边界
 
