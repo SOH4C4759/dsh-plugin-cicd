@@ -56,8 +56,13 @@ window.__ModuleLoader__.load({
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
     const NOTICE_TTL_MS = 5_000
-    /** Fast enough that the one-time code appears while the user is still looking. */
-    const AUTH_POLL_MS = 2_000
+    /**
+     * While an attempt is pending this polls `/auth-state` — and it is the only
+     * thing the user is waiting for at that moment. One second rather than two: the
+     * code normally exists within a second of the click, this is a loopback call,
+     * and it stops as soon as the attempt settles.
+     */
+    const AUTH_POLL_MS = 1_000
 
     /** Simplified Chinese dictionary (key-set source of truth). */
     const zh = {

@@ -29,6 +29,7 @@
 
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { connect } from 'node:net'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -88,15 +89,46 @@ const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
 const AUTH_TIMEOUT_MS = 10 * 60 * 1000
 
 /**
- * How long `auth-start` waits for `gh` to print the one-time code before answering.
+ * How long `gh auth login` may go without printing a one-time code before the
+ * attempt is reported as failed.
  *
- * The code normally appears under a second, but the first `gh` invocation after a
- * logout has been measured taking longer, and answering before it exists is what
- * produced "the authorization page opened but there was no code": the panel had a
- * URL to open and nothing to enter. Bounded, so a genuinely stuck `gh` still
- * reports back instead of hanging the request.
+ * This is not a nicety. Measured on a machine where `github.com:443` was blocked:
+ * `gh auth login --web` printed NOTHING and was still running after 20 seconds —
+ * no code, no error, no exit. Without this deadline the panel waits for the full
+ * fifteen-minute code lifetime saying "waiting for the code", which is both wrong
+ * and useless. The deadline converts silence into a diagnosis.
  */
-const AUTH_CODE_WAIT_MS = 8000
+const AUTH_CODE_DEADLINE_MS = 15_000
+
+/**
+ * Can this process open a TCP connection to `host:port`?
+ *
+ * The device-code flow talks to `github.com`. Where that host is intermittently
+ * blocked, `gh` does not fail fast — it hangs with no output. A short probe turns
+ * a silent minute into an immediate, specific message.
+ *
+ * @param {string} host - hostname to probe.
+ * @param {number} port - TCP port.
+ * @param {number} timeoutMs - how long to wait before calling it unreachable.
+ * @returns {Promise<boolean>} whether a connection was established.
+ */
+export async function canReach(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false
+    const socket = connect({ host, port })
+    const finish = (value) => {
+      if (settled) return
+      settled = true
+      socket.removeAllListeners()
+      socket.destroy()
+      resolve(value)
+    }
+    socket.setTimeout(timeoutMs)
+    socket.once('connect', () => finish(true))
+    socket.once('timeout', () => finish(false))
+    socket.once('error', () => finish(false))
+  })
+}
 
 /**
  * Scopes the panel actually needs. `repo` covers private repositories, releases
@@ -875,6 +907,26 @@ export function apply(ctx, rawConfig) {
       settleAuth('expired', 'the one-time code expired — start again')
     }, AUTH_TIMEOUT_MS)
     if (typeof attempt.timer.unref === 'function') attempt.timer.unref()
+    /*
+     * `login` is the flow that has a one-time code, and the one that goes silent
+     * when github.com is unreachable. If no code has appeared by the deadline, say
+     * what happened instead of waiting out the code's lifetime.
+     */
+    if (mode === 'login') {
+      const codeTimer = setTimeout(() => {
+        if (attempt.state !== 'running' || attempt.code !== null) return
+        const printed = firstLine(attempt.output)
+        settleAuth(
+          'failed',
+          printed === null
+            ? 'gh printed no one-time code within 15s (it produced no output at all, which is what happens when github.com cannot be reached) — check the network and try again'
+            : `gh printed no one-time code within 15s; its output began: ${printed}`,
+        )
+        stopAuth()
+      }, AUTH_CODE_DEADLINE_MS)
+      if (typeof codeTimer.unref === 'function') codeTimer.unref()
+      attempt.codeTimer = codeTimer
+    }
     return attempt
   }
 
@@ -1200,26 +1252,25 @@ export function apply(ctx, rawConfig) {
       writeJson(res, 400, { ok: false, code: 'bad-request', message: 'refresh needs at least one of: repo, workflow' })
       return
     }
-    startAuth(mode, scopes)
     /*
-     * Wait, briefly, for the code to exist before answering.
+     * Answer immediately — do not hold the request open waiting for the code.
      *
-     * Returning the snapshot immediately means the first thing the panel renders
-     * has `code: null` — and if it offers "open the authorization page" in that
-     * state, clicking it opens the fallback URL with no code to enter. Waiting here
-     * is what makes the code and the button appear together.
+     * An earlier version waited up to 8s so the first render would have the code.
+     * Measured consequence: where github.com is unreachable, `gh` hangs printing
+     * nothing, so the wait became a fixed 8-second delay on every single click, and
+     * after it the panel still had no code and no reason. The panel now renders a
+     * "requesting a code" state and polls, so nothing is gained by blocking here.
      */
-    const deadline = Date.now() + AUTH_CODE_WAIT_MS
-    let waited = 0
-    for (;;) {
-      const snapshot = authSnapshot()
-      if (typeof snapshot.code === 'string' && snapshot.code !== '') break
-      // A finished or failed attempt will never produce a code; stop waiting.
-      if (snapshot.state !== 'pending' && snapshot.state !== 'running') break
-      if (Date.now() >= deadline) break
-      await new Promise((resolve) => setTimeout(resolve, 150))
-      waited += 150
+    const reachable = await canReach('github.com', 443, 4000)
+    if (!reachable) {
+      writeJson(res, 502, {
+        ok: false,
+        code: 'unreachable',
+        message: 'cannot open a connection to github.com:443 — the device-code flow needs it, and without it gh prints no code at all. Check the network and try again.',
+      })
+      return
     }
+    startAuth(mode, scopes)
     const value = authSnapshot()
     writeJson(res, 202, {
       ok: true,
@@ -1227,7 +1278,6 @@ export function apply(ctx, rawConfig) {
         ...value,
         scopes,
         gh: ghPath,
-        waitedMs: waited,
         /** False when the code has not arrived yet, so the panel can say so. */
         ready: typeof value.code === 'string' && value.code !== '',
         note: `waiting for the one-time code from ${current.configSource} configuration`,
