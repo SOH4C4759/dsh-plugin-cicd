@@ -242,19 +242,38 @@ window.__ModuleLoader__.load({
     /* ------------------------------------------------------------- styles -- */
 
     const CSS = `
-.dsc-root { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 20px; height: 100%; overflow: auto; }
-.dsc-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.dsc-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-.dsc-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.dsc-subtitle { font-size: 11px; color: var(--dsw-alias-label-secondary); }
-.dsc-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+/* One scale for the whole panel. Every rule below reads these; nothing picks its
+   own size, height or radius, because that is how a UI drifts into six different
+   font sizes and three different button heights. */
+.dsc-root {
+  --dsc-fs-sm: 11px;   /* secondary: meta, chips, hints, detail, logs */
+  --dsc-fs-md: 12px;   /* primary: rows, buttons, inputs, notices */
+  --dsc-fs-lg: 15px;   /* titles, and the one-time code */
+  --dsc-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --dsc-ctl-h: 26px;   /* every clickable control is this tall */
+  --dsc-ctl-r: 6px;    /* every control, code block and chip container */
+  --dsc-box-r: 10px;   /* every container */
+  --dsc-gap: 8px;
+  display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 20px;
+  height: 100%; overflow: auto;
+  font-family: inherit; font-size: var(--dsc-fs-md); line-height: 1.5;
+  color: var(--dsw-alias-label-primary);
+}
+.dsc-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.dsc-heading { display: flex; align-items: baseline; gap: var(--dsc-gap); min-width: 0; }
+.dsc-title { font-size: var(--dsc-fs-lg); font-weight: 600; }
+.dsc-subtitle { font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
+.dsc-meta { display: flex; align-items: center; gap: var(--dsc-gap); flex-wrap: wrap; font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
 .dsc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
+/* One button. data-kind changes colour only; data-square changes width only. */
 .dsc-btn {
-  display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  height: var(--dsc-ctl-h); padding: 0 10px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsc-ctl-r);
   background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
-  font: inherit; font-size: 11px; line-height: 1; cursor: pointer; white-space: nowrap;
+  font-family: inherit; font-size: var(--dsc-fs-md); font-weight: 400; line-height: 1;
+  cursor: pointer; white-space: nowrap;
 }
 .dsc-btn:hover:not([disabled]) { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-border-l2); }
 .dsc-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
@@ -263,12 +282,12 @@ window.__ModuleLoader__.load({
 .dsc-btn[data-kind="danger"] { border-color: transparent; background: var(--dsw-alias-state-error-primary); color: #fff; }
 .dsc-btn[data-kind="quiet"] { background: transparent; border-color: transparent; color: var(--dsw-alias-label-secondary); }
 .dsc-btn[data-kind="quiet"]:hover:not([disabled]) { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
-.dsc-btn[data-size="wide"] { height: 28px; padding: 0 12px; font-size: 12px; }
+.dsc-btn[data-square="true"] { width: var(--dsc-ctl-h); padding: 0; }
 
 .dsc-chip {
-  display: inline-flex; align-items: center; gap: 4px; height: 17px; padding: 0 6px;
+  display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 7px;
   border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px;
-  font-size: 10.5px; line-height: 1; color: var(--dsw-alias-label-secondary); white-space: nowrap; flex: none;
+  font-size: var(--dsc-fs-sm); line-height: 1; color: var(--dsw-alias-label-secondary); white-space: nowrap; flex: none;
 }
 .dsc-chip[data-state="success"] { color: var(--dsw-alias-state-success-primary); border-color: currentColor; }
 .dsc-chip[data-state="error"] { color: var(--dsw-alias-state-error-primary); border-color: currentColor; }
@@ -285,57 +304,59 @@ window.__ModuleLoader__.load({
 .dsc-list { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; background: var(--dsw-alias-bg-layer-1); }
 .dsc-item { border-top: 1px solid var(--dsw-alias-border-l1); }
 .dsc-item:first-child { border-top: none; }
-.dsc-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; min-height: 32px; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.dsc-row { display: flex; align-items: center; gap: var(--dsc-gap); padding: 5px 10px; min-height: 32px; }
 .dsc-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 70px; flex: 0 1 auto; }
-.dsc-grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.dsc-grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font-size: var(--dsc-fs-sm); }
 .dsc-right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
-.dsc-detail { padding: 4px 10px 10px 28px; display: flex; flex-direction: column; gap: 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
-.dsc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.dsc-detail { padding: 4px 10px 10px 28px; display: flex; flex-direction: column; gap: var(--dsc-gap); font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
+.dsc-mono { font-family: var(--dsc-mono); overflow-wrap: anywhere; }
 .dsc-sub { display: flex; flex-direction: column; gap: 3px; }
-.dsc-line { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-top: 1px dashed var(--dsw-alias-border-l1); }
+.dsc-line { display: flex; align-items: center; gap: var(--dsc-gap); padding: 3px 0; border-top: 1px dashed var(--dsw-alias-border-l1); }
 .dsc-line:first-child { border-top: none; }
-.dsc-empty { padding: 8px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dsc-empty { padding: var(--dsc-gap) 2px; font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
 
 .dsc-notice, .dsc-warn, .dsc-error {
-  padding: 6px 10px; border-radius: 8px; font-size: 11.5px; line-height: 1.55;
+  padding: 6px 10px; border-radius: var(--dsc-ctl-r); font-size: var(--dsc-fs-md); line-height: 1.5;
   border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
 }
 .dsc-warn { color: var(--dsw-alias-state-warn-primary); border-color: currentColor; }
 .dsc-error { color: var(--dsw-alias-state-error-primary); border-color: currentColor; }
 .dsc-notice code, .dsc-setup code, .dsc-cmd code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  font-family: var(--dsc-mono); font-size: var(--dsc-fs-sm);
   background: var(--dsw-alias-bg-layer-2); padding: 1px 5px; border-radius: 4px;
 }
 .dsc-setup {
-  border: 1px solid var(--dsw-alias-brand-primary); border-radius: 10px;
+  border: 1px solid var(--dsw-alias-brand-primary); border-radius: var(--dsc-box-r);
   background: var(--dsw-alias-bg-layer-1); padding: 10px 12px;
-  display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--dsw-alias-label-secondary);
+  display: flex; flex-direction: column; gap: var(--dsc-gap);
+  font-size: var(--dsc-fs-md); color: var(--dsw-alias-label-secondary);
 }
-.dsc-setup-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsc-setup-line { display: flex; align-items: center; gap: var(--dsc-gap); flex-wrap: wrap; }
 .dsc-setup-strong { color: var(--dsw-alias-label-primary); }
-.dsc-code { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); }
-.dsc-code-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 16px; letter-spacing: .12em; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.dsc-cmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 8px; border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
+.dsc-code { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 7px 10px; border-radius: var(--dsc-ctl-r); background: var(--dsw-alias-bg-layer-2); }
+.dsc-code-value { font-family: var(--dsc-mono); font-size: var(--dsc-fs-lg); letter-spacing: .12em; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsc-cmd { display: flex; align-items: center; gap: var(--dsc-gap); flex-wrap: wrap; padding: 5px 8px; border-radius: var(--dsc-ctl-r); background: var(--dsw-alias-bg-layer-2); }
 .dsc-cmd code { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
 .dsc-logs {
-  margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: 7px;
+  margin: 0; padding: var(--dsc-gap) 10px; max-height: 200px; overflow: auto; border-radius: var(--dsc-ctl-r);
   background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap;
+  font-family: var(--dsc-mono); font-size: var(--dsc-fs-sm); line-height: 1.5; white-space: pre-wrap;
 }
-.dsc-picker { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); display: flex; flex-direction: column; overflow: hidden; }
-.dsc-picker-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.dsc-picker { border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsc-box-r); background: var(--dsw-alias-bg-layer-1); display: flex; flex-direction: column; overflow: hidden; }
+.dsc-picker-head { display: flex; align-items: center; gap: var(--dsc-gap); padding: var(--dsc-gap) 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
 .dsc-input {
-  flex: 1 1 auto; min-width: 0; height: 24px; padding: 0 8px; font: inherit; font-size: 11.5px;
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px;
+  flex: 1 1 auto; min-width: 0; height: var(--dsc-ctl-h); padding: 0 10px;
+  font-family: inherit; font-size: var(--dsc-fs-md); line-height: 1;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: var(--dsc-ctl-r);
   background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
 }
 .dsc-input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .dsc-picker-list { max-height: 260px; overflow: auto; }
-.dsc-picker-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 11.5px; cursor: pointer; }
+.dsc-picker-row { display: flex; align-items: center; gap: var(--dsc-gap); padding: 5px 10px; border-top: 1px solid var(--dsw-alias-border-l1); font-size: var(--dsc-fs-md); cursor: pointer; }
 .dsc-picker-row:first-child { border-top: none; }
 .dsc-picker-row:hover { background: var(--dsw-alias-bg-layer-2); }
 .dsc-check { width: 14px; height: 14px; flex: none; accent-color: var(--dsw-alias-brand-primary); }
-.dsc-hint { padding: 7px 10px; font-size: 10.5px; color: var(--dsw-alias-label-secondary); border-top: 1px solid var(--dsw-alias-border-l1); }
+.dsc-hint { padding: 7px 10px; font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); border-top: 1px solid var(--dsw-alias-border-l1); }
 `
 
     /**
@@ -426,7 +447,13 @@ window.__ModuleLoader__.load({
       return h('span', { className: 'dsc-chip', 'data-state': props.state ?? 'idle', title: props.title }, props.children)
     }
 
-    /** One button. */
+    /**
+     * One button.
+     *
+     * `kind` changes colour and `square` changes width — nothing is allowed to
+     * change its own height or font size, which is how a toolbar ends up with
+     * three different button sizes.
+     */
     function Btn(props) {
       return h(
         'button',
@@ -434,7 +461,7 @@ window.__ModuleLoader__.load({
           type: 'button',
           className: 'dsc-btn',
           'data-kind': props.kind,
-          'data-size': props.size,
+          'data-square': props.square === true ? 'true' : undefined,
           title: props.title,
           disabled: props.disabled === true,
           onClick: props.onClick,
@@ -551,7 +578,7 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: 'dsc-code' },
                 h('span', { className: 'dsc-code-value' }, code ?? '····-····'),
-                h(Btn, { kind: 'primary', size: 'wide', onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
+                h(Btn, { kind: 'primary', onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
                 code !== null ? h(CopyLine, { t, command: code }) : null,
               ),
               h('span', null, t('setup.waiting')),
@@ -561,10 +588,10 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'dsc-actions' },
               gh.available !== true
-                ? h(Btn, { kind: 'primary', size: 'wide', onClick: () => globalThis.open('https://cli.github.com/', '_blank', 'noopener,noreferrer') }, 'cli.github.com')
+                ? h(Btn, { kind: 'primary', onClick: () => globalThis.open('https://cli.github.com/', '_blank', 'noopener,noreferrer') }, 'cli.github.com')
                 : missing.length > 0
-                  ? h(Btn, { kind: 'primary', size: 'wide', disabled: busy, onClick: () => void start('refresh') }, t('action.grantScopes'))
-                  : h(Btn, { kind: 'primary', size: 'wide', disabled: busy, onClick: () => void start('login') }, t('action.signIn')),
+                  ? h(Btn, { kind: 'primary', disabled: busy, onClick: () => void start('refresh') }, t('action.grantScopes'))
+                  : h(Btn, { kind: 'primary', disabled: busy, onClick: () => void start('login') }, t('action.signIn')),
               h(Btn, { disabled: busy, onClick: onChanged }, t('action.recheck')),
             ),
         attempt.state === 'succeeded' ? h('span', null, t('setup.succeeded')) : null,
@@ -720,7 +747,7 @@ window.__ModuleLoader__.load({
             { className: 'dsc-right' },
             data.hasBuildWorkflow ? h(Btn, { disabled: busy !== '', title: t('action.build'), onClick: () => onAction('build', data) }, busy === `build:${data.repo}` ? '…' : t('action.build')) : null,
             data.hasReleaseWorkflow ? h(Btn, { kind: 'primary', disabled: busy !== '', title: t('action.release'), onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? '…' : t('action.release')) : null,
-            h(Btn, { kind: 'quiet', onClick: () => setOpen((value) => !value), title: open ? t('action.collapse') : t('action.expand') }, open ? '▴' : '▾'),
+            h(Btn, { kind: 'quiet', square: true, onClick: () => setOpen((value) => !value), title: open ? t('action.collapse') : t('action.expand') }, open ? '▴' : '▾'),
           ),
         ),
         open
