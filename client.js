@@ -142,6 +142,8 @@ window.__ModuleLoader__.load({
       'setup.needRepos': '还没有登记仓库。',
       'setup.codeHint': '在浏览器里打开下面的地址，输入这个一次性代码：',
       'setup.waiting': '等待授权…（在浏览器里完成即可，这里会自动继续）',
+      'setup.requestingCode': '正在向 GitHub 申请一次性码…',
+      'setup.codePending': '码还没到。等它出现再打开授权页面——提前打开只会得到一个没有内容可输入的页面。',
       'setup.succeeded': '授权成功，正在读取账号…',
       'setup.failed': '授权未完成：{reason}',
       'setup.expired': '一次性代码已过期，请重新开始。',
@@ -242,6 +244,8 @@ window.__ModuleLoader__.load({
       'setup.needRepos': 'No repository is registered yet.',
       'setup.codeHint': 'Open the address below in your browser and enter this one-time code:',
       'setup.waiting': 'Waiting for authorization… finish in the browser and this continues by itself.',
+      'setup.requestingCode': 'Requesting a one-time code from GitHub…',
+      'setup.codePending': 'The code has not arrived yet. Wait for it before opening the authorization page — opening early leaves you with nothing to enter.',
       'setup.succeeded': 'Authorized. Reading the account…',
       'setup.failed': 'Sign-in did not finish: {reason}',
       'setup.expired': 'The one-time code expired. Start again.',
@@ -561,21 +565,35 @@ window.__ModuleLoader__.load({
       // Poll only while an attempt is pending: waking up every two seconds for the
       // rest of the session would be work nobody asked for.
       const pending = attempt.state === 'pending' || attempt.state === 'running'
+      /**
+       * `onChanged` is passed as an inline arrow, so its identity changes on every
+       * render of the parent. Keeping it in a dependency array therefore tore this
+       * interval down and restarted it whenever anything re-rendered — and a timer
+       * that is reset more often than it fires never fires at all, which is how the
+       * one-time code could sit unread in the Host while the panel showed nothing.
+       * A ref carries the latest callback without being a dependency.
+       */
+      const onChangedRef = React.useRef(onChanged)
+      onChangedRef.current = onChanged
       React.useEffect(() => {
         if (!pending) return undefined
-        const timer = globalThis.setInterval(() => {
-          void (async () => {
-            const result = await postJson('/auth-state', {}, STATUS_TIMEOUT_MS)
-            if (!result.ok || result.payload?.ok !== true) return
-            const next = result.payload.value
-            setAttempt(next)
-            if (next.state === 'succeeded') onChanged()
-          })()
-        }, AUTH_POLL_MS)
+        let cancelled = false
+        /* Ask once immediately: the code usually exists by the time /auth-start
+           answers, so waiting a full interval just to see it is pure latency. */
+        const poll = async () => {
+          const result = await postJson('/auth-state', {}, STATUS_TIMEOUT_MS)
+          if (cancelled || !result.ok || result.payload?.ok !== true) return
+          const next = result.payload.value
+          setAttempt(next)
+          if (next.state === 'succeeded') onChangedRef.current()
+        }
+        void poll()
+        const timer = globalThis.setInterval(() => { void poll() }, AUTH_POLL_MS)
         return () => {
+          cancelled = true
           globalThis.clearInterval(timer)
         }
-      }, [pending, onChanged])
+      }, [pending])
 
       const cancel = React.useCallback(async () => {
         await postJson('/auth-cancel', {}, STATUS_TIMEOUT_MS)
@@ -604,15 +622,18 @@ window.__ModuleLoader__.load({
           ? h(
               React.Fragment,
               null,
-              h('span', { className: 'dsc-setup-strong' }, t('setup.codeHint')),
+              h('span', { className: 'dsc-setup-strong' }, code === null ? t('setup.requestingCode') : t('setup.codeHint')),
               h(
                 'div',
                 { className: 'dsc-code' },
                 h('span', { className: 'dsc-code-value' }, code ?? '····-····'),
-                h(Btn, { kind: 'primary', onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
+                /* Opening the page before the code exists is the reported failure:
+                   the browser shows GitHub's device page and there is nothing to
+                   type. The button therefore stays disabled until there is a code. */
+                h(Btn, { kind: 'primary', disabled: code === null, onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
                 code !== null ? h(CopyLine, { t, command: code }) : null,
               ),
-              h('span', null, t('setup.waiting')),
+              h('span', null, code === null ? t('setup.codePending') : t('setup.waiting')),
               h('div', { className: 'dsc-actions' }, h(Btn, { onClick: cancel }, t('action.cancelSignIn'))),
             )
           : h(

@@ -88,6 +88,17 @@ const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
 const AUTH_TIMEOUT_MS = 10 * 60 * 1000
 
 /**
+ * How long `auth-start` waits for `gh` to print the one-time code before answering.
+ *
+ * The code normally appears under a second, but the first `gh` invocation after a
+ * logout has been measured taking longer, and answering before it exists is what
+ * produced "the authorization page opened but there was no code": the panel had a
+ * URL to open and nothing to enter. Bounded, so a genuinely stuck `gh` still
+ * reports back instead of hanging the request.
+ */
+const AUTH_CODE_WAIT_MS = 8000
+
+/**
  * Scopes the panel actually needs. `repo` covers private repositories, releases
  * and the Actions API; `workflow` is what allows dispatching one. Nothing here
  * needs `admin:*`, so the guide asks for the minimum that makes the buttons work.
@@ -1190,9 +1201,38 @@ export function apply(ctx, rawConfig) {
       return
     }
     startAuth(mode, scopes)
-    // `gh` needs a moment to reach GitHub and print the code; the panel polls
-    // `auth-state`, so this only confirms that the attempt began.
-    writeJson(res, 202, { ok: true, value: { ...authSnapshot(), scopes, gh: ghPath, note: `waiting for the one-time code from ${current.configSource} configuration` } })
+    /*
+     * Wait, briefly, for the code to exist before answering.
+     *
+     * Returning the snapshot immediately means the first thing the panel renders
+     * has `code: null` — and if it offers "open the authorization page" in that
+     * state, clicking it opens the fallback URL with no code to enter. Waiting here
+     * is what makes the code and the button appear together.
+     */
+    const deadline = Date.now() + AUTH_CODE_WAIT_MS
+    let waited = 0
+    for (;;) {
+      const snapshot = authSnapshot()
+      if (typeof snapshot.code === 'string' && snapshot.code !== '') break
+      // A finished or failed attempt will never produce a code; stop waiting.
+      if (snapshot.state !== 'pending' && snapshot.state !== 'running') break
+      if (Date.now() >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      waited += 150
+    }
+    const value = authSnapshot()
+    writeJson(res, 202, {
+      ok: true,
+      value: {
+        ...value,
+        scopes,
+        gh: ghPath,
+        waitedMs: waited,
+        /** False when the code has not arrived yet, so the panel can say so. */
+        ready: typeof value.code === 'string' && value.code !== '',
+        note: `waiting for the one-time code from ${current.configSource} configuration`,
+      },
+    })
   }
 
   const authStateHandler = async (req, res) => {
