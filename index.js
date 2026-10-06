@@ -295,32 +295,63 @@ export async function readAuthStatus(ghPath, timeoutMs) {
 }
 
 /**
+ * Whether a candidate is a command name to look up on PATH, rather than a path.
+ *
+ * This has to be decided by shape, not by `path.isAbsolute`: on POSIX a Windows
+ * path like `C:\Program Files\GitHub CLI\gh.exe` is *not* absolute, so an
+ * `isAbsolute` test reads it as a bare command name and hands it straight to
+ * `spawn`. That is exactly the bug the mount check caught on a Linux runner —
+ * "spawn C:\Program Files\GitHub CLI\gh.exe ENOENT" — and it would have broken
+ * gh resolution for every non-Windows install.
+ *
+ * @param {string} value - a trimmed candidate.
+ * @returns {boolean} true when the value names a command to resolve through PATH.
+ */
+function isCommandName(value) {
+  return !/[/\\]/.test(value)
+}
+
+/**
  * Where `gh` is.
  *
- * The Host is a child of the desktop app, so its PATH is the user's environment,
- * not this module's developer shell. An explicit path is honoured first, then a
- * short list of the places the Windows installer actually uses — otherwise the
- * panel would report "gh not found" on a machine where `gh` works fine in a
- * terminal.
+ * Precedence is deliberate: an explicit configuration wins outright, even when
+ * the file is not there. A typo should surface as `ENOENT` naming the path the
+ * user configured, not as a silent switch to whichever `gh` happens to be on
+ * PATH — that is the kind of "works on my machine" failure nobody can debug.
+ * Only the built-in guesses are checked against the filesystem, and the Windows
+ * ones are only considered on Windows.
  *
  * @param {object} config - resolved config.
- * @returns {string} an absolute path, or the bare command name for PATH lookup.
+ * @param {string} [platform] - `process.platform`, injectable so the Windows
+ *   candidate list can be tested from a POSIX machine and vice versa.
+ * @returns {string} an absolute path, or a command name for PATH lookup.
  */
-export function resolveGhPath(config) {
-  const candidates = [
-    config.ghPath,
-    process.env.DSH_GH_PATH,
-    process.env.DSH_GITHUB_CLI,
-    'C:\\Program Files\\GitHub CLI\\gh.exe',
-    join(process.env.LOCALAPPDATA ?? '', 'Programs', 'GitHub CLI', 'gh.exe'),
-    join(process.env.ProgramFiles ?? '', 'GitHub CLI', 'gh.exe'),
-  ]
-  for (const candidate of candidates) {
-    if (typeof candidate !== 'string' || candidate.trim() === '') continue
-    const value = candidate.trim()
-    if (!isAbsolute(value)) return value
-    if (existsSync(value)) return value
+export function resolveGhPath(config, platform = process.platform) {
+  const configured = text(config?.ghPath)
+  if (configured !== '') return configured
+
+  for (const value of [process.env.DSH_GH_PATH, process.env.DSH_GITHUB_CLI]) {
+    const fromEnv = text(value)
+    if (fromEnv !== '') return fromEnv
   }
+
+  // The Windows installer's locations are only candidates where they can exist;
+  // on POSIX they would be dead weight at best and — as this function learned the
+  // hard way — an outright wrong answer when tested for absoluteness.
+  const candidates = []
+  if (platform === 'win32') {
+    candidates.push(
+      'C:\\Program Files\\GitHub CLI\\gh.exe',
+      join(process.env.LOCALAPPDATA ?? '', 'Programs', 'GitHub CLI', 'gh.exe'),
+      join(process.env.ProgramFiles ?? '', 'GitHub CLI', 'gh.exe'),
+    )
+  }
+  for (const candidate of candidates) {
+    if (isCommandName(candidate)) continue
+    if (isAbsolute(candidate) && existsSync(candidate)) return candidate
+  }
+  // Nothing confirmed on disk: let the OS search PATH, which is right on POSIX
+  // and is the honest answer anywhere else.
   return 'gh'
 }
 

@@ -17,7 +17,7 @@
  * everyone to ignore the suite.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { collectRepo, effectiveConfig, ghJson, normalizeRepoEntry, parseAuthStatus, parseReposFile, readLocalState, readLocalVersion, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveSlug, runTool } from '../index.js'
@@ -90,9 +90,19 @@ check('owner prefixes a bare name', resolveSlug('SOH4C4759', 'dsh-plugin-restart
 check('owner is ignored for owner/name', resolveSlug('someone', 'a/b') === 'a/b')
 check('bare name without owner is refused', resolveSlug('', 'bare') === null)
 
-/* -- 4. gh resolution ------------------------------------------------------- */
+/* -- 4. gh resolution -------------------------------------------------------
+   The bug this section pins: `path.isAbsolute` says a Windows path is NOT
+   absolute on POSIX, so a resolver that trusted it handed
+   `C:\Program Files\GitHub CLI\gh.exe` to `spawn` as if it were a command name
+   on every Linux machine. */
 const ghPath = resolveGhPath(resolveConfig({ owner: 'SOH4C4759' }))
 check('gh resolves to something runnable', ghPath !== '', ghPath)
+check('an explicit command name is kept', resolveGhPath(resolveConfig({ ghPath: 'gh' }), 'linux') === 'gh')
+check('an explicit absolute path is kept', resolveGhPath(resolveConfig({ ghPath: join(tmpdir(), 'gh.exe') }), 'linux') === join(tmpdir(), 'gh.exe'))
+const posix = resolveGhPath(resolveConfig({}), 'linux')
+check('POSIX never answers with a Windows path', posix === 'gh', posix)
+const windows = resolveGhPath(resolveConfig({}), 'win32')
+check('Windows answers with a real path or the command name', windows === 'gh' || existsSync(windows), windows)
 
 /* -- 5. Local-state helpers -------------------------------------------------
    These run against real directories on any machine: the point is the
