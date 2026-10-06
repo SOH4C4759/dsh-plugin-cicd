@@ -8,21 +8,24 @@
 # The repository list is deliberately EMPTY here. Which repositories a machine
 # watches is deployment state, not package state: shipping a list would publish
 # one user's private repository names inside a public package, and every install
-# would then need to unpick it. Point the row at your own repositories from the
-# profile patch layer, which is applied after this one and wins:
+# would then need to unpick it.
+#
+# Do not hand-write the list either. `scripts/configure.mjs` owns a JSON file and
+# the panel re-reads it on every request, so a change applies without a restart:
+#
+#   node scripts/configure.mjs add <repo> --path <absolute dir>
+#
+# This row therefore carries only the machine-specific bits:
 #
 #   - id: dsh-plugin-cicd
 #     config:
+#       ghPath: 'C:\Program Files\GitHub CLI\gh.exe'
 #       owner: your-login
-#       ghPath: 'C:\Program Files\GitHub CLI\gh.exe'   # optional; PATH is tried
-#       repos:
-#         - repo: your-plugin
-#           localPath: 'F:\CodeProj\your-plugin'
-#         - repo: someone-else/their-plugin            # "owner/name" also works
 #
 # Full option list (each has a default, so only write what you change):
-#   owner             default ''      GitHub login used for bare `repo` entries
-#   repos             default []      strings, or { repo, localPath?, label? }
+#   owner             default ''      GitHub login for bare `repo` entries
+#   repos             default []      hand-written fallback; the managed file wins
+#   configFile        default ''      '' = <DSH_HOME>/dsh-plugin-cicd/repos.json
 #   defaultBranch     default main    ref used when the panel triggers a workflow
 #   buildWorkflow     default ci.yml  the workflow the 构建 button dispatches
 #   releaseWorkflow   default release.yml

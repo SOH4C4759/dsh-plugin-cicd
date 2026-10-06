@@ -90,7 +90,12 @@ jobs:
           mkdir -p dist
           ARCHIVE="dist/${NAME}-${VERSION}.zip"
           git archive --format=zip --prefix="${NAME}-${VERSION}/" -o "$ARCHIVE" "$GITHUB_SHA"
-          (cd dist && sha256sum "${NAME}-${VERSION}.zip" > SHA256SUMS.txt)
+          # Two shapes, because they answer different questions. The zip is the
+          # whole tree: readable, diffable, and what a reviewer wants. The npm
+          # tarball is the installable one — `dsh plugin add file:<tarball>` needs
+          # no unzip step and no checkout, which is what "download and use" means.
+          npm pack --pack-destination dist >/dev/null
+          (cd dist && sha256sum "${NAME}-${VERSION}.zip" "${NAME}-${VERSION}.tgz" > SHA256SUMS.txt)
           ls -l dist
           cat dist/SHA256SUMS.txt
 
@@ -110,6 +115,23 @@ jobs:
           # Run the checker against the UNPACKED ASSET: this is the step that
           # proves the released bytes — not the checkout — are installable.
           node "$STAGE/${NAME}-${VERSION}/scripts/verify-bundle.mjs" "$STAGE/${NAME}-${VERSION}"
+          node "$STAGE/${NAME}-${VERSION}/tests/host-checks.mjs"
+
+      - name: Prove the tarball is self-contained
+        env:
+          NAME: ${{ steps.identity.outputs.name }}
+          VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          set -euo pipefail
+          STAGE="$(mktemp -d)"
+          tar -xzf "dist/${NAME}-${VERSION}.tgz" -C "$STAGE"
+          # `npm pack` only carries the `files` allow-list, so this is the check that
+          # the allow-list is complete: a missing script would install fine and then
+          # leave the setup instructions pointing at a file that does not exist.
+          test -f "$STAGE/package/scripts/configure.mjs"
+          test -f "$STAGE/package/cordis.patch.yml"
+          node "$STAGE/package/scripts/verify-bundle.mjs" "$STAGE/package"
+          node "$STAGE/package/tests/host-checks.mjs"
 
       - name: Publish the release
         env:

@@ -101,6 +101,23 @@ window.__ModuleLoader__.load({
       'run.event': '触发：{event}',
       'confirm.publish': '公开发布 {tag}？发布后任何人可见，无法收回。',
       'confirm.cancel': '再想想',
+      'setup.title': '先完成设置',
+      'setup.ghMissing': '没有找到 gh CLI。发布台通过它访问 GitHub，所以这一步必须先做。',
+      'setup.ghMissingStep': '安装 GitHub CLI：',
+      'setup.authNeeded': 'gh 已安装，但还没有登录 GitHub。',
+      'setup.authStep1': '在终端里运行：',
+      'setup.authStep2': '按提示选择 GitHub.com → HTTPS → 用浏览器登录。',
+      'setup.authStep3': '完成后回到这里点「重新检测」。',
+      'setup.scopesNeeded': '当前凭据缺少权限：{scopes}。缺 repo 读不到私有仓库，缺 workflow 无法触发构建。',
+      'setup.scopesStep': '补授权（保留现有登录）：',
+      'setup.reposNeeded': '还没有登记任何仓库。用仓库自带的脚本登记，不必手改 profile 的 YAML：',
+      'setup.reposFile': '登记结果写在这里：',
+      'setup.recheck': '重新检测',
+      'setup.copy': '复制',
+      'setup.copied': '已复制',
+      'setup.configProblem': '配置文件读不了，面板按「没有仓库」处理：{reason}',
+      'setup.dropped': '有 {count} 条登记被忽略（名字不合法或重复）。',
+      'setup.help': '完整说明见插件仓库的 README。',
     }
 
     /** English dictionary, same key set. */
@@ -155,6 +172,23 @@ window.__ModuleLoader__.load({
       'run.event': 'event: {event}',
       'confirm.publish': 'Publish {tag} publicly? Once published, anyone can see it.',
       'confirm.cancel': 'Not yet',
+      'setup.title': 'Finish setup first',
+      'setup.ghMissing': 'The gh CLI was not found. The console reaches GitHub through it, so this comes first.',
+      'setup.ghMissingStep': 'Install GitHub CLI:',
+      'setup.authNeeded': 'gh is installed but not signed in to GitHub.',
+      'setup.authStep1': 'Run this in a terminal:',
+      'setup.authStep2': 'Choose GitHub.com → HTTPS, then sign in through the browser.',
+      'setup.authStep3': 'Come back here and press Re-check.',
+      'setup.scopesNeeded': 'The current credential is missing: {scopes}. Without repo, private repositories cannot be read; without workflow, a build cannot be triggered.',
+      'setup.scopesStep': 'Grant the missing scopes (this keeps the existing login):',
+      'setup.reposNeeded': 'No repository is registered yet. Register them with the script that ships with the plugin instead of editing the profile YAML by hand:',
+      'setup.reposFile': 'The list is written here:',
+      'setup.recheck': 'Re-check',
+      'setup.copy': 'Copy',
+      'setup.copied': 'Copied',
+      'setup.configProblem': 'The config file cannot be read, so the panel treats this as "no repositories": {reason}',
+      'setup.dropped': '{count} entry/entries were ignored (unusable or duplicate name).',
+      'setup.help': 'The full instructions are in the plugin repository README.',
     }
 
     const CSS = `
@@ -233,6 +267,26 @@ window.__ModuleLoader__.load({
   padding: 8px 12px; border-radius: 8px; font-size: 12px;
   border: 1px solid var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary);
 }
+
+/* First-run guidance. Bordered with the brand accent rather than an error colour:
+   "you have not set this up yet" is a normal state, not a failure. */
+.dsc-setup {
+  border: 1px solid var(--dsw-alias-brand-primary); border-radius: 11px;
+  background: var(--dsw-alias-bg-layer-1); padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.dsc-setup-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.dsc-setup-title { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsc-step { display: flex; flex-direction: column; gap: 6px; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
+.dsc-step-title { color: var(--dsw-alias-label-primary); }
+.dsc-ordered { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.dsc-cmd {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 7px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
+  color: var(--dsw-alias-label-primary);
+}
+.dsc-cmd code { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
 `
 
     /**
@@ -484,6 +538,144 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /** A command with a copy button, so the panel never asks anyone to retype one. */
+    function CopyLine(props) {
+      const { t, command } = props
+      const [copied, setCopied] = React.useState(false)
+      React.useEffect(() => {
+        if (!copied) return undefined
+        const timer = globalThis.setTimeout(() => {
+          setCopied(false)
+        }, 2_000)
+        return () => {
+          globalThis.clearTimeout(timer)
+        }
+      }, [copied])
+      return h(
+        'div',
+        { className: 'dsc-cmd' },
+        h('code', null, command),
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsc-btn',
+            'data-kind': 'quiet',
+            onClick: () => {
+              // Clipboard access needs a secure context; the loopback GUI is one, but a
+              // refusal must not be reported as a successful copy.
+              const write = globalThis.navigator?.clipboard?.writeText
+              if (typeof write !== 'function') {
+                setCopied(false)
+                return
+              }
+              void write
+                .call(globalThis.navigator.clipboard, command)
+                .then(() => {
+                  setCopied(true)
+                })
+                .catch(() => {
+                  setCopied(false)
+                })
+            },
+          },
+          copied ? t('setup.copied') : t('setup.copy'),
+        ),
+      )
+    }
+
+    /**
+     * First-run guidance.
+     *
+     * The panel's whole value depends on a credential it does not own, so the one
+     * state it must never leave unexplained is "there is nothing to show yet".
+     * Each missing piece is named, ordered, and paired with the exact command that
+     * fixes it — quoted from where this copy of the plugin is actually installed,
+     * because `node scripts/configure.mjs` is only correct from inside the source
+     * checkout.
+     */
+    function Setup(props) {
+      const { t, status, onRecheck } = props
+      const gh = status.gh ?? {}
+      const helper = status.helper ?? {}
+      const configure = typeof helper.configureScript === 'string' ? helper.configureScript : 'scripts/configure.mjs'
+      const configFile = typeof helper.configFile === 'string' ? helper.configFile : (typeof status.configFile === 'string' ? status.configFile : '')
+      const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
+      const steps = []
+
+      if (gh.available !== true) {
+        steps.push(
+          h(
+            'div',
+            { className: 'dsc-step', key: 'install' },
+            h('span', { className: 'dsc-step-title' }, t('setup.ghMissing')),
+            h('span', null, t('setup.ghMissingStep')),
+            h(CopyLine, { t, command: 'winget install --id GitHub.cli' }),
+            h('span', null, h('a', { className: 'dsc-btn', 'data-kind': 'quiet', href: 'https://cli.github.com/', target: '_blank', rel: 'noreferrer' }, 'cli.github.com')),
+          ),
+        )
+      } else if (gh.authenticated !== true) {
+        steps.push(
+          h(
+            'div',
+            { className: 'dsc-step', key: 'login' },
+            h('span', { className: 'dsc-step-title' }, t('setup.authNeeded')),
+            h('ol', { className: 'dsc-ordered' },
+              h('li', null, t('setup.authStep1')),
+              h('li', null, t('setup.authStep2')),
+              h('li', null, t('setup.authStep3')),
+            ),
+            h(CopyLine, { t, command: 'gh auth login' }),
+          ),
+        )
+      } else if (missing.length > 0) {
+        steps.push(
+          h(
+            'div',
+            { className: 'dsc-step', key: 'scopes' },
+            h('span', { className: 'dsc-step-title' }, t('setup.scopesNeeded', { scopes: missing.join(', ') })),
+            h('span', null, t('setup.scopesStep')),
+            h(CopyLine, { t, command: `gh auth refresh -h github.com -s ${missing.join(',')}` }),
+          ),
+        )
+      }
+
+      const repos = Array.isArray(status.repos) ? status.repos : []
+      if (repos.length === 0) {
+        steps.push(
+          h(
+            'div',
+            { className: 'dsc-step', key: 'repos' },
+            h('span', { className: 'dsc-step-title' }, t('setup.reposNeeded')),
+            h(CopyLine, { t, command: `node "${configure}" add owner/repo --path "F:\\CodeProj\\repo"` }),
+            h(CopyLine, { t, command: `node "${configure}" list` }),
+            configFile !== '' ? h('span', null, `${t('setup.reposFile')} ${configFile}`) : null,
+            h('span', null, t('setup.help')),
+          ),
+        )
+      }
+
+      if (steps.length === 0 && status.configProblem === null) return null
+
+      return h(
+        'div',
+        { className: 'dsc-setup' },
+        h(
+          'div',
+          { className: 'dsc-setup-head' },
+          h('span', { className: 'dsc-setup-title' }, t('setup.title')),
+          h('button', { type: 'button', className: 'dsc-btn', onClick: onRecheck }, t('setup.recheck')),
+        ),
+        status.configProblem !== null && status.configProblem !== undefined
+          ? h('div', { className: 'dsc-warn' }, t('setup.configProblem', { reason: String(status.configProblem) }))
+          : null,
+        Number(status.configDropped) > 0
+          ? h('div', { className: 'dsc-warn' }, t('setup.dropped', { count: String(status.configDropped) }))
+          : null,
+        ...steps,
+      )
+    }
+
     /** The console panel: header, one card per repository, and the notices. */
     function ConsolePage(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
@@ -645,23 +837,21 @@ window.__ModuleLoader__.load({
       if (status === null) {
         body.push(h('div', { className: 'dsc-empty', key: 'loading' }, t('state.loading')))
       } else {
-        if (status.gh?.available !== true) {
-          body.push(h('div', { className: 'dsc-warn', key: 'gh' }, t('state.ghMissing', { message: status.gh?.message ?? '' })))
-        } else if (status.gh?.authenticated !== true) {
-          body.push(h('div', { className: 'dsc-warn', key: 'gh-anon' }, t('state.ghAnonymous')))
+        // The setup block is shown for every reason the panel has nothing useful
+        // to render — and hidden once it does, so it never becomes furniture.
+        const needsSetup = status.gh?.available !== true
+          || status.gh?.authenticated !== true
+          || (Array.isArray(status.gh?.missingScopes) && status.gh.missingScopes.length > 0)
+          || (Array.isArray(status.repos) && status.repos.length === 0)
+          || (status.configProblem !== null && status.configProblem !== undefined)
+        if (needsSetup) {
+          body.push(h(Setup, { key: 'setup', t, status, onRecheck: () => { void loadStatus(); void loadOverview({ force: true }) } }))
         }
-        if (overview?.unconfigured === true) {
-          body.push(
-            h(
-              'div',
-              { className: 'dsc-notice', key: 'unconfigured' },
-              t('state.unconfigured'),
-            ),
-          )
-        } else {
-          for (const data of repos) {
-            body.push(h(RepoCard, { key: data.repo, t, data, busy, onAction, onPublish: (tag) => onPublish(data.repo, tag), logs, onLogs }))
-          }
+        if (overview?.configProblem) {
+          body.push(h('div', { className: 'dsc-warn', key: 'config' }, t('setup.configProblem', { reason: String(overview.configProblem) })))
+        }
+        for (const data of repos) {
+          body.push(h(RepoCard, { key: data.repo, t, data, busy, onAction, onPublish: (tag) => onPublish(data.repo, tag), logs, onLogs }))
         }
       }
 

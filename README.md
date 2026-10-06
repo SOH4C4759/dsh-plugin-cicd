@@ -20,29 +20,67 @@ dsh plugin --profile desktop add "link:F:\CodeProj\dsh-plugin-cicd"
 
 装完需要重启 DSH 才会被组合进运行时（宿主半边与浏览器半边都要）。
 
-## 配置：仓库列表是可配置的
+## 别人怎么装（下载即用）
 
-包本身**不带仓库列表**。哪些仓库被监视是部署状态，不是包状态——把某个人的私有仓库名打包进公开包，每个安装者都得先去拆它。所以列表写在 profile 的 `cordis.patch.yml`（它在包自带的 patch 之后应用，会覆盖它）：
+Release 里有两个资产，回答两个不同的问题：
+
+| 资产 | 用途 |
+|---|---|
+| `dsh-plugin-cicd-<version>.tgz` | **可安装的那份**：一条命令装，不用解压、不需要本地检出 |
+| `dsh-plugin-cicd-<version>.zip` | 整棵仓库树，给人看/审/做 diff |
+| `SHA256SUMS.txt` | 上面两个的校验和（用途是"确认你下载的没坏"，不是防篡改——见 [RELEASING.md](RELEASING.md)） |
+
+```powershell
+# 1. 下载 tgz（或从 Release 页面直接下）
+gh release download v0.1.0 -R SOH4C4759/dsh-plugin-cicd -p '*.tgz'
+
+# 2. 装进你的 profile（把 desktop 换成你自己的）
+dsh plugin --profile desktop add "file:$PWD\dsh-plugin-cicd-0.1.0.tgz"
+
+# 3. 重启 DSH，侧边栏出现「发布台」图标
+```
+
+`file:` 指向本地的 tgz，pnpm 会解包进 profile 的 `node_modules`。这条路径已经在发布资产上实测过：解包后 `scripts/verify-bundle.mjs` 与 `tests/host-checks.mjs` 都能跑通，`cordis.patch.yml` 与 `scripts/configure.mjs` 都在包里（`npm pack` 只带 `files` 白名单，CI 每次都验这两点）。
+
+## 配置：用脚本，不要手改 YAML
+
+包本身**不带仓库列表**——哪些仓库被监视是部署状态，不是包状态；把某个人的私有仓库名打进公开包，每个安装者都得先去拆它。
+
+列表放在一个由脚本管理的 JSON 文件里（默认 `%USERPROFILE%\.dsh\dsh-plugin-cicd\repos.json`），profile patch 只留两行机器相关的配置：
 
 ```yaml
 - id: dsh-plugin-cicd
   config:
     owner: SOH4C4759
-    ghPath: 'C:\Program Files\GitHub CLI\gh.exe'   # 可选，默认从 PATH 与常见安装位置解析
-    repos:
-      - repo: dsh-plugin-restart
-        localPath: 'F:\CodeProj\dsh-plugin-restart'
-      - repo: dsh-ui-sound
-        localPath: 'F:\CodeProj\dsh-ui-sound'
-      - repo: someone-else/their-plugin            # 直接写 "owner/name" 也可以
+    ghPath: 'C:\Program Files\GitHub CLI\gh.exe'
 ```
 
-选项（每个都有默认值，只写你要改的）：
+日常操作全走插件自带的脚本：
+
+```powershell
+$cfg = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-plugin-cicd\scripts\configure.mjs"
+# 或直接用你的检出目录：F:\CodeProj\dsh-plugin-cicd\scripts\configure.mjs
+
+node $cfg list                                             # 现在登记了什么
+node $cfg add dsh-plugin-restart --path F:\CodeProj\dsh-plugin-restart
+node $cfg add someone-else/their-plugin                    # 别人的仓库，只读
+node $cfg remove dsh-plugin-restart
+node $cfg owner SOH4C4759
+node $cfg check                                            # 面板此刻会显示什么
+```
+
+- 插件**每次请求都重读这个文件**，所以 `add` 在面板下一次轮询（默认 30 秒）就生效，**不需要重启**。
+- 写入是原子的（临时文件 + rename），旧版本留一份 `.bak`。
+- 校验与宿主同规则：仓库名必须是 `name` 或 `owner/name`，`--path` 必须是绝对路径——相对路径会按宿主进程的目录解析，那不是你的 shell 目录。
+- 文件读不了或格式错时，面板会**明确报错**而不是假装"没有仓库"，并回退到 patch 里的 `repos`。
+
+patch 里仍可用的选项（每个都有默认值）：
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `owner` | `''` | 裸 `repo` 名用的 GitHub 账号；写全 `owner/name` 时可不填 |
-| `repos` | `[]` | 字符串，或 `{ repo, localPath?, label? }`；`localPath` 必须是绝对路径 |
+| `owner` | `''` | 裸 `repo` 名用的 GitHub 账号；配置文件里的同名值优先 |
+| `repos` | `[]` | 手写兜底；配置文件存在时以文件为准 |
+| `configFile` | `<DSH_HOME>\dsh-plugin-cicd\repos.json` | 受管列表的位置 |
 | `defaultBranch` | `main` | 面板触发 workflow 用的 ref |
 | `buildWorkflow` | `ci.yml` | `构建` 按钮触发的 workflow |
 | `releaseWorkflow` | `release.yml` | `发布` 按钮触发的 workflow |
@@ -54,6 +92,19 @@ dsh plugin --profile desktop add "link:F:\CodeProj\dsh-plugin-cicd"
 | `enabled` | `true` | 关掉后路由只回「已停用」，不碰 GitHub |
 
 所有值都做**夹取**而不是拒绝：手写的 patch 不该能让宿主起不来，最坏情况是某个路由报告「未配置」。
+
+## 首次使用：授权引导
+
+面板不自己存凭据，它用你机器上的 `gh`。所以第一次打开时它可能无事可做——这时面板不会只显示一句"读不到"，而是**按缺什么给什么**：
+
+| 状态 | 面板给出 |
+|---|---|
+| 找不到 `gh` | `winget install --id GitHub.cli`（可一键复制）+ cli.github.com 链接 |
+| 装了但没登录 | `gh auth login`，并说明选 GitHub.com → HTTPS → 浏览器登录，完成后点「重新检测」 |
+| 登录了但缺 scope | `gh auth refresh -h github.com -s repo,workflow`，缺哪个补哪个 |
+| 没有任何仓库 | `configure.mjs add ...` 的实际命令 + 配置文件路径 |
+
+scope 是从 `gh auth status` 真读出来的：缺 `repo` 读不到私有仓库，缺 `workflow` 无法触发构建——这两种情况在按钮按下去之前就会说明白。细粒度 token 不报 scope 行时按"未知"处理，不会误报成"全都缺"。
 
 ## 为什么复用 `gh` 而不是自带 token
 

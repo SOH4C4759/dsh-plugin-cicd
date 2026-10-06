@@ -29,7 +29,8 @@
 
 import { execFile } from 'node:child_process'
 import { existsSync, readFileSync } from 'node:fs'
-import { isAbsolute, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 /** Plugin name shown in loader logs. */
@@ -39,6 +40,9 @@ export const name = 'dsh-plugin-cicd'
 export const inject = ['webServer']
 
 const runFile = promisify(execFile)
+
+/** This module's directory, so the panel can quote a command that really runs here. */
+const moduleDir = dirname(fileURLToPath(import.meta.url))
 
 /** Route namespace owned by this plugin. */
 const ROUTE_PREFIX = '/api/dsh-cicd'
@@ -53,6 +57,16 @@ const MAX_REPOS = 40
 const DEFAULT_LOG_TAIL_LINES = 120
 const MAX_LOG_TAIL_LINES = 400
 const MAX_BODY_BYTES = 32 * 1024
+
+/** The managed repository list, written by `scripts/configure.mjs`. */
+const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
+
+/**
+ * Scopes the panel actually needs. `repo` covers private repositories, releases
+ * and the Actions API; `workflow` is what allows dispatching one. Nothing here
+ * needs `admin:*`, so the guide asks for the minimum that makes the buttons work.
+ */
+const REQUIRED_SCOPES = ['repo', 'workflow']
 
 /** A repository argument is passed to `gh` as one argv element; keep it shaped like a slug. */
 const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -132,7 +146,152 @@ export function resolveConfig(raw) {
     overviewTtlMs: clampNumber(raw?.overviewTtlMs, 0, MAX_OVERVIEW_TTL_MS, DEFAULT_OVERVIEW_TTL_MS),
     logTailLines: clampNumber(raw?.logTailLines, 20, MAX_LOG_TAIL_LINES, DEFAULT_LOG_TAIL_LINES),
     pollSeconds: clampNumber(raw?.pollSeconds, 10, 900, DEFAULT_POLL_SECONDS),
+    configFile: text(raw?.configFile),
   }
+}
+
+/**
+ * Where the managed repository list lives.
+ *
+ * The row config is the hand-written source of truth, and editing YAML by hand is
+ * exactly the cost this file removes: `scripts/configure.mjs` owns a JSON file
+ * instead, and the row only has to say where it is. One path per machine (under
+ * `DSH_HOME`, not per profile) because "which repositories do I watch" is a
+ * property of the machine, not of a profile.
+ *
+ * @param {object} config - resolved config.
+ * @returns {string} absolute path of the managed file.
+ */
+export function resolveConfigFilePath(config) {
+  if (typeof config.configFile === 'string' && config.configFile !== '') return config.configFile
+  const home = text(process.env.DSH_HOME) !== '' ? text(process.env.DSH_HOME) : join(process.env.USERPROFILE ?? process.env.HOME ?? '.', '.dsh')
+  return join(home, 'dsh-plugin-cicd', DEFAULT_CONFIG_FILE_NAME)
+}
+
+/**
+ * Parse the managed repository file.
+ *
+ * Rejects rather than repairs: a file this plugin wrote and cannot read is a
+ * symptom worth showing, and silently falling back to "no repositories" would
+ * look identical to "you configured nothing yet".
+ *
+ * @param {string} raw - file contents.
+ * @returns {{ok: true, owner: string, repos: object[]}|{ok: false, message: string}}
+ */
+export function parseReposFile(raw) {
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (error) {
+    return { ok: false, message: `not valid JSON: ${error.message}` }
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, message: 'expected a JSON object with "owner" and "repos"' }
+  }
+  const declared = Array.isArray(parsed.repos) ? parsed.repos : []
+  if (parsed.repos !== undefined && !Array.isArray(parsed.repos)) {
+    return { ok: false, message: '"repos" must be an array' }
+  }
+  const repos = []
+  const seen = new Set()
+  for (const entry of declared.slice(0, MAX_REPOS)) {
+    const normalized = normalizeRepoEntry(entry)
+    if (normalized === null || seen.has(normalized.repo)) continue
+    seen.add(normalized.repo)
+    repos.push(normalized)
+  }
+  const dropped = declared.length - repos.length
+  return {
+    ok: true,
+    owner: text(parsed.owner),
+    repos,
+    ...(dropped > 0 ? { dropped } : {}),
+  }
+}
+
+/**
+ * Resolve the configuration a request should actually use.
+ *
+ * The managed file is read on every call rather than at plugin load, so
+ * `configure.mjs add` takes effect on the next poll instead of at the next
+ * restart. The row config stays the fallback for a machine that never created the
+ * file, which keeps a hand-written patch working exactly as documented.
+ *
+ * @param {object} config - the row-resolved config.
+ * @returns {object} config plus `repos`, `owner`, `configSource`, `configFile`, `configProblem`.
+ */
+export function effectiveConfig(config) {
+  const file = resolveConfigFilePath(config)
+  let raw = null
+  try {
+    raw = readFileSync(file, 'utf8')
+  } catch {
+    raw = null
+  }
+  if (raw === null) {
+    return { ...config, configFile: file, configSource: config.repos.length > 0 ? 'row' : 'none', configProblem: null }
+  }
+  const parsed = parseReposFile(raw)
+  if (!parsed.ok) {
+    return { ...config, configFile: file, configSource: 'file-invalid', configProblem: `${file}: ${parsed.message}` }
+  }
+  return {
+    ...config,
+    owner: parsed.owner !== '' ? parsed.owner : config.owner,
+    repos: parsed.repos,
+    configFile: file,
+    configSource: 'file',
+    configProblem: null,
+    ...(parsed.dropped !== undefined ? { configDropped: parsed.dropped } : {}),
+  }
+}
+
+/**
+ * Parse `gh auth status`.
+ *
+ * `gh` prints this on stderr and includes a "Token scopes: '...'" line only when
+ * the credential actually carries scopes. The scope list is the part that
+ * matters: an authenticated token without `workflow` can read a run but cannot
+ * dispatch one, and that difference is invisible until a button fails.
+ *
+ * @param {string} text - combined stdout and stderr of `gh auth status`.
+ * @returns {{authenticated: boolean, account: string|null, scopes: string[], missingScopes: string[]}}
+ */
+export function parseAuthStatus(text) {
+  const source = typeof text === 'string' ? text : ''
+  const authenticated = /Logged in to \S+ account/i.test(source)
+  const accountMatch = /Logged in to \S+ account ([A-Za-z0-9-]+)/i.exec(source)
+  const scopesMatch = /Token scopes:\s*(.+)/i.exec(source)
+  const scopes = []
+  if (scopesMatch !== null) {
+    for (const token of scopesMatch[1].split(/[,\s]+/)) {
+      const cleaned = token.replace(/['"]/g, '').trim()
+      if (cleaned !== '') scopes.push(cleaned)
+    }
+  }
+  return {
+    authenticated,
+    account: accountMatch === null ? null : accountMatch[1],
+    scopes,
+    // An empty scope list is "unknown", not "none": `gh` omits the line for a
+    // credential it cannot introspect (a fine-grained token), and reporting that
+    // as "missing repo, workflow" would send the user to fix a non-problem.
+    missingScopes: scopes.length === 0 ? [] : REQUIRED_SCOPES.filter((scope) => !scopes.includes(scope)),
+  }
+}
+
+/**
+ * Read the current authentication posture from `gh`.
+ * @param {string} ghPath - resolved executable.
+ * @param {number} timeoutMs - deadline.
+ * @returns {Promise<object>} what the panel needs to guide a first run.
+ */
+export async function readAuthStatus(ghPath, timeoutMs) {
+  const result = await runTool(ghPath, ['auth', 'status'], timeoutMs)
+  // `gh auth status` exits non-zero when nothing is logged in, so the streams are
+  // the evidence and the exit code is not.
+  const combined = `${result.stdout}\n${result.stderr}`
+  return { ...parseAuthStatus(combined), exitCode: result.code, raw: combined.trim() }
 }
 
 /**
@@ -539,6 +698,15 @@ export function apply(ctx, rawConfig) {
   /** Overview cache: the panel polls, and each poll fans out three calls per repo. */
   let cache = null
 
+  /**
+   * The configuration this request should use.
+   *
+   * Resolved per request so `scripts/configure.mjs add` is visible on the next
+   * poll rather than at the next restart — the whole point of moving the list out
+   * of the hand-edited patch.
+   */
+  const live = () => effectiveConfig(config)
+
   const guard = (req, res) => {
     if (!isTrustedRequest(req)) {
       writeJson(res, 403, { ok: false, code: 'forbidden', message: 'release-console routes are loopback-only' })
@@ -552,45 +720,64 @@ export function apply(ctx, rawConfig) {
   }
 
   /** Resolve a body's `repo` to a configured entry, refusing anything unconfigured. */
-  const findEntry = (body) => {
+  const findEntry = (current, body) => {
     const requested = typeof body?.repo === 'string' ? body.repo.trim() : ''
     if (requested === '') return { ok: false, message: 'body.repo is required' }
-    const entry = config.repos.find((candidate) => candidate.repo === requested || candidate.label === requested)
-    if (entry === undefined) return { ok: false, message: `repository is not configured in this row: ${requested}` }
-    const slug = resolveSlug(config.owner, entry.repo)
-    if (slug === null) return { ok: false, message: 'set `owner` in the row config, or write the entry as "owner/repo"' }
+    const entry = current.repos.find((candidate) => candidate.repo === requested || candidate.label === requested)
+    if (entry === undefined) return { ok: false, message: `repository is not configured: ${requested}` }
+    const slug = resolveSlug(current.owner, entry.repo)
+    if (slug === null) return { ok: false, message: 'set `owner` in the config, or write the entry as "owner/repo"' }
     return { ok: true, entry, slug }
   }
 
   const statusHandler = async (req, res) => {
     if (!guard(req, res)) return
-    const [versionResult, accountResult] = await Promise.all([
-      ghRun(ghPath, ['--version'], Math.min(config.requestTimeoutMs, 10_000)),
-      // `--jq` prints a bare string, so this is not a JSON call.
-      ghRun(ghPath, ['api', 'user', '--jq', '.login'], Math.min(config.requestTimeoutMs, 15_000)),
+    const current = live()
+    const [versionResult, auth] = await Promise.all([
+      ghRun(ghPath, ['--version'], Math.min(current.requestTimeoutMs, 10_000)),
+      readAuthStatus(ghPath, Math.min(current.requestTimeoutMs, 15_000)),
     ])
-    const account = accountResult.ok ? firstLine(accountResult.stdout) : ''
+    // The scope list comes from `gh auth status`, not from `api user`: an
+    // authenticated token that cannot dispatch a workflow is a state the panel
+    // has to name before a button fails on it.
+    const authenticated = auth.authenticated || (versionResult.ok && auth.exitCode === 0)
     writeJson(res, 200, {
       ok: true,
       value: {
-        enabled: config.enabled,
+        enabled: current.enabled,
         gh: {
           path: ghPath,
           available: versionResult.ok,
           version: versionResult.ok ? firstLine(versionResult.stdout) : null,
-          authenticated: account !== '',
-          account: account === '' ? null : account,
+          authenticated,
+          account: auth.account,
+          scopes: auth.scopes,
+          missingScopes: authenticated ? auth.missingScopes : [],
           message: versionResult.ok ? null : versionResult.message,
         },
         config: {
-          owner: config.owner,
-          defaultBranch: config.defaultBranch,
-          buildWorkflow: config.buildWorkflow,
-          releaseWorkflow: config.releaseWorkflow,
-          pollSeconds: config.pollSeconds,
-          overviewTtlMs: config.overviewTtlMs,
+          owner: current.owner,
+          defaultBranch: current.defaultBranch,
+          buildWorkflow: current.buildWorkflow,
+          releaseWorkflow: current.releaseWorkflow,
+          pollSeconds: current.pollSeconds,
+          overviewTtlMs: current.overviewTtlMs,
         },
-        repos: config.repos.map((entry) => ({ repo: entry.repo, label: entry.label !== '' ? entry.label : entry.repo, localPath: entry.localPath })),
+        configFile: current.configFile,
+        configSource: current.configSource,
+        configProblem: current.configProblem,
+        configDropped: current.configDropped ?? 0,
+        /**
+         * Commands quoted from where this copy is actually installed. A panel that
+         * told the user to run `node scripts/configure.mjs` would be wrong for
+         * everyone who installed the plugin somewhere else.
+         */
+        helper: {
+          pluginRoot: moduleDir,
+          configureScript: join(moduleDir, 'scripts', 'configure.mjs'),
+          configFile: current.configFile,
+        },
+        repos: current.repos.map((entry) => ({ repo: entry.repo, label: entry.label !== '' ? entry.label : entry.repo, localPath: entry.localPath })),
       },
     })
   }
@@ -598,38 +785,39 @@ export function apply(ctx, rawConfig) {
   const overviewHandler = async (req, res) => {
     if (!guard(req, res)) return
     const body = await readJsonBody(req)
-    if (!config.enabled) {
+    const current = live()
+    if (!current.enabled) {
       writeJson(res, 200, { ok: true, value: { fetchedAt: new Date().toISOString(), disabled: true, repos: [] } })
       return
     }
-    if (config.repos.length === 0) {
+    if (current.repos.length === 0) {
       writeJson(res, 200, {
         ok: true,
         value: { fetchedAt: new Date().toISOString(), repos: [], unconfigured: true },
       })
       return
     }
-    const fresh = cache !== null && Date.now() - cache.at < config.overviewTtlMs
+    const fresh = cache !== null && Date.now() - cache.at < current.overviewTtlMs
     if (fresh && body?.force !== true) {
       writeJson(res, 200, { ok: true, value: { ...cache.value, cached: true } })
       return
     }
 
     const settled = await Promise.allSettled(
-      config.repos.map((entry) => collectRepo({ config, ghPath, entry })),
+      current.repos.map((entry) => collectRepo({ config: current, ghPath, entry })),
     )
     const repos = settled.map((outcome, index) => {
-      const entry = config.repos[index]
+      const entry = current.repos[index]
       if (outcome.status === 'fulfilled') return outcome.value
       return {
         repo: entry.repo,
-        slug: resolveSlug(config.owner, entry.repo),
+        slug: resolveSlug(current.owner, entry.repo),
         label: entry.label !== '' ? entry.label : entry.repo,
         localPath: entry.localPath,
         problems: [String(outcome.reason?.message ?? outcome.reason)],
       }
     })
-    const value = { fetchedAt: new Date().toISOString(), cached: false, repos }
+    const value = { fetchedAt: new Date().toISOString(), cached: false, repos, configSource: current.configSource, configProblem: current.configProblem }
     cache = { at: Date.now(), value }
     writeJson(res, 200, { ok: true, value })
   }
@@ -637,7 +825,7 @@ export function apply(ctx, rawConfig) {
   const runsHandler = async (req, res) => {
     if (!guard(req, res)) return
     const body = await readJsonBody(req)
-    const target = findEntry(body)
+    const target = findEntry(live(), body)
     if (!target.ok) {
       writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
       return
@@ -656,7 +844,7 @@ export function apply(ctx, rawConfig) {
   const dispatchHandler = async (req, res) => {
     if (!guard(req, res)) return
     const body = await readJsonBody(req)
-    const target = findEntry(body)
+    const target = findEntry(live(), body)
     if (!target.ok) {
       writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
       return
@@ -690,7 +878,7 @@ export function apply(ctx, rawConfig) {
   const runActionHandler = async (req, res) => {
     if (!guard(req, res)) return
     const body = await readJsonBody(req)
-    const target = findEntry(body)
+    const target = findEntry(live(), body)
     if (!target.ok) {
       writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
       return
@@ -725,7 +913,7 @@ export function apply(ctx, rawConfig) {
   const releaseActionHandler = async (req, res) => {
     if (!guard(req, res)) return
     const body = await readJsonBody(req)
-    const target = findEntry(body)
+    const target = findEntry(live(), body)
     if (!target.ok) {
       writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
       return
@@ -760,7 +948,7 @@ export function apply(ctx, rawConfig) {
   const logsHandler = async (req, res) => {
     if (!guard(req, res)) return
     const body = await readJsonBody(req)
-    const target = findEntry(body)
+    const target = findEntry(live(), body)
     if (!target.ok) {
       writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
       return
@@ -794,11 +982,13 @@ export function apply(ctx, rawConfig) {
     const dispose = ctx.webServer.register({ kind: 'exact', path, handler })
     if (typeof ctx.effect === 'function') ctx.effect(() => dispose, `dsh-plugin-cicd: ${path}`)
   }
+  const startup = live()
   ctx.logger?.info?.(
-    'dsh-plugin-cicd: routes mounted at %s (gh=%s, repos=%d, owner=%s)',
+    'dsh-plugin-cicd: routes mounted at %s (gh=%s, repos=%d from %s, owner=%s)',
     ROUTE_PREFIX,
     ghPath,
-    config.repos.length,
-    config.owner === '' ? '(unset)' : config.owner,
+    startup.repos.length,
+    startup.configSource,
+    startup.owner === '' ? '(unset)' : startup.owner,
   )
 }

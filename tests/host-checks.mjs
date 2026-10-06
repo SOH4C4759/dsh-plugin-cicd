@@ -17,9 +17,10 @@
  * everyone to ignore the suite.
  */
 
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { collectRepo, ghJson, normalizeRepoEntry, readLocalState, readLocalVersion, resolveConfig, resolveGhPath, resolveSlug, runTool } from '../index.js'
+import { collectRepo, effectiveConfig, ghJson, normalizeRepoEntry, parseAuthStatus, parseReposFile, readLocalState, readLocalVersion, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveSlug, runTool } from '../index.js'
 
 const results = []
 let failed = 0
@@ -105,7 +106,69 @@ check('no localPath explains itself', noPath.available === false && noPath.reaso
 const notARepo = await readLocalState(tmpdir(), 5_000)
 check('a non-checkout explains itself', notARepo.available === false, notARepo.reason)
 
-/* -- 6. Live checks (opt-in) ------------------------------------------------ */
+/* -- 6. The managed config file ---------------------------------------------
+   The file exists so the repository list can change without hand-editing YAML,
+   which makes its failure modes the interesting part: a file the plugin cannot
+   read must be reported, never silently treated as "no repositories". */
+const scratch = mkdtempSync(join(tmpdir(), 'dsh-cicd-'))
+const managedFile = join(scratch, 'repos.json')
+
+check('an explicit config path is honoured', resolveConfigFilePath(resolveConfig({ configFile: managedFile })) === managedFile)
+check('the default path lives under DSH_HOME', resolveConfigFilePath(resolveConfig({})).endsWith(join('dsh-plugin-cicd', 'repos.json')))
+
+const parsedGood = parseReposFile(JSON.stringify({ owner: 'me', repos: ['a', { repo: 'b', localPath: join(tmpdir(), 'b') }, '!!bad', 'a'] }))
+check('the managed file parses', parsedGood.ok === true && parsedGood.owner === 'me', parsedGood.ok ? '' : parsedGood.message)
+check('valid entries are kept', parsedGood.ok === true && parsedGood.repos.length === 2, parsedGood.ok ? parsedGood.repos.map((entry) => entry.repo).join(',') : '')
+check('dropped entries are counted', parsedGood.ok === true && parsedGood.dropped === 2, String(parsedGood.ok ? parsedGood.dropped : 'n/a'))
+check('invalid JSON is refused', parseReposFile('{').ok === false)
+check('a bare array is refused', parseReposFile('[]').ok === false)
+check('a non-array repos is refused', parseReposFile('{"repos":{}}').ok === false)
+check('a missing repos key is an empty list', parseReposFile('{"owner":"me"}').repos.length === 0)
+
+/* File absent: the hand-written row stays authoritative. */
+const rowOnly = effectiveConfig(resolveConfig({ owner: 'me', repos: ['solo'], configFile: managedFile }))
+check('an absent file falls back to the row', rowOnly.configSource === 'row' && rowOnly.repos.length === 1, rowOnly.configSource)
+check('an absent file is not a problem', rowOnly.configProblem === null)
+
+writeFileSync(managedFile, JSON.stringify({ owner: 'file-owner', repos: [{ repo: 'from-file' }] }), 'utf8')
+const fileBacked = effectiveConfig(resolveConfig({ owner: 'row-owner', repos: ['from-row'], configFile: managedFile }))
+check('the file wins over the row list', fileBacked.repos.length === 1 && fileBacked.repos[0].repo === 'from-file')
+check('the file owner wins too', fileBacked.owner === 'file-owner', fileBacked.owner)
+check('the source is reported as file', fileBacked.configSource === 'file')
+
+writeFileSync(managedFile, 'not json at all', 'utf8')
+const broken = effectiveConfig(resolveConfig({ owner: 'me', repos: ['from-row'], configFile: managedFile }))
+check('a broken file is reported, not swallowed', broken.configSource === 'file-invalid' && typeof broken.configProblem === 'string', String(broken.configProblem))
+check('a broken file does not silently empty the list', broken.repos.length === 1 && broken.repos[0].repo === 'from-row')
+
+/* -- 7. `gh auth status` parsing --------------------------------------------
+   The scope list is the difference between "the buttons work" and "the button
+   fails when you press it", so it is parsed rather than assumed. */
+const loggedIn = parseAuthStatus([
+  'github.com',
+  '  ✓ Logged in to github.com account SOH4C4759 (keyring)',
+  '  - Active account: true',
+  "  - Token scopes: 'gist', 'read:org', 'repo', 'workflow'",
+].join('\n'))
+check('a signed-in status is recognised', loggedIn.authenticated === true)
+check('the account is extracted', loggedIn.account === 'SOH4C4759', String(loggedIn.account))
+check('scopes are extracted', loggedIn.scopes.join(',') === 'gist,read:org,repo,workflow', loggedIn.scopes.join(','))
+check('a complete scope set reports nothing missing', loggedIn.missingScopes.length === 0)
+
+const partialScopes = parseAuthStatus("  ✓ Logged in to github.com account me (keyring)\n  - Token scopes: 'repo'")
+check('a partial scope set names what is missing', partialScopes.missingScopes.join(',') === 'workflow', partialScopes.missingScopes.join(','))
+
+/* A fine-grained token prints no scope line at all. Reporting that as "missing
+   repo, workflow" would send the user to fix something that is not broken. */
+const opaqueToken = parseAuthStatus('  ✓ Logged in to github.com account me (keyring)\n  - Token: github_pat_***')
+check('an unreported scope list is unknown, not empty', opaqueToken.missingScopes.length === 0)
+check('an unreported scope list stays empty', opaqueToken.scopes.length === 0)
+
+const signedOut = parseAuthStatus('github.com\n  X No oauth token found for github.com')
+check('a signed-out status is recognised', signedOut.authenticated === false)
+check('a signed-out status reports no account', signedOut.account === null)
+
+/* -- 8. Live checks (opt-in) ------------------------------------------------ */
 if (process.env.DSH_CICD_LIVE === '1') {
   console.log('\n-- live checks (DSH_CICD_LIVE=1) --')
   const version = await runTool(ghPath, ['--version'], 10_000)

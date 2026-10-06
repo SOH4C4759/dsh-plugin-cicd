@@ -75,7 +75,10 @@ jobs:
           VERSION="$(node -p 'require("./package.json").version')"
           mkdir -p dist
           git archive --format=zip --prefix="${NAME}-${VERSION}/" -o "dist/${NAME}-${VERSION}.zip" "$GITHUB_SHA"
-          (cd dist && sha256sum "${NAME}-${VERSION}.zip" > SHA256SUMS.txt)
+          # The installable artifact, built on every push so a change to `files`
+          # that breaks the published package fails here and not at tag time.
+          npm pack --pack-destination dist >/dev/null
+          (cd dist && sha256sum "${NAME}-${VERSION}.zip" "${NAME}-${VERSION}.tgz" > SHA256SUMS.txt)
           ls -l dist
       - name: prove the archive is a complete package
         run: |
@@ -88,6 +91,20 @@ jobs:
           # The checks travel with the archive, so a release can be exercised the
           # same way the push was.
           node "$STAGE/${NAME}-${VERSION}/tests/host-checks.mjs"
+      - name: prove the tarball is self-contained
+        run: |
+          set -euo pipefail
+          NAME="$(node -p 'require("./package.json").name')"
+          VERSION="$(node -p 'require("./package.json").version')"
+          STAGE="$(mktemp -d)"
+          tar -xzf "dist/${NAME}-${VERSION}.tgz" -C "$STAGE"
+          # `npm pack` carries only the `files` allow-list, so this is what proves
+          # the allow-list is complete — including the script the panel tells the
+          # user to run.
+          test -f "$STAGE/package/scripts/configure.mjs"
+          test -f "$STAGE/package/cordis.patch.yml"
+          node "$STAGE/package/scripts/verify-bundle.mjs" "$STAGE/package"
+          node "$STAGE/package/tests/host-checks.mjs"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-build
