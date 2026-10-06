@@ -18,6 +18,7 @@
     "README.md",
     "RELEASING.md",
     "scripts",
+    "tests",
     "LICENSE"
   ],
   "meta": {

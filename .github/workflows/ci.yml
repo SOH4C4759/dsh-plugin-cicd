@@ -9,48 +9,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  node-suites:
-    name: Node suites (node ${{ matrix.node }})
-    runs-on: windows-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['20', '22', '24']
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: ${{ matrix.node }}
-      - name: selfcheck
-        run: node tests/selfcheck.mjs
-      - name: routes
-        run: node tests/routes.mjs
-
-  powershell-suites:
-    name: PowerShell suites (Windows PowerShell 5.1)
-    runs-on: windows-latest
-    timeout-minutes: 25
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-      # The suites stage a throwaway copy of node.exe under a unique image name,
-      # so no real process can ever be matched. They find node.exe on PATH.
-      - name: supervisor e2e
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/supervisor-e2e.ps1
-      - name: host arm e2e
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/host-arm-e2e.ps1
-      - name: tray selfcheck
-        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/tray-selfcheck.ps1
-
-  # The bundle half of CI: continuous build. It builds the exact archive the
-  # release workflow publishes, so a broken package fails on the commit that
-  # introduced it instead of at tag time.
-  bundle:
-    name: Bundle contract (node ${{ matrix.node }})
+  # The Host half's boundaries are testable without DSH and without a network:
+  # what a hand-written patch is allowed to ask for, and what a repository name
+  # turns into once it becomes one argv element of a `gh` invocation. The live
+  # half of the same file is opt-in (DSH_CICD_LIVE=1) because it needs an
+  # authenticated gh and a specific repository state; a suite that fails for
+  # reasons unrelated to the change trains everyone to ignore it.
+  suites:
+    name: Host checks (node ${{ matrix.node }})
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
@@ -58,6 +29,25 @@ jobs:
       matrix:
         # 20 is the floor package.json declares, 24 is the runtime the desktop
         # app actually ships — the two ends of the supported range.
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - name: host checks
+        run: node tests/host-checks.mjs
+
+  # The bundle half of CI: continuous build. It checks the manifest contract and
+  # then builds the exact archive the release workflow would publish, so a broken
+  # package fails on the push that introduced it rather than at tag time.
+  bundle:
+    name: Bundle contract (node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
         node: ['20', '24']
     steps:
       - uses: actions/checkout@v5
@@ -95,6 +85,9 @@ jobs:
           STAGE="$(mktemp -d)"
           unzip -q "dist/${NAME}-${VERSION}.zip" -d "$STAGE"
           node "$STAGE/${NAME}-${VERSION}/scripts/verify-bundle.mjs" "$STAGE/${NAME}-${VERSION}"
+          # The checks travel with the archive, so a release can be exercised the
+          # same way the push was.
+          node "$STAGE/${NAME}-${VERSION}/tests/host-checks.mjs"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-build
