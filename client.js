@@ -153,6 +153,8 @@ window.__ModuleLoader__.load({
       'setup.stalledNoOutput': 'gh 完全没有输出',
       'setup.stalledQuietOutput': 'gh 只输出了空白内容（通常在重试连接）',
       'setup.stalledSaid': 'gh 说：{text}',
+      'setup.unreachableTitle': 'github.com 当前连不上',
+      'setup.unreachable': '提示：从本机连不上 github.com:443，而设备码流程需要它——如果一直不出码，多半是这个原因。gh 已经在尝试；若它其实能连上（例如走代理），码仍会出现。',
       'setup.succeeded': '授权成功，正在读取账号…',
       'setup.failed': '授权未完成：{reason}',
       'setup.expired': '一次性代码已过期，请重新开始。',
@@ -259,6 +261,8 @@ window.__ModuleLoader__.load({
       'setup.stalledNoOutput': 'gh has printed nothing at all',
       'setup.stalledQuietOutput': 'gh has printed only whitespace (it is usually retrying the connection)',
       'setup.stalledSaid': 'gh said: {text}',
+      'setup.unreachableTitle': 'github.com is not reachable right now',
+      'setup.unreachable': 'Note: this machine cannot open a connection to github.com:443, which the device-code flow needs — if no code appears, that is the likely reason. gh is already trying; if it can reach GitHub by another route (a proxy, for instance) the code will still appear.',
       'setup.succeeded': 'Authorized. Reading the account…',
       'setup.failed': 'Sign-in did not finish: {reason}',
       'setup.expired': 'The one-time code expired. Start again.',
@@ -647,6 +651,12 @@ window.__ModuleLoader__.load({
                 code !== null ? h(CopyLine, { t, command: code }) : null,
               ),
               h('span', null, code === null ? t('setup.codePending') : t('setup.waiting')),
+              /* Advisory, never a refusal: the probe cannot see a proxy that gh
+                 might be using, so this reports a likely cause without stopping
+                 an attempt that could still succeed. */
+              pending && attempt.reachable === false
+                ? h('span', { className: 'dsc-warn' }, h('strong', null, t('setup.unreachableTitle')), ' — ', t('setup.unreachable'))
+                : null,
               /* A stalled attempt keeps running — the code has been observed to
                  arrive once the network recovers — so this reports the wait
                  instead of declaring a failure the user would have to retry. */

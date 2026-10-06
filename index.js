@@ -842,7 +842,7 @@ export function apply(ctx, rawConfig) {
   }
 
   const authSnapshot = () => authAttempt === null
-    ? { state: 'idle', mode: null, code: null, url: null, message: null, startedAt: null, waitedMs: 0, stalled: false, outputBytes: 0, outputExcerpt: null }
+    ? { state: 'idle', mode: null, code: null, url: null, message: null, startedAt: null, waitedMs: 0, stalled: false, reachable: null, outputBytes: 0, outputExcerpt: null }
     : {
         state: authAttempt.state,
         mode: authAttempt.mode,
@@ -861,6 +861,12 @@ export function apply(ctx, rawConfig) {
          * button, and the hard limit stays the code's own lifetime.
          */
         stalled: authAttempt.stalled === true,
+        /**
+         * The advisory probe's verdict: `true`, `false`, or `null` while unknown.
+         * `false` is a hint, never a refusal — gh may still succeed through a path
+         * this probe cannot see.
+         */
+        reachable: typeof authAttempt.reachable === 'boolean' ? authAttempt.reachable : null,
         outputBytes: authAttempt.output.length,
         /**
          * What `gh` actually printed, for the case where it printed nothing useful.
@@ -942,6 +948,19 @@ export function apply(ctx, rawConfig) {
       }, AUTH_CODE_DEADLINE_MS)
       if (typeof stallTimer.unref === 'function') stallTimer.unref()
       attempt.stallTimer = stallTimer
+      /*
+       * Advisory only, and deliberately not awaited: `null` means "not answered
+       * yet", `false` is a hint that the wait will probably fail. It must never
+       * prevent the attempt — see the note in `auth-start`.
+       */
+      attempt.reachable = null
+      void canReach('github.com', 443, 3000)
+        .then((ok) => {
+          if (authAttempt === attempt) attempt.reachable = ok
+        })
+        .catch(() => {
+          if (authAttempt === attempt) attempt.reachable = null
+        })
     }
     return attempt
   }
@@ -1269,23 +1288,14 @@ export function apply(ctx, rawConfig) {
       return
     }
     /*
-     * Answer immediately — do not hold the request open waiting for the code.
+     * Answer immediately, and never let the probe decide.
      *
-     * An earlier version waited up to 8s so the first render would have the code.
-     * Measured consequence: where github.com is unreachable, `gh` hangs printing
-     * nothing, so the wait became a fixed 8-second delay on every single click, and
-     * after it the panel still had no code and no reason. The panel now renders a
-     * "requesting a code" state and polls, so nothing is gained by blocking here.
+     * A raw TCP connect is not the same question as "can gh complete its HTTP
+     * device-code request": a proxy or an HTTP-layer filter makes the two disagree,
+     * and where they disagreed here the refusal blocked a login that would have
+     * worked. So gh is always started, the probe runs alongside it, and its verdict
+     * reaches the panel through `auth-state` as a warning. Nothing is held open.
      */
-    const reachable = await canReach('github.com', 443, 4000)
-    if (!reachable) {
-      writeJson(res, 502, {
-        ok: false,
-        code: 'unreachable',
-        message: 'cannot open a connection to github.com:443 — the device-code flow needs it, and without it gh prints no code at all. Check the network and try again.',
-      })
-      return
-    }
     startAuth(mode, scopes)
     const value = authSnapshot()
     writeJson(res, 202, {
