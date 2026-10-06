@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node-suites:
+    name: Node suites (node ${{ matrix.node }})
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '22', '24']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - name: selfcheck
+        run: node tests/selfcheck.mjs
+      - name: routes
+        run: node tests/routes.mjs
+
+  powershell-suites:
+    name: PowerShell suites (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      # The suites stage a throwaway copy of node.exe under a unique image name,
+      # so no real process can ever be matched. They find node.exe on PATH.
+      - name: supervisor e2e
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/supervisor-e2e.ps1
+      - name: host arm e2e
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/host-arm-e2e.ps1
+      - name: tray selfcheck
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests/tray-selfcheck.ps1
+
+  # The bundle half of CI: continuous build. It builds the exact archive the
+  # release workflow publishes, so a broken package fails on the commit that
+  # introduced it instead of at tag time.
+  bundle:
+    name: Bundle contract (node ${{ matrix.node }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 20 is the floor package.json declares, 24 is the runtime the desktop
+        # app actually ships — the two ends of the supported range.
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+      - name: bundle contract
+        run: node scripts/verify-bundle.mjs
+
+  package:
+    name: Build the release package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: verify the bundle contract
+        run: node scripts/verify-bundle.mjs
+      - name: build the package
+        run: |
+          set -euo pipefail
+          NAME="$(node -p 'require("./package.json").name')"
+          VERSION="$(node -p 'require("./package.json").version')"
+          mkdir -p dist
+          git archive --format=zip --prefix="${NAME}-${VERSION}/" -o "dist/${NAME}-${VERSION}.zip" "$GITHUB_SHA"
+          (cd dist && sha256sum "${NAME}-${VERSION}.zip" > SHA256SUMS.txt)
+          ls -l dist
+      - name: prove the archive is a complete package
+        run: |
+          set -euo pipefail
+          NAME="$(node -p 'require("./package.json").name')"
+          VERSION="$(node -p 'require("./package.json").version')"
+          STAGE="$(mktemp -d)"
+          unzip -q "dist/${NAME}-${VERSION}.zip" -d "$STAGE"
+          node "$STAGE/${NAME}-${VERSION}/scripts/verify-bundle.mjs" "$STAGE/${NAME}-${VERSION}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ github.event.repository.name }}-build
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30

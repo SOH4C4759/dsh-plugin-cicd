@@ -1,0 +1,40 @@
+# dsh-plugin-cicd bundle patch.
+#
+# One Host row named after the package. The Host half owns the loopback route
+# family `/api/dsh-cicd/*` and shells out to the machine's authenticated `gh`;
+# the browser half is declared by `dsh.client` in package.json and registers the
+# sidebar entry plus the `main` panel.
+#
+# The repository list is deliberately EMPTY here. Which repositories a machine
+# watches is deployment state, not package state: shipping a list would publish
+# one user's private repository names inside a public package, and every install
+# would then need to unpick it. Point the row at your own repositories from the
+# profile patch layer, which is applied after this one and wins:
+#
+#   - id: dsh-plugin-cicd
+#     config:
+#       owner: your-login
+#       ghPath: 'C:\Program Files\GitHub CLI\gh.exe'   # optional; PATH is tried
+#       repos:
+#         - repo: your-plugin
+#           localPath: 'F:\CodeProj\your-plugin'
+#         - repo: someone-else/their-plugin            # "owner/name" also works
+#
+# Full option list (each has a default, so only write what you change):
+#   owner             default ''      GitHub login used for bare `repo` entries
+#   repos             default []      strings, or { repo, localPath?, label? }
+#   defaultBranch     default main    ref used when the panel triggers a workflow
+#   buildWorkflow     default ci.yml  the workflow the 构建 button dispatches
+#   releaseWorkflow   default release.yml
+#   ghPath            default ''      empty = resolve from PATH and common installs
+#   requestTimeoutMs  default 20000   per `gh` invocation
+#   overviewTtlMs     default 15000   cache window; the panel polls through it
+#   logTailLines      default 120     how much of `--log-failed` the panel shows
+#   pollSeconds       default 30      how often the panel refreshes itself
+#   enabled           default true
+- insert:
+    - id: dsh-plugin-cicd
+      name: 'dsh-plugin-cicd'
+      config:
+        owner: ''
+        repos: []

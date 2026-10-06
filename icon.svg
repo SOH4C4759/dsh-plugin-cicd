@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" role="img" aria-label="Release Console">
+  <!-- An isometric package: the same glyph the sidebar entry draws, so the icon
+       in the list and the icon on the page are recognisably one thing. -->
+  <g fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
+    <path d="M8 1.6 2.4 4.5v7L8 14.4l5.6-2.9v-7L8 1.6Z" />
+    <path d="M2.6 4.6 8 7.3l5.4-2.7M8 7.3v6.9" />
+  </g>
+</svg>

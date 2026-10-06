@@ -1,0 +1,63 @@
+{
+  "name": "dsh-plugin-cicd",
+  "version": "0.1.0",
+  "description": "发布台（Release Console）for DeepSeek Harness: a sidebar entry and a full main-panel page that show what each repository has built, what it has released, and whether the local checkout is ahead of the release — with buttons to trigger a build, cut a release, and publish a draft. Reuses the machine's authenticated gh CLI, so the plugin stores no credential of its own.",
+  "type": "module",
+  "icon": "./icon.svg",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "icon.svg",
+    "cordis.patch.yml",
+    "README.md",
+    "RELEASING.md",
+    "scripts",
+    "LICENSE"
+  ],
+  "meta": {
+    "title": "发布台",
+    "description": "GitHub Actions 的持续构建与发布面板：每个仓库的最近一次运行、已发布的 Release、本地是否领先于发布，以及一键构建 / 发布 / 公开草稿。复用本机已登录的 gh，不另存凭据。"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "github-actions",
+    "release",
+    "ci",
+    "cd",
+    "gh-cli"
+  ],
+  "license": "MIT",
+  "author": "林冠宇 (SOH4C4759) <107021339+SOH4C4759@users.noreply.github.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SOH4C4759/dsh-plugin-cicd.git"
+  },
+  "homepage": "https://github.com/SOH4C4759/dsh-plugin-cicd#readme",
+  "bugs": {
+    "url": "https://github.com/SOH4C4759/dsh-plugin-cicd/issues"
+  }
+}
