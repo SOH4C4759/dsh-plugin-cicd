@@ -13,6 +13,7 @@
   "files": [
     "index.js",
     "client.js",
+    "lib",
     "icon.svg",
     "cordis.patch.yml",
     "README.md",

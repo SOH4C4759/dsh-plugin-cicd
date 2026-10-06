@@ -1,15 +1,22 @@
 /**
  * Browser half of the `dsh-plugin-cicd` bundle — 发布台 (Release Console).
  *
- * Two registrations, the same shape the shipped Plugin Manager panel uses:
- *   ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: PANEL_ID, … }, ConsolePage))
- *   ctx.slots.inject('sidebar.panellist', () => ctx.slots.register({ name: 'sidebar.panellist', id: PANEL_ID, … }, ConsoleIcon))
+ * Three registrations:
+ *   main                 the operating view: one compact row per repository
+ *   sidebar.panellist    its sidebar button
+ *   settings.section     「GitHub 账户」: sign-in, scopes, and the repository list
  *
- * The sidebar owns the button and the selection: clicking the icon addresses the
- * `main` panel with the same id, so the panel is a full column of the layout
- * rather than a floating card. Nothing here is positioned absolutely, and every
- * colour comes from `--dsw-alias-*`, so the panel follows the active theme
- * instead of shipping a palette of its own.
+ * The layout rule is density. This panel's job is to answer "which of my
+ * repositories needs attention" at a glance, and a card per repository with a
+ * path line, a run line and a release list answers it in three screens instead of
+ * one. So a row is ~32px and carries only what is actionable; everything else
+ * (path, releases, run history, logs) lives in the row's expansion.
+ *
+ * Nothing here requires a terminal. Signing in runs `gh auth login --web` from the
+ * Host and renders the one-time code; registering a repository is a tick on a list
+ * fetched from GitHub. The commands still exist — `configure.mjs` is the scripted
+ * path, and the setup block shows them collapsed — but they are the fallback, not
+ * the instruction.
  *
  * Deliberate choices:
  *   - No Harness Client package is required; only `react`, which is a platform
@@ -17,11 +24,10 @@
  *   - The stylesheet is tagged `data-plugin`/`data-plugin-css` so the loader's
  *     claimStyles/removeOwnedStyles cannot take it over or delete it.
  *   - A failed BACKGROUND poll never clears the last known state and never raises
- *     a banner: it only stops updating, so a sleeping laptop does not produce an
- *     error the user did not cause.
- *   - Publishing a draft is public and one-way, so it takes two clicks and says
- *     so in between.
- *   - Every request is bounded by a timeout, so a dead Host never hangs the panel.
+ *     a banner: it stops updating, so a sleeping machine produces no error the
+ *     user did not cause.
+ *   - Colours come only from `--dsw-alias-*`, so both themes stay legible.
+ *   - Publishing a draft is public and one-way, so it takes two clicks.
  */
 
 window.__ModuleLoader__.load({
@@ -33,91 +39,110 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-cicd'
     /** Sidebar entry id and `main` slot key — the same value links the two. */
     const PANEL_ID = 'dsh-cicd'
+    /** Settings page id. `account` is a shipped section, so this must not reuse it. */
+    const SETTINGS_ID = 'github-account'
     const STYLE_ID = 'dsh-plugin-cicd-styles'
 
-    const STATUS_URL = '/api/dsh-cicd/status'
-    const OVERVIEW_URL = '/api/dsh-cicd/overview'
-    const RUNS_URL = '/api/dsh-cicd/runs'
-    const DISPATCH_URL = '/api/dsh-cicd/dispatch'
-    const RUN_ACTION_URL = '/api/dsh-cicd/run-action'
-    const RELEASE_ACTION_URL = '/api/dsh-cicd/release-action'
-    const LOGS_URL = '/api/dsh-cicd/logs'
-
-    /** Overview fans out three `gh` calls per repository, so it gets a longer deadline. */
+    const BASE = '/api/dsh-cicd'
     const STATUS_TIMEOUT_MS = 20_000
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
     const NOTICE_TTL_MS = 5_000
+    /** Fast enough that the one-time code appears while the user is still looking. */
+    const AUTH_POLL_MS = 2_000
 
     /** Simplified Chinese dictionary (key-set source of truth). */
     const zh = {
       'panel': '发布台',
       'title': '发布台',
       'subtitle': 'GitHub Actions 的构建与发布',
+      'settings.label': 'GitHub 账户',
+      'settings.title': 'GitHub 账户',
+      'settings.subtitle': '发布台用这台机器上的 gh 访问 GitHub，插件自己不保存任何凭据。',
       'action.refresh': '刷新',
+      'action.manage': '管理仓库',
+      'action.close': '收起',
       'action.build': '构建',
       'action.release': '发布',
-      'action.publishDraft': '公开发布草稿',
+      'action.publishDraft': '公开草稿',
       'action.confirmPublish': '确认公开？',
       'action.open': '打开',
-      'action.runs': '全部运行',
-      'action.logs': '失败日志',
+      'action.logs': '日志',
       'action.hideLogs': '收起日志',
       'action.rerun': '重跑',
       'action.cancel': '取消',
-      'action.busy': '进行中…',
-      'badge.published': '已发布',
-      'badge.unpublished': '未发布',
-      'badge.draft': '草稿',
-      'badge.dirty': '未提交 {count}',
-      'badge.ahead': '领先 {count}',
-      'badge.behind': '落后 {count}',
-      'badge.clean': '干净',
+      'action.expand': '详情',
+      'action.collapse': '收起',
+      'action.add': '添加',
+      'action.remove': '移除',
+      'action.signIn': '用浏览器登录 GitHub',
+      'action.recheck': '重新检测',
+      'action.grantScopes': '补齐权限',
+      'action.copy': '复制',
+      'action.copied': '已复制',
+      'action.openDevicePage': '打开授权页面',
+      'action.cancelSignIn': '取消登录',
+      'label.runs': '运行记录',
+      'chip.published': '已发布',
+      'chip.unpublished': '未发布',
+      'chip.draft': '草稿',
+      'chip.dirty': '未提交 {count}',
+      'chip.ahead': '领先 {count}',
+      'chip.behind': '落后 {count}',
+      'chip.private': '私有',
       'state.loading': '正在读取…',
-      'state.unconfigured': '还没有配置仓库：在 profile 的 cordis.patch.yml 里给 dsh-plugin-cicd 这一行写 repos。',
-      'state.ghMissing': '找不到 gh CLI，面板无法读取 GitHub：{message}',
-      'state.ghAnonymous': 'gh 已安装但未登录，私有仓库会读不到。',
       'state.hostGone': '无法连接 Host；面板会保留上一次的数据，稍后自动重试。',
       'state.timeout': '请求超时，Host 没有在时限内回答。',
-      'state.noRuns': '还没有运行记录。',
-      'state.noReleases': '还没有 Release。',
+      'state.noRuns': '还没有运行记录',
+      'state.noReleases': '还没有 Release',
       'state.dispatched': '已触发 {workflow}（{repo}）。',
-      'state.releaseDispatched': '已触发发布流程（{repo}）。运行结束后草稿会出现在这里。',
+      'state.releaseDispatched': '已触发发布流程（{repo}）；结束后草稿会出现在这里。',
       'state.published': '{tag} 已公开。',
       'state.rerun': '已请求重跑。',
       'state.cancelled': '已请求取消。',
       'state.actionFailed': '操作失败：{reason}',
-      'state.statusFailed': '读取 Host 状态失败：{reason}',
+      'state.registered': '已添加 {repo}。',
+      'state.removed': '已移除 {repo}。',
       'state.truncated': '（只显示最后 {lines} 行）',
       'meta.account': '账号',
       'meta.updated': '更新于 {time}',
       'meta.cached': '缓存',
-      'meta.version': '本地版本 {version}',
+      'meta.version': '本地',
       'meta.expectedTag': '期望 tag {tag}',
-      'meta.noLocal': '未配置本地路径',
-      'meta.localUnavailable': '本地状态不可用：{reason}',
+      'meta.noLocal': '未配置本地路径，无法对比本地状态',
       'meta.assets': '{count} 个资产',
+      'meta.path': '路径',
+      'meta.scopes': '权限',
+      'meta.noScopes': '（gh 未报告权限列表）',
+      'meta.gh': 'gh',
+      'meta.configFrom': '配置来源',
+      'meta.projectsRoot': '本地检出根目录',
+      'meta.projectsRootUnset': '未设置，添加仓库时无法自动找到本地检出',
       'run.unknown': '未知',
-      'run.event': '触发：{event}',
       'confirm.publish': '公开发布 {tag}？发布后任何人可见，无法收回。',
       'confirm.cancel': '再想想',
-      'setup.title': '先完成设置',
-      'setup.ghMissing': '没有找到 gh CLI。发布台通过它访问 GitHub，所以这一步必须先做。',
-      'setup.ghMissingStep': '安装 GitHub CLI：',
-      'setup.authNeeded': 'gh 已安装，但还没有登录 GitHub。',
-      'setup.authStep1': '在终端里运行：',
-      'setup.authStep2': '按提示选择 GitHub.com → HTTPS → 用浏览器登录。',
-      'setup.authStep3': '完成后回到这里点「重新检测」。',
-      'setup.scopesNeeded': '当前凭据缺少权限：{scopes}。缺 repo 读不到私有仓库，缺 workflow 无法触发构建。',
-      'setup.scopesStep': '补授权（保留现有登录）：',
-      'setup.reposNeeded': '还没有登记任何仓库。用仓库自带的脚本登记，不必手改 profile 的 YAML：',
-      'setup.reposFile': '登记结果写在这里：',
-      'setup.recheck': '重新检测',
-      'setup.copy': '复制',
-      'setup.copied': '已复制',
-      'setup.configProblem': '配置文件读不了，面板按「没有仓库」处理：{reason}',
-      'setup.dropped': '有 {count} 条登记被忽略（名字不合法或重复）。',
-      'setup.help': '完整说明见插件仓库的 README。',
+      'setup.needGh': '没有找到 gh CLI，发布台无法访问 GitHub。',
+      'setup.needSignIn': '还没有登录 GitHub。登录后这里会列出你的仓库。',
+      'setup.needScopes': '当前凭据缺少权限：{scopes}。',
+      'setup.scopeHint': '缺 repo 读不到私有仓库，缺 workflow 无法触发构建。',
+      'setup.needRepos': '还没有登记仓库。',
+      'setup.codeHint': '在浏览器里打开下面的地址，输入这个一次性代码：',
+      'setup.waiting': '等待授权…（在浏览器里完成即可，这里会自动继续）',
+      'setup.succeeded': '授权成功，正在读取账号…',
+      'setup.failed': '授权未完成：{reason}',
+      'setup.expired': '一次性代码已过期，请重新开始。',
+      'setup.cancelled': '已取消登录。',
+      'setup.advanced': '用命令行配置（可选）',
+      'setup.ghInstall': '安装 GitHub CLI（任选其一）',
+      'picker.title': '添加仓库',
+      'picker.search': '搜索仓库',
+      'picker.empty': '没有可添加的仓库（可能是没登录，或账号下没有仓库）。',
+      'picker.loading': '正在读取你的仓库…',
+      'picker.failed': '读取仓库列表失败：{reason}',
+      'picker.local': '本地检出',
+      'picker.noLocal': '未找到本地检出',
+      'picker.hint': '勾选即添加，取消勾选即移除；改动立刻生效，不需要重启。',
+      'picker.reload': '重新载入',
     }
 
     /** English dictionary, same key set. */
@@ -125,168 +150,192 @@ window.__ModuleLoader__.load({
       'panel': 'Release Console',
       'title': 'Release Console',
       'subtitle': 'Builds and releases from GitHub Actions',
+      'settings.label': 'GitHub account',
+      'settings.title': 'GitHub account',
+      'settings.subtitle': 'The console reaches GitHub through the gh CLI on this machine; the plugin stores no credential of its own.',
       'action.refresh': 'Refresh',
+      'action.manage': 'Repositories',
+      'action.close': 'Done',
       'action.build': 'Build',
       'action.release': 'Release',
-      'action.publishDraft': 'Publish draft',
-      'action.confirmPublish': 'Publish publicly?',
+      'action.publishDraft': 'Publish',
+      'action.confirmPublish': 'Publish?',
       'action.open': 'Open',
-      'action.runs': 'All runs',
-      'action.logs': 'Failed logs',
+      'action.logs': 'Logs',
       'action.hideLogs': 'Hide logs',
       'action.rerun': 'Re-run',
       'action.cancel': 'Cancel',
-      'action.busy': 'Working…',
-      'badge.published': 'Released',
-      'badge.unpublished': 'Unreleased',
-      'badge.draft': 'Draft',
-      'badge.dirty': '{count} uncommitted',
-      'badge.ahead': '{count} ahead',
-      'badge.behind': '{count} behind',
-      'badge.clean': 'Clean',
+      'action.expand': 'Details',
+      'action.collapse': 'Less',
+      'action.add': 'Add',
+      'action.remove': 'Remove',
+      'action.signIn': 'Sign in with a browser',
+      'action.recheck': 'Re-check',
+      'action.grantScopes': 'Grant scopes',
+      'action.copy': 'Copy',
+      'action.copied': 'Copied',
+      'action.openDevicePage': 'Open the authorization page',
+      'action.cancelSignIn': 'Cancel sign-in',
+      'label.runs': 'Runs',
+      'chip.published': 'Released',
+      'chip.unpublished': 'Unreleased',
+      'chip.draft': 'Draft',
+      'chip.dirty': '{count} uncommitted',
+      'chip.ahead': '{count} ahead',
+      'chip.behind': '{count} behind',
+      'chip.private': 'private',
       'state.loading': 'Loading…',
-      'state.unconfigured': 'No repositories configured yet: set `repos` on the dsh-plugin-cicd row in the profile cordis.patch.yml.',
-      'state.ghMissing': 'The gh CLI was not found, so the panel cannot read GitHub: {message}',
-      'state.ghAnonymous': 'gh is installed but not signed in; private repositories will not be readable.',
       'state.hostGone': 'Cannot reach the Host; the panel keeps the last known data and retries on its own.',
       'state.timeout': 'The request timed out without an answer from the Host.',
-      'state.noRuns': 'No runs yet.',
-      'state.noReleases': 'No releases yet.',
+      'state.noRuns': 'no runs yet',
+      'state.noReleases': 'no releases yet',
       'state.dispatched': 'Triggered {workflow} on {repo}.',
       'state.releaseDispatched': 'Release workflow triggered for {repo}; the draft appears here when it finishes.',
       'state.published': '{tag} is public now.',
       'state.rerun': 'Re-run requested.',
       'state.cancelled': 'Cancellation requested.',
       'state.actionFailed': 'The action failed: {reason}',
-      'state.statusFailed': 'Reading the Host status failed: {reason}',
+      'state.registered': 'Added {repo}.',
+      'state.removed': 'Removed {repo}.',
       'state.truncated': '(showing the last {lines} lines)',
       'meta.account': 'Account',
       'meta.updated': 'Updated {time}',
       'meta.cached': 'cached',
-      'meta.version': 'local version {version}',
+      'meta.version': 'local',
       'meta.expectedTag': 'expected tag {tag}',
-      'meta.noLocal': 'no local path configured',
-      'meta.localUnavailable': 'local state unavailable: {reason}',
+      'meta.noLocal': 'no local path, so local state cannot be compared',
       'meta.assets': '{count} assets',
+      'meta.path': 'Path',
+      'meta.scopes': 'Scopes',
+      'meta.noScopes': '(gh reported no scope list)',
+      'meta.gh': 'gh',
+      'meta.configFrom': 'Config from',
+      'meta.projectsRoot': 'Checkout root',
+      'meta.projectsRootUnset': 'not set, so adding a repository cannot find its local checkout',
       'run.unknown': 'unknown',
-      'run.event': 'event: {event}',
       'confirm.publish': 'Publish {tag} publicly? Once published, anyone can see it.',
       'confirm.cancel': 'Not yet',
-      'setup.title': 'Finish setup first',
-      'setup.ghMissing': 'The gh CLI was not found. The console reaches GitHub through it, so this comes first.',
-      'setup.ghMissingStep': 'Install GitHub CLI:',
-      'setup.authNeeded': 'gh is installed but not signed in to GitHub.',
-      'setup.authStep1': 'Run this in a terminal:',
-      'setup.authStep2': 'Choose GitHub.com → HTTPS, then sign in through the browser.',
-      'setup.authStep3': 'Come back here and press Re-check.',
-      'setup.scopesNeeded': 'The current credential is missing: {scopes}. Without repo, private repositories cannot be read; without workflow, a build cannot be triggered.',
-      'setup.scopesStep': 'Grant the missing scopes (this keeps the existing login):',
-      'setup.reposNeeded': 'No repository is registered yet. Register them with the script that ships with the plugin instead of editing the profile YAML by hand:',
-      'setup.reposFile': 'The list is written here:',
-      'setup.recheck': 'Re-check',
-      'setup.copy': 'Copy',
-      'setup.copied': 'Copied',
-      'setup.configProblem': 'The config file cannot be read, so the panel treats this as "no repositories": {reason}',
-      'setup.dropped': '{count} entry/entries were ignored (unusable or duplicate name).',
-      'setup.help': 'The full instructions are in the plugin repository README.',
+      'setup.needGh': 'The gh CLI was not found, so the console cannot reach GitHub.',
+      'setup.needSignIn': 'Not signed in to GitHub yet. Once you are, your repositories appear here.',
+      'setup.needScopes': 'The current credential is missing: {scopes}.',
+      'setup.scopeHint': 'Without repo, private repositories cannot be read; without workflow, a build cannot be triggered.',
+      'setup.needRepos': 'No repository is registered yet.',
+      'setup.codeHint': 'Open the address below in your browser and enter this one-time code:',
+      'setup.waiting': 'Waiting for authorization… finish in the browser and this continues by itself.',
+      'setup.succeeded': 'Authorized. Reading the account…',
+      'setup.failed': 'Sign-in did not finish: {reason}',
+      'setup.expired': 'The one-time code expired. Start again.',
+      'setup.cancelled': 'Sign-in cancelled.',
+      'setup.advanced': 'Configure from a command line (optional)',
+      'setup.ghInstall': 'Install GitHub CLI (either one)',
+      'picker.title': 'Add repositories',
+      'picker.search': 'Search repositories',
+      'picker.empty': 'Nothing to add (not signed in, or this account has no repositories).',
+      'picker.loading': 'Reading your repositories…',
+      'picker.failed': 'Reading the repository list failed: {reason}',
+      'picker.local': 'local checkout',
+      'picker.noLocal': 'no local checkout found',
+      'picker.hint': 'Ticking adds, unticking removes; the change applies at once, with no restart.',
+      'picker.reload': 'Reload',
     }
 
+    /* ------------------------------------------------------------- styles -- */
+
     const CSS = `
-.dsc-root { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px 28px; height: 100%; overflow: auto; }
-.dsc-bar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-.dsc-heading { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.dsc-title { font-size: 15px; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.dsc-subtitle { font-size: 12px; color: var(--dsw-alias-label-secondary); }
-.dsc-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--dsw-alias-label-secondary); }
-.dsc-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsc-root { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 20px; height: 100%; overflow: auto; }
+.dsc-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.dsc-heading { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.dsc-title { font-size: 14px; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsc-subtitle { font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dsc-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dsc-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
 .dsc-btn {
-  display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 11px;
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: 7px;
+  display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px;
   background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
-  font: inherit; font-size: 12px; line-height: 1; cursor: pointer; white-space: nowrap;
+  font: inherit; font-size: 11px; line-height: 1; cursor: pointer; white-space: nowrap;
 }
 .dsc-btn:hover:not([disabled]) { background: var(--dsw-alias-bg-layer-2); border-color: var(--dsw-alias-border-l2); }
 .dsc-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.dsc-btn[disabled] { opacity: .55; cursor: default; }
+.dsc-btn[disabled] { opacity: .5; cursor: default; }
 .dsc-btn[data-kind="primary"] { border-color: transparent; background: var(--dsw-alias-brand-primary); color: #fff; }
 .dsc-btn[data-kind="danger"] { border-color: transparent; background: var(--dsw-alias-state-error-primary); color: #fff; }
 .dsc-btn[data-kind="quiet"] { background: transparent; border-color: transparent; color: var(--dsw-alias-label-secondary); }
 .dsc-btn[data-kind="quiet"]:hover:not([disabled]) { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.dsc-btn[data-size="wide"] { height: 28px; padding: 0 12px; font-size: 12px; }
 
-.dsc-card {
-  border: 1px solid var(--dsw-alias-border-l1); border-radius: 11px;
-  background: var(--dsw-alias-bg-layer-1); padding: 14px 16px; display: flex; flex-direction: column; gap: 11px;
-}
-.dsc-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.dsc-repo { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.dsc-repo-name { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.dsc-path { font-size: 11px; color: var(--dsw-alias-label-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.dsc-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-.dsc-label { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--dsw-alias-label-secondary); }
-
-.dsc-badge {
-  display: inline-flex; align-items: center; gap: 5px; height: 20px; padding: 0 8px;
+.dsc-chip {
+  display: inline-flex; align-items: center; gap: 4px; height: 17px; padding: 0 6px;
   border: 1px solid var(--dsw-alias-border-l1); border-radius: 999px;
-  font-size: 11px; line-height: 1; color: var(--dsw-alias-label-secondary); background: transparent; white-space: nowrap;
+  font-size: 10.5px; line-height: 1; color: var(--dsw-alias-label-secondary); white-space: nowrap; flex: none;
 }
-.dsc-badge[data-state="success"] { color: var(--dsw-alias-state-success-primary); border-color: currentColor; }
-.dsc-badge[data-state="error"] { color: var(--dsw-alias-state-error-primary); border-color: currentColor; }
-.dsc-badge[data-state="warn"] { color: var(--dsw-alias-state-warn-primary); border-color: currentColor; }
-.dsc-badge[data-state="busy"] { color: var(--dsw-alias-brand-primary); border-color: currentColor; }
-.dsc-badge[data-state="idle"] { color: var(--dsw-alias-state-idle-primary); border-color: currentColor; }
+.dsc-chip[data-state="success"] { color: var(--dsw-alias-state-success-primary); border-color: currentColor; }
+.dsc-chip[data-state="error"] { color: var(--dsw-alias-state-error-primary); border-color: currentColor; }
+.dsc-chip[data-state="warn"] { color: var(--dsw-alias-state-warn-primary); border-color: currentColor; }
+.dsc-chip[data-state="busy"] { color: var(--dsw-alias-brand-primary); border-color: currentColor; }
+.dsc-chip[data-state="idle"] { color: var(--dsw-alias-state-idle-primary); border-color: currentColor; }
+.dsc-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dsw-alias-state-idle-primary); flex: none; }
+.dsc-dot[data-state="success"] { background: var(--dsw-alias-state-success-primary); }
+.dsc-dot[data-state="error"] { background: var(--dsw-alias-state-error-primary); }
+.dsc-dot[data-state="warn"] { background: var(--dsw-alias-state-warn-primary); }
+.dsc-dot[data-state="busy"] { background: var(--dsw-alias-brand-primary); }
 
-.dsc-list { display: flex; flex-direction: column; gap: 6px; }
-.dsc-item {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 7px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2);
-  font-size: 12px; color: var(--dsw-alias-label-primary);
-}
-.dsc-item-main { display: flex; align-items: center; gap: 9px; min-width: 0; }
-.dsc-ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 46ch; }
-.dsc-dim { color: var(--dsw-alias-label-secondary); font-size: 11px; }
-.dsc-empty { padding: 10px 2px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
+/* One container, one row per repository, separators instead of card gaps. */
+.dsc-list { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; overflow: hidden; background: var(--dsw-alias-bg-layer-1); }
+.dsc-item { border-top: 1px solid var(--dsw-alias-border-l1); }
+.dsc-item:first-child { border-top: none; }
+.dsc-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; min-height: 32px; font-size: 12px; color: var(--dsw-alias-label-primary); }
+.dsc-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 70px; flex: 0 1 auto; }
+.dsc-grow { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); font-size: 11px; }
+.dsc-right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.dsc-detail { padding: 4px 10px 10px 28px; display: flex; flex-direction: column; gap: 8px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.dsc-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+.dsc-sub { display: flex; flex-direction: column; gap: 3px; }
+.dsc-line { display: flex; align-items: center; gap: 8px; padding: 3px 0; border-top: 1px dashed var(--dsw-alias-border-l1); }
+.dsc-line:first-child { border-top: none; }
+.dsc-empty { padding: 8px 2px; font-size: 11px; color: var(--dsw-alias-label-secondary); }
 
-.dsc-notice, .dsc-error, .dsc-warn {
-  padding: 8px 12px; border-radius: 8px; font-size: 12px; line-height: 1.6;
+.dsc-notice, .dsc-warn, .dsc-error {
+  padding: 6px 10px; border-radius: 8px; font-size: 11.5px; line-height: 1.55;
   border: 1px solid var(--dsw-alias-border-l1); background: var(--dsw-alias-bg-layer-1); color: var(--dsw-alias-label-primary);
 }
-.dsc-error { color: var(--dsw-alias-state-error-primary); border-color: currentColor; }
 .dsc-warn { color: var(--dsw-alias-state-warn-primary); border-color: currentColor; }
-.dsc-notice code {
+.dsc-error { color: var(--dsw-alias-state-error-primary); border-color: currentColor; }
+.dsc-notice code, .dsc-setup code, .dsc-cmd code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
   background: var(--dsw-alias-bg-layer-2); padding: 1px 5px; border-radius: 4px;
 }
-.dsc-logs {
-  margin: 0; padding: 10px 12px; max-height: 260px; overflow: auto; border-radius: 8px;
-  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap;
-}
-.dsc-confirm {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 8px 12px; border-radius: 8px; font-size: 12px;
-  border: 1px solid var(--dsw-alias-state-warn-primary); color: var(--dsw-alias-state-warn-primary);
-}
-
-/* First-run guidance. Bordered with the brand accent rather than an error colour:
-   "you have not set this up yet" is a normal state, not a failure. */
 .dsc-setup {
-  border: 1px solid var(--dsw-alias-brand-primary); border-radius: 11px;
-  background: var(--dsw-alias-bg-layer-1); padding: 14px 16px;
-  display: flex; flex-direction: column; gap: 12px;
+  border: 1px solid var(--dsw-alias-brand-primary); border-radius: 10px;
+  background: var(--dsw-alias-bg-layer-1); padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px; font-size: 12px; color: var(--dsw-alias-label-secondary);
 }
-.dsc-setup-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.dsc-setup-title { font-size: 13px; font-weight: 600; color: var(--dsw-alias-label-primary); }
-.dsc-step { display: flex; flex-direction: column; gap: 6px; font-size: 12px; line-height: 1.6; color: var(--dsw-alias-label-secondary); }
-.dsc-step-title { color: var(--dsw-alias-label-primary); }
-.dsc-ordered { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
-.dsc-cmd {
-  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  padding: 7px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px;
-  color: var(--dsw-alias-label-primary);
+.dsc-setup-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dsc-setup-strong { color: var(--dsw-alias-label-primary); }
+.dsc-code { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 10px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); }
+.dsc-code-value { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 16px; letter-spacing: .12em; font-weight: 600; color: var(--dsw-alias-label-primary); }
+.dsc-cmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 5px 8px; border-radius: 7px; background: var(--dsw-alias-bg-layer-2); }
+.dsc-cmd code { flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.dsc-logs {
+  margin: 0; padding: 8px 10px; max-height: 200px; overflow: auto; border-radius: 7px;
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap;
 }
-.dsc-cmd code { flex: 1 1 320px; min-width: 0; overflow-wrap: anywhere; }
+.dsc-picker { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); display: flex; flex-direction: column; overflow: hidden; }
+.dsc-picker-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--dsw-alias-border-l1); }
+.dsc-input {
+  flex: 1 1 auto; min-width: 0; height: 24px; padding: 0 8px; font: inherit; font-size: 11.5px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
+}
+.dsc-input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.dsc-picker-list { max-height: 260px; overflow: auto; }
+.dsc-picker-row { display: flex; align-items: center; gap: 8px; padding: 5px 10px; border-top: 1px solid var(--dsw-alias-border-l1); font-size: 11.5px; cursor: pointer; }
+.dsc-picker-row:first-child { border-top: none; }
+.dsc-picker-row:hover { background: var(--dsw-alias-bg-layer-2); }
+.dsc-check { width: 14px; height: 14px; flex: none; accent-color: var(--dsw-alias-brand-primary); }
+.dsc-hint { padding: 7px 10px; font-size: 10.5px; color: var(--dsw-alias-label-secondary); border-top: 1px solid var(--dsw-alias-border-l1); }
 `
 
     /**
@@ -308,13 +357,13 @@ window.__ModuleLoader__.load({
     }
 
     /** POST one JSON body with a hard timeout; never throws. */
-    async function postJson(url, body, timeoutMs) {
+    async function postJson(path, body, timeoutMs) {
       const controller = new AbortController()
       const timer = globalThis.setTimeout(() => {
         controller.abort()
       }, timeoutMs)
       try {
-        const response = await fetch(url, {
+        const response = await fetch(`${BASE}${path}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify(body ?? {}),
@@ -328,11 +377,7 @@ window.__ModuleLoader__.load({
         }
         return { ok: true, response, payload }
       } catch (error) {
-        return {
-          ok: false,
-          aborted: controller.signal.aborted,
-          error: error instanceof Error ? error.message : String(error),
-        }
+        return { ok: false, aborted: controller.signal.aborted, error: error instanceof Error ? error.message : String(error) }
       } finally {
         globalThis.clearTimeout(timer)
       }
@@ -353,192 +398,52 @@ window.__ModuleLoader__.load({
       const to = new Date(run.updatedAt).getTime()
       if (!Number.isFinite(from) || !Number.isFinite(to) || to < from) return ''
       const seconds = Math.round((to - from) / 1000)
-      if (seconds < 60) return `${seconds}s`
-      return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+      return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${seconds % 60}s`
     }
 
-    /** Map a run's state onto the badge vocabulary. */
+    /** Map a run's state onto the chip vocabulary. */
     function runState(run) {
       if (run === null) return 'idle'
       if (run.status !== 'completed') return 'busy'
       if (run.conclusion === 'success') return 'success'
       if (run.conclusion === 'failure' || run.conclusion === 'timed_out' || run.conclusion === 'startup_failure') return 'error'
-      if (run.conclusion === 'cancelled' || run.conclusion === 'skipped' || run.conclusion === 'neutral') return 'idle'
       return 'idle'
     }
 
-    /** A compact GitHub glyph for the sidebar entry, drawn with `currentColor`. */
+    /** A compact isometric package, drawn with `currentColor`. */
     function ConsoleIcon(props) {
       const size = Number.isFinite(props?.size) ? props.size : 16
       return h(
         'svg',
         { width: size, height: size, viewBox: '0 0 16 16', 'aria-hidden': true, focusable: 'false', style: { display: 'block' } },
-        h('path', {
-          d: 'M8 1.6 2.4 4.5v7L8 14.4l5.6-2.9v-7L8 1.6Z',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.4,
-          strokeLinejoin: 'round',
-        }),
-        h('path', {
-          d: 'M2.6 4.6 8 7.3l5.4-2.7M8 7.3v6.9',
-          fill: 'none',
-          stroke: 'currentColor',
-          strokeWidth: 1.4,
-          strokeLinejoin: 'round',
-        }),
+        h('path', { d: 'M8 1.6 2.4 4.5v7L8 14.4l5.6-2.9v-7L8 1.6Z', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinejoin: 'round' }),
+        h('path', { d: 'M2.6 4.6 8 7.3l5.4-2.7M8 7.3v6.9', fill: 'none', stroke: 'currentColor', strokeWidth: 1.4, strokeLinejoin: 'round' }),
       )
     }
 
     /** One pill. */
-    function Badge(props) {
-      return h('span', { className: 'dsc-badge', 'data-state': props.state ?? 'idle', title: props.title }, props.children)
+    function Chip(props) {
+      return h('span', { className: 'dsc-chip', 'data-state': props.state ?? 'idle', title: props.title }, props.children)
     }
 
-    /** One key/value line inside a card. */
-    function Metric(props) {
-      return h('span', { className: 'dsc-dim' }, `${props.label} `, h('strong', null, props.value))
-    }
-
-    /** The release list of one repository, with the draft-publishing affordance. */
-    function Releases(props) {
-      const { t, data, busy, onPublish, confirming, setConfirming } = props
-      if (data.releases.length === 0) return h('div', { className: 'dsc-empty' }, t('state.noReleases'))
+    /** One button. */
+    function Btn(props) {
       return h(
-        'div',
-        { className: 'dsc-list' },
-        data.releases.map((release) =>
-          h(
-            'div',
-            { className: 'dsc-item', key: release.tag },
-            h(
-              'div',
-              { className: 'dsc-item-main' },
-              h('span', { className: 'dsc-ellipsis' }, release.tag),
-              release.draft
-                ? h(Badge, { state: 'warn' }, t('badge.draft'))
-                : h(Badge, { state: 'success' }, t('badge.published')),
-              h('span', { className: 'dsc-dim' }, stamp(release.createdAt)),
-              h('span', { className: 'dsc-dim' }, t('meta.assets', { count: String(release.assets.length) })),
-            ),
-            h(
-              'div',
-              { className: 'dsc-actions' },
-              release.url !== ''
-                ? h('a', { className: 'dsc-btn', 'data-kind': 'quiet', href: release.url, target: '_blank', rel: 'noreferrer' }, t('action.open'))
-                : null,
-              release.draft
-                ? confirming === release.tag
-                  ? h(
-                      'span',
-                      { className: 'dsc-actions' },
-                      h('button', { type: 'button', className: 'dsc-btn', 'data-kind': 'danger', disabled: busy !== '', onClick: () => onPublish(release.tag) }, t('action.confirmPublish')),
-                      h('button', { type: 'button', className: 'dsc-btn', 'data-kind': 'quiet', onClick: () => setConfirming(null) }, t('confirm.cancel')),
-                    )
-                  : h(
-                      'button',
-                      { type: 'button', className: 'dsc-btn', disabled: busy !== '', onClick: () => setConfirming(release.tag) },
-                      t('action.publishDraft'),
-                    )
-                : null,
-            ),
-          ),
-        ),
+        'button',
+        {
+          type: 'button',
+          className: 'dsc-btn',
+          'data-kind': props.kind,
+          'data-size': props.size,
+          title: props.title,
+          disabled: props.disabled === true,
+          onClick: props.onClick,
+        },
+        props.children,
       )
     }
 
-    /** One repository card: local truth, latest run, actions, releases. */
-    function RepoCard(props) {
-      const { t, data, busy, onAction, onPublish, logs, onLogs } = props
-      const [confirming, setConfirming] = React.useState(null)
-      const run = data.latestRun
-      const local = data.local ?? { available: false }
-      const problem = data.problems.length > 0 ? data.problems[0] : null
-
-      const localBadges = []
-      if (local.available === true) {
-        if (Number.isFinite(local.dirty) && local.dirty > 0) localBadges.push(h(Badge, { key: 'dirty', state: 'warn' }, t('badge.dirty', { count: String(local.dirty) })))
-        else localBadges.push(h(Badge, { key: 'clean', state: 'success' }, t('badge.clean')))
-        if (Number.isFinite(local.ahead) && local.ahead > 0) localBadges.push(h(Badge, { key: 'ahead', state: 'warn' }, t('badge.ahead', { count: String(local.ahead) })))
-        if (Number.isFinite(local.behind) && local.behind > 0) localBadges.push(h(Badge, { key: 'behind', state: 'idle' }, t('badge.behind', { count: String(local.behind) })))
-      }
-
-      return h(
-        'div',
-        { className: 'dsc-card' },
-        h(
-          'div',
-          { className: 'dsc-card-head' },
-          h(
-            'div',
-            { className: 'dsc-repo' },
-            h('span', { className: 'dsc-repo-name' }, data.label),
-            data.version !== null ? h(Badge, { state: 'idle' }, t('meta.version', { version: data.version })) : null,
-            data.published ? h(Badge, { state: 'success' }, t('badge.published')) : h(Badge, { state: 'warn' }, t('badge.unpublished')),
-            localBadges,
-          ),
-          h(
-            'div',
-            { className: 'dsc-actions' },
-            data.hasBuildWorkflow
-              ? h('button', { type: 'button', className: 'dsc-btn', disabled: busy !== '', onClick: () => onAction('build', data) }, busy === `build:${data.repo}` ? t('action.busy') : t('action.build'))
-              : null,
-            data.hasReleaseWorkflow
-              ? h('button', { type: 'button', className: 'dsc-btn', 'data-kind': 'primary', disabled: busy !== '', onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? t('action.busy') : t('action.release'))
-              : null,
-            run !== null && run.url !== ''
-              ? h('a', { className: 'dsc-btn', 'data-kind': 'quiet', href: run.url, target: '_blank', rel: 'noreferrer' }, t('action.runs'))
-              : null,
-          ),
-        ),
-
-        problem !== null ? h('div', { className: 'dsc-warn' }, problem) : null,
-        data.localPath === '' ? h('div', { className: 'dsc-dim' }, t('meta.noLocal')) : h('div', { className: 'dsc-path' }, data.localPath),
-
-        h(
-          'div',
-          { className: 'dsc-row' },
-          h('span', { className: 'dsc-label' }, 'run'),
-          run === null
-            ? h('span', { className: 'dsc-dim' }, t('state.noRuns'))
-            : h(
-                React.Fragment,
-                null,
-                h(Badge, { state: runState(run), title: run.conclusion || run.status }, `${run.workflow || 'workflow'} · ${run.conclusion || run.status || t('run.unknown')}`),
-                h('span', { className: 'dsc-ellipsis' }, run.title),
-                h('span', { className: 'dsc-dim' }, duration(run)),
-                h('span', { className: 'dsc-dim' }, stamp(run.createdAt)),
-                run.event !== '' ? h('span', { className: 'dsc-dim' }, t('run.event', { event: run.event })) : null,
-                run.status !== 'completed' && run.id !== null
-                  ? h('button', { type: 'button', className: 'dsc-btn', 'data-kind': 'quiet', disabled: busy !== '', onClick: () => onAction('cancel', data, { runId: run.id }) }, t('action.cancel'))
-                  : null,
-                run.status === 'completed' && run.id !== null
-                  ? h('button', { type: 'button', className: 'dsc-btn', 'data-kind': 'quiet', disabled: busy !== '', onClick: () => onAction('rerun-failed', data, { runId: run.id }) }, t('action.rerun'))
-                  : null,
-                run.status === 'completed' && run.id !== null
-                  ? h(
-                      'button',
-                      { type: 'button', className: 'dsc-btn', 'data-kind': 'quiet', disabled: busy !== '', onClick: () => onLogs(data, run) },
-                      logs !== null && logs.repo === data.repo && logs.runId === run.id ? t('action.hideLogs') : t('action.logs'),
-                    )
-                  : null,
-              ),
-        ),
-
-        logs !== null && logs.repo === data.repo
-          ? h(
-              'div',
-              null,
-              h('pre', { className: 'dsc-logs' }, logs.lines.join('\n')),
-              logs.truncated ? h('div', { className: 'dsc-dim' }, t('state.truncated', { lines: String(logs.lines.length) })) : null,
-            )
-          : null,
-
-        h(Releases, { t, data, busy, onPublish, confirming, setConfirming }),
-      )
-    }
-
-    /** A command with a copy button, so the panel never asks anyone to retype one. */
+    /** A value with a copy button — the fallback path, never the instruction. */
     function CopyLine(props) {
       const { t, command } = props
       const [copied, setCopied] = React.useState(false)
@@ -556,170 +461,406 @@ window.__ModuleLoader__.load({
         { className: 'dsc-cmd' },
         h('code', null, command),
         h(
-          'button',
+          Btn,
           {
-            type: 'button',
-            className: 'dsc-btn',
-            'data-kind': 'quiet',
+            kind: 'quiet',
             onClick: () => {
-              // Clipboard access needs a secure context; the loopback GUI is one, but a
-              // refusal must not be reported as a successful copy.
+              // Clipboard access needs a secure context; the loopback GUI is one,
+              // but a refusal must not be reported as a successful copy.
               const write = globalThis.navigator?.clipboard?.writeText
-              if (typeof write !== 'function') {
-                setCopied(false)
-                return
-              }
-              void write
-                .call(globalThis.navigator.clipboard, command)
-                .then(() => {
-                  setCopied(true)
-                })
-                .catch(() => {
-                  setCopied(false)
-                })
+              if (typeof write !== 'function') return
+              void write.call(globalThis.navigator.clipboard, command).then(() => setCopied(true)).catch(() => setCopied(false))
             },
           },
-          copied ? t('setup.copied') : t('setup.copy'),
+          copied ? t('action.copied') : t('action.copy'),
         ),
       )
     }
 
     /**
-     * First-run guidance.
+     * The browser sign-in, driven from the panel.
      *
-     * The panel's whole value depends on a credential it does not own, so the one
-     * state it must never leave unexplained is "there is nothing to show yet".
-     * Each missing piece is named, ordered, and paired with the exact command that
-     * fixes it — quoted from where this copy of the plugin is actually installed,
-     * because `node scripts/configure.mjs` is only correct from inside the source
-     * checkout.
+     * The Host runs `gh auth login --web` and streams back the one-time code, so
+     * the user's whole job is: click, open the linked page, type the code. No
+     * terminal — and the plugin still never sees the token, because `gh` writes it.
      */
-    function Setup(props) {
-      const { t, status, onRecheck } = props
-      const gh = status.gh ?? {}
-      const helper = status.helper ?? {}
-      const configure = typeof helper.configureScript === 'string' ? helper.configureScript : 'scripts/configure.mjs'
-      const configFile = typeof helper.configFile === 'string' ? helper.configFile : (typeof status.configFile === 'string' ? status.configFile : '')
+    function SignIn(props) {
+      const { t, status, onChanged } = props
+      const [attempt, setAttempt] = React.useState(status?.auth ?? { state: 'idle' })
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(null)
+      const gh = status?.gh ?? {}
       const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
-      const steps = []
 
-      if (gh.available !== true) {
-        steps.push(
-          h(
-            'div',
-            { className: 'dsc-step', key: 'install' },
-            h('span', { className: 'dsc-step-title' }, t('setup.ghMissing')),
-            h('span', null, t('setup.ghMissingStep')),
-            h(CopyLine, { t, command: 'winget install --id GitHub.cli' }),
-            h('span', null, h('a', { className: 'dsc-btn', 'data-kind': 'quiet', href: 'https://cli.github.com/', target: '_blank', rel: 'noreferrer' }, 'cli.github.com')),
-          ),
-        )
-      } else if (gh.authenticated !== true) {
-        steps.push(
-          h(
-            'div',
-            { className: 'dsc-step', key: 'login' },
-            h('span', { className: 'dsc-step-title' }, t('setup.authNeeded')),
-            h('ol', { className: 'dsc-ordered' },
-              h('li', null, t('setup.authStep1')),
-              h('li', null, t('setup.authStep2')),
-              h('li', null, t('setup.authStep3')),
-            ),
-            h(CopyLine, { t, command: 'gh auth login' }),
-          ),
-        )
-      } else if (missing.length > 0) {
-        steps.push(
-          h(
-            'div',
-            { className: 'dsc-step', key: 'scopes' },
-            h('span', { className: 'dsc-step-title' }, t('setup.scopesNeeded', { scopes: missing.join(', ') })),
-            h('span', null, t('setup.scopesStep')),
-            h(CopyLine, { t, command: `gh auth refresh -h github.com -s ${missing.join(',')}` }),
-          ),
-        )
-      }
+      const start = React.useCallback(
+        async (mode) => {
+          setBusy(true)
+          setError(null)
+          const result = await postJson('/auth-start', { mode, scopes: mode === 'refresh' ? missing : [] }, ACTION_TIMEOUT_MS)
+          setBusy(false)
+          if (!result.ok) {
+            setError(result.aborted ? t('state.timeout') : t('state.hostGone'))
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            return
+          }
+          setAttempt(result.payload.value)
+        },
+        [missing, t],
+      )
 
-      const repos = Array.isArray(status.repos) ? status.repos : []
-      if (repos.length === 0) {
-        steps.push(
-          h(
-            'div',
-            { className: 'dsc-step', key: 'repos' },
-            h('span', { className: 'dsc-step-title' }, t('setup.reposNeeded')),
-            h(CopyLine, { t, command: `node "${configure}" add owner/repo --path "F:\\CodeProj\\repo"` }),
-            h(CopyLine, { t, command: `node "${configure}" list` }),
-            configFile !== '' ? h('span', null, `${t('setup.reposFile')} ${configFile}`) : null,
-            h('span', null, t('setup.help')),
-          ),
-        )
-      }
+      // Poll only while an attempt is pending: waking up every two seconds for the
+      // rest of the session would be work nobody asked for.
+      const pending = attempt.state === 'pending' || attempt.state === 'running'
+      React.useEffect(() => {
+        if (!pending) return undefined
+        const timer = globalThis.setInterval(() => {
+          void (async () => {
+            const result = await postJson('/auth-state', {}, STATUS_TIMEOUT_MS)
+            if (!result.ok || result.payload?.ok !== true) return
+            const next = result.payload.value
+            setAttempt(next)
+            if (next.state === 'succeeded') onChanged()
+          })()
+        }, AUTH_POLL_MS)
+        return () => {
+          globalThis.clearInterval(timer)
+        }
+      }, [pending, onChanged])
 
-      if (steps.length === 0 && status.configProblem === null) return null
+      const cancel = React.useCallback(async () => {
+        await postJson('/auth-cancel', {}, STATUS_TIMEOUT_MS)
+        setAttempt({ state: 'idle' })
+      }, [])
+
+      const code = typeof attempt.code === 'string' && attempt.code !== '' ? attempt.code : null
+      const url = typeof attempt.url === 'string' && attempt.url !== '' ? attempt.url : 'https://github.com/login/device'
 
       return h(
         'div',
-        { className: 'dsc-setup' },
-        h(
-          'div',
-          { className: 'dsc-setup-head' },
-          h('span', { className: 'dsc-setup-title' }, t('setup.title')),
-          h('button', { type: 'button', className: 'dsc-btn', onClick: onRecheck }, t('setup.recheck')),
-        ),
-        status.configProblem !== null && status.configProblem !== undefined
-          ? h('div', { className: 'dsc-warn' }, t('setup.configProblem', { reason: String(status.configProblem) }))
-          : null,
-        Number(status.configDropped) > 0
-          ? h('div', { className: 'dsc-warn' }, t('setup.dropped', { count: String(status.configDropped) }))
-          : null,
-        ...steps,
+        { className: 'dsc-sub' },
+        error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, error) : null,
+        pending
+          ? h(
+              React.Fragment,
+              null,
+              h('span', { className: 'dsc-setup-strong' }, t('setup.codeHint')),
+              h(
+                'div',
+                { className: 'dsc-code' },
+                h('span', { className: 'dsc-code-value' }, code ?? '····-····'),
+                h(Btn, { kind: 'primary', size: 'wide', onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
+                code !== null ? h(CopyLine, { t, command: code }) : null,
+              ),
+              h('span', null, t('setup.waiting')),
+              h('div', { className: 'dsc-actions' }, h(Btn, { onClick: cancel }, t('action.cancelSignIn'))),
+            )
+          : h(
+              'div',
+              { className: 'dsc-actions' },
+              gh.available !== true
+                ? h(Btn, { kind: 'primary', size: 'wide', onClick: () => globalThis.open('https://cli.github.com/', '_blank', 'noopener,noreferrer') }, 'cli.github.com')
+                : missing.length > 0
+                  ? h(Btn, { kind: 'primary', size: 'wide', disabled: busy, onClick: () => void start('refresh') }, t('action.grantScopes'))
+                  : h(Btn, { kind: 'primary', size: 'wide', disabled: busy, onClick: () => void start('login') }, t('action.signIn')),
+              h(Btn, { disabled: busy, onClick: onChanged }, t('action.recheck')),
+            ),
+        attempt.state === 'succeeded' ? h('span', null, t('setup.succeeded')) : null,
+        attempt.state === 'expired' ? h('span', { className: 'dsc-warn' }, t('setup.expired')) : null,
+        attempt.state === 'cancelled' ? h('span', null, t('setup.cancelled')) : null,
+        attempt.state === 'failed' ? h('span', { className: 'dsc-warn' }, t('setup.failed', { reason: attempt.message ?? t('run.unknown') })) : null,
       )
     }
 
-    /** The console panel: header, one card per repository, and the notices. */
-    function ConsolePage(props) {
-      const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const [status, setStatus] = React.useState(null)
-      const [overview, setOverview] = React.useState(null)
+    /**
+     * The repository list: fetched from GitHub, ticked to register.
+     *
+     * This is what replaced "run `configure.mjs add <repo> --path <absolute dir>`".
+     * The local checkout is looked up from the configured root, so the user ticks a
+     * box and types nothing.
+     */
+    function RepoPicker(props) {
+      const { t, onChanged } = props
+      const [repos, setRepos] = React.useState(null)
       const [busy, setBusy] = React.useState('')
-      const [notice, setNotice] = React.useState(null)
       const [error, setError] = React.useState(null)
-      const [logs, setLogs] = React.useState(null)
+      const [filter, setFilter] = React.useState('')
 
-      const loadStatus = React.useCallback(async () => {
-        const result = await postJson(STATUS_URL, {}, STATUS_TIMEOUT_MS)
+      const load = React.useCallback(async () => {
+        setError(null)
+        setRepos(null)
+        const result = await postJson('/repos-available', { limit: 200 }, OVERVIEW_TIMEOUT_MS)
         if (!result.ok) {
           setError(result.aborted ? t('state.timeout') : t('state.hostGone'))
           return
         }
+        if (!result.response.ok || result.payload?.ok !== true) {
+          setError(t('picker.failed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          return
+        }
+        setRepos(result.payload.value.repos ?? [])
+      }, [t])
+
+      React.useEffect(() => {
+        void load()
+      }, [load])
+
+      const toggle = React.useCallback(
+        async (entry) => {
+          setBusy(entry.fullName)
+          setError(null)
+          const result = entry.registered
+            ? await postJson('/config-remove', { repo: entry.bare }, ACTION_TIMEOUT_MS)
+            : await postJson('/config-add', { repo: entry.bare }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError(result.aborted ? t('state.timeout') : t('state.hostGone'))
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            return
+          }
+          setRepos((current) => (current ?? []).map((item) => (item.fullName === entry.fullName ? { ...item, registered: !entry.registered } : item)))
+          onChanged()
+        },
+        [onChanged, t],
+      )
+
+      const needle = filter.trim().toLowerCase()
+      const visible = (repos ?? []).filter((entry) => needle === ''
+        || entry.fullName.toLowerCase().includes(needle)
+        || entry.description.toLowerCase().includes(needle))
+
+      return h(
+        'div',
+        { className: 'dsc-picker' },
+        h(
+          'div',
+          { className: 'dsc-picker-head' },
+          h('input', {
+            className: 'dsc-input',
+            type: 'search',
+            value: filter,
+            placeholder: t('picker.search'),
+            onChange: (event) => setFilter(event.target.value),
+          }),
+          h(Btn, { onClick: () => void load() }, t('picker.reload')),
+        ),
+        error !== null ? h('div', { className: 'dsc-warn' }, error) : null,
+        repos === null
+          ? h('div', { className: 'dsc-empty' }, t('picker.loading'))
+          : visible.length === 0
+            ? h('div', { className: 'dsc-empty' }, t('picker.empty'))
+            : h(
+                'div',
+                { className: 'dsc-picker-list' },
+                visible.map((entry) =>
+                  h(
+                    'label',
+                    { className: 'dsc-picker-row', key: entry.fullName },
+                    h('input', {
+                      className: 'dsc-check',
+                      type: 'checkbox',
+                      checked: entry.registered,
+                      disabled: busy !== '',
+                      onChange: () => void toggle(entry),
+                    }),
+                    h('span', { className: 'dsc-name', style: { minWidth: '0' } }, entry.bare),
+                    entry.private ? h(Chip, { state: 'idle' }, t('chip.private')) : null,
+                    h('span', { className: 'dsc-grow' }, entry.description),
+                    entry.localPath !== ''
+                      ? h(Chip, { state: 'success', title: entry.localPath }, t('picker.local'))
+                      : h(Chip, { state: 'idle' }, t('picker.noLocal')),
+                  ),
+                ),
+              ),
+        h('div', { className: 'dsc-hint' }, t('picker.hint')),
+      )
+    }
+
+    /** One repository row, expandable into path, releases, runs and logs. */
+    function RepoRow(props) {
+      const { t, data, busy, onAction, onPublish, logs, onLogs } = props
+      const [open, setOpen] = React.useState(false)
+      const [confirming, setConfirming] = React.useState(null)
+      const run = data.latestRun
+      const local = data.local ?? { available: false }
+      const state = runState(run)
+
+      /* Only non-zero local signals are shown: a column of "clean" chips is noise,
+         and the row exists to make the exceptions visible. */
+      const chips = []
+      if (local.available === true) {
+        if (Number.isFinite(local.dirty) && local.dirty > 0) chips.push(h(Chip, { key: 'd', state: 'warn' }, t('chip.dirty', { count: String(local.dirty) })))
+        if (Number.isFinite(local.ahead) && local.ahead > 0) chips.push(h(Chip, { key: 'a', state: 'warn' }, `↑${local.ahead}`))
+        if (Number.isFinite(local.behind) && local.behind > 0) chips.push(h(Chip, { key: 'b', state: 'idle' }, `↓${local.behind}`))
+      }
+
+      return h(
+        'div',
+        { className: 'dsc-item' },
+        h(
+          'div',
+          { className: 'dsc-row' },
+          h('span', { className: 'dsc-dot', 'data-state': state, title: run === null ? t('state.noRuns') : `${run.workflow} · ${run.conclusion || run.status}` }),
+          h('span', { className: 'dsc-name' }, data.label),
+          data.version !== null ? h(Chip, { state: 'idle' }, `v${data.version}`) : null,
+          data.draftTag !== null
+            ? h(Chip, { state: 'warn' }, t('chip.draft'))
+            : data.published
+              ? h(Chip, { state: 'success' }, t('chip.published'))
+              : h(Chip, { state: 'idle' }, t('chip.unpublished')),
+          chips,
+          h('span', { className: 'dsc-grow' }, run === null ? t('state.noRuns') : `${run.workflow} · ${duration(run)} · ${stamp(run.createdAt)}`),
+          h(
+            'div',
+            { className: 'dsc-right' },
+            data.hasBuildWorkflow ? h(Btn, { disabled: busy !== '', title: t('action.build'), onClick: () => onAction('build', data) }, busy === `build:${data.repo}` ? '…' : t('action.build')) : null,
+            data.hasReleaseWorkflow ? h(Btn, { kind: 'primary', disabled: busy !== '', title: t('action.release'), onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? '…' : t('action.release')) : null,
+            h(Btn, { kind: 'quiet', onClick: () => setOpen((value) => !value), title: open ? t('action.collapse') : t('action.expand') }, open ? '▴' : '▾'),
+          ),
+        ),
+        open
+          ? h(
+              'div',
+              { className: 'dsc-detail' },
+              data.localPath === ''
+                ? h('span', null, t('meta.noLocal'))
+                : h('span', { className: 'dsc-mono' }, `${t('meta.path')} ${data.localPath}`),
+              data.problems.length > 0 ? h('div', { className: 'dsc-warn' }, data.problems.join(' · ')) : null,
+
+              h(
+                'div',
+                { className: 'dsc-sub' },
+                h('span', null, `${t('meta.version')} ${data.version ?? '?'}${data.expectedTag === null ? '' : ` · ${t('meta.expectedTag', { tag: data.expectedTag })}`}`),
+                data.releases.length === 0
+                  ? h('span', null, t('state.noReleases'))
+                  : data.releases.map((release) =>
+                      h(
+                        'div',
+                        { className: 'dsc-line', key: release.tag },
+                        h('span', { className: 'dsc-name', style: { minWidth: '0', fontWeight: '500' } }, release.tag),
+                        release.draft ? h(Chip, { state: 'warn' }, t('chip.draft')) : h(Chip, { state: 'success' }, t('chip.published')),
+                        h('span', { className: 'dsc-grow' }, `${stamp(release.createdAt)} · ${t('meta.assets', { count: String(release.assets.length) })}`),
+                        release.draft
+                          ? confirming === release.tag
+                            ? h(
+                                React.Fragment,
+                                null,
+                                h(Btn, { kind: 'danger', disabled: busy !== '', onClick: () => onPublish(release.tag) }, t('action.confirmPublish')),
+                                h(Btn, { kind: 'quiet', onClick: () => setConfirming(null) }, t('confirm.cancel')),
+                              )
+                            : h(Btn, { onClick: () => setConfirming(release.tag) }, t('action.publishDraft'))
+                          : null,
+                        release.url !== '' ? h(Btn, { kind: 'quiet', onClick: () => globalThis.open(release.url, '_blank', 'noopener,noreferrer') }, t('action.open')) : null,
+                      ),
+                    ),
+              ),
+
+              h(
+                'div',
+                { className: 'dsc-sub' },
+                h('span', null, t('label.runs')),
+                data.runs.length === 0
+                  ? h('span', null, t('state.noRuns'))
+                  : data.runs.slice(0, 4).map((entry) =>
+                      h(
+                        'div',
+                        { className: 'dsc-line', key: String(entry.id) },
+                        h(Chip, { state: runState(entry) }, entry.conclusion || entry.status || t('run.unknown')),
+                        h('span', { className: 'dsc-grow', title: entry.title }, `${entry.workflow} · ${entry.title}`),
+                        h('span', null, duration(entry)),
+                        entry.status !== 'completed' && entry.id !== null
+                          ? h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => onAction('cancel', data, { runId: entry.id }) }, t('action.cancel'))
+                          : null,
+                        entry.status === 'completed' && entry.id !== null
+                          ? h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => onAction('rerun-failed', data, { runId: entry.id }) }, t('action.rerun'))
+                          : null,
+                        entry.status === 'completed' && entry.id !== null
+                          ? h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => onLogs(data, entry) }, logs !== null && logs.runId === entry.id ? t('action.hideLogs') : t('action.logs'))
+                          : null,
+                      ),
+                    ),
+              ),
+
+              logs !== null && logs.repo === data.repo
+                ? h(
+                    'div',
+                    null,
+                    h('pre', { className: 'dsc-logs' }, logs.lines.join('\n')),
+                    logs.truncated ? h('span', null, t('state.truncated', { lines: String(logs.lines.length) })) : null,
+                  )
+                : null,
+            )
+          : null,
+      )
+    }
+
+    /** Shared data plumbing for the panel and the settings page. */
+    function useConsoleState() {
+      const [status, setStatus] = React.useState(null)
+      const [overview, setOverview] = React.useState(null)
+      const [error, setError] = React.useState(null)
+
+      const loadStatus = React.useCallback(async () => {
+        const result = await postJson('/status', {}, STATUS_TIMEOUT_MS)
+        if (!result.ok) {
+          setError(result.aborted ? 'timeout' : 'host')
+          return null
+        }
         if (result.response.ok && result.payload?.ok === true) {
           setStatus(result.payload.value ?? null)
           setError(null)
-          return
+          return result.payload.value
         }
-        setError(t('state.statusFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
-      }, [t])
+        setError(result.payload?.message ?? `HTTP ${String(result.response.status)}`)
+        return null
+      }, [])
 
       /**
-       * Load the overview.
-       *
        * `silent` is what the poll uses: a failed BACKGROUND request must never
        * clear the last known state nor raise a banner the user did not ask for.
        */
       const loadOverview = React.useCallback(async (options) => {
-        const silent = options?.silent === true
-        const result = await postJson(OVERVIEW_URL, { force: options?.force === true }, OVERVIEW_TIMEOUT_MS)
+        const result = await postJson('/overview', { force: options?.force === true }, OVERVIEW_TIMEOUT_MS)
         if (!result.ok) {
-          if (!silent) setError(result.aborted ? t('state.timeout') : t('state.hostGone'))
+          if (options?.silent !== true) setError(result.aborted ? 'timeout' : 'host')
           return
         }
         if (result.response.ok && result.payload?.ok === true) {
           setOverview(result.payload.value ?? null)
-          if (!silent) setError(null)
-          return
+          if (options?.silent !== true) setError(null)
         }
-        if (!silent) setError(result.payload?.message ?? `HTTP ${String(result.response.status)}`)
-      }, [t])
+      }, [])
+
+      return { status, overview, error, setError, loadStatus, loadOverview }
+    }
+
+    /** Human-readable text for the two transport failures. */
+    function errorText(t, code) {
+      if (code === 'timeout') return t('state.timeout')
+      if (code === 'host') return t('state.hostGone')
+      return code
+    }
+
+    /** Whether a sign-in or a scope grant is still required. */
+    function needsAccountSetup(gh) {
+      if (gh.available !== true) return true
+      if (gh.authenticated !== true) return true
+      return Array.isArray(gh.missingScopes) && gh.missingScopes.length > 0
+    }
+
+    /** The console panel: compact rows, and the picker behind one button. */
+    function ConsolePage(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const { status, overview, error, setError, loadStatus, loadOverview } = useConsoleState()
+      const [busy, setBusy] = React.useState('')
+      const [notice, setNotice] = React.useState(null)
+      const [logs, setLogs] = React.useState(null)
+      const [managing, setManaging] = React.useState(false)
 
       React.useEffect(() => {
         void loadStatus()
@@ -747,15 +888,15 @@ window.__ModuleLoader__.load({
       }, [notice])
 
       /** Run one mutating route, then refresh so the panel shows its effect. */
-      const runAction = React.useCallback(
-        async (key, url, body, successKey, params) => {
+      const run = React.useCallback(
+        async (key, path, body, successKey, params) => {
           setBusy(key)
           setNotice(null)
           setError(null)
-          const result = await postJson(url, body, ACTION_TIMEOUT_MS)
+          const result = await postJson(path, body, ACTION_TIMEOUT_MS)
           setBusy('')
           if (!result.ok) {
-            setError(result.aborted ? t('state.timeout') : t('state.hostGone'))
+            setError(result.aborted ? 'timeout' : 'host')
             return
           }
           if (!result.response.ok || result.payload?.ok !== true) {
@@ -765,103 +906,229 @@ window.__ModuleLoader__.load({
           setNotice(t(successKey, params))
           await loadOverview({ force: true })
         },
-        [loadOverview, t],
+        [loadOverview, setError, t],
       )
 
       const onAction = React.useCallback(
         (kind, data, extra) => {
           if (kind === 'build') {
-            void runAction(`build:${data.repo}`, DISPATCH_URL, { repo: data.repo, workflow: status?.config?.buildWorkflow ?? 'ci.yml' }, 'state.dispatched', { workflow: status?.config?.buildWorkflow ?? 'ci.yml', repo: data.repo })
+            const workflow = status?.config?.buildWorkflow ?? 'ci.yml'
+            void run(`build:${data.repo}`, '/dispatch', { repo: data.repo, workflow }, 'state.dispatched', { workflow, repo: data.repo })
             return
           }
           if (kind === 'release') {
-            void runAction(`release:${data.repo}`, DISPATCH_URL, { repo: data.repo, workflow: status?.config?.releaseWorkflow ?? 'release.yml', inputs: { draft: 'true' } }, 'state.releaseDispatched', { repo: data.repo })
+            void run(`release:${data.repo}`, '/dispatch', { repo: data.repo, workflow: status?.config?.releaseWorkflow ?? 'release.yml', inputs: { draft: 'true' } }, 'state.releaseDispatched', { repo: data.repo })
             return
           }
-          if (kind === 'cancel' || kind === 'rerun-failed') {
-            void runAction(`${kind}:${data.repo}`, RUN_ACTION_URL, { repo: data.repo, runId: extra?.runId, action: kind }, kind === 'cancel' ? 'state.cancelled' : 'state.rerun', {})
-          }
+          void run(`${kind}:${data.repo}`, '/run-action', { repo: data.repo, runId: extra?.runId, action: kind }, kind === 'cancel' ? 'state.cancelled' : 'state.rerun', {})
         },
-        [runAction, status],
+        [run, status],
       )
 
       const onPublish = React.useCallback(
         (repo, tag) => {
-          void runAction(`publish:${repo}`, RELEASE_ACTION_URL, { repo, tag, action: 'publish' }, 'state.published', { tag })
+          void run(`publish:${repo}`, '/release-action', { repo, tag, action: 'publish' }, 'state.published', { tag })
         },
-        [runAction],
+        [run],
       )
 
-      const onLogs = React.useCallback(async (data, run) => {
-        if (logs !== null && logs.repo === data.repo && logs.runId === run.id) {
+      const onLogs = React.useCallback(async (data, entry) => {
+        if (logs !== null && logs.repo === data.repo && logs.runId === entry.id) {
           setLogs(null)
           return
         }
-        setError(null)
-        const result = await postJson(LOGS_URL, { repo: data.repo, runId: run.id }, ACTION_TIMEOUT_MS)
-        if (!result.ok) {
-          setError(result.aborted ? t('state.timeout') : t('state.hostGone'))
+        const result = await postJson('/logs', { repo: data.repo, runId: entry.id }, ACTION_TIMEOUT_MS)
+        if (!result.ok || !result.response.ok || result.payload?.ok !== true) {
+          setError(t('state.actionFailed', { reason: result.payload?.message ?? 'logs unavailable' }))
           return
         }
-        if (!result.response.ok || result.payload?.ok !== true) {
-          setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
-          return
-        }
-        setLogs({ repo: data.repo, runId: run.id, lines: result.payload.value?.lines ?? [], truncated: result.payload.value?.truncated === true })
-      }, [logs, t])
+        setLogs({ repo: data.repo, runId: entry.id, lines: result.payload.value?.lines ?? [], truncated: result.payload.value?.truncated === true })
+      }, [logs, setError, t])
 
       const repos = overview?.repos ?? []
-      const gh = status?.gh ?? null
-
-      const header = h(
-        'div',
-        { className: 'dsc-bar' },
-        h(
-          'div',
-          { className: 'dsc-heading' },
-          h('span', { className: 'dsc-title' }, t('title')),
-          h('span', { className: 'dsc-subtitle' }, t('subtitle')),
-        ),
-        h(
-          'div',
-          { className: 'dsc-meta' },
-          gh !== null && gh.account !== null ? h(Badge, { state: 'idle' }, `${t('meta.account')} ${gh.account}`) : null,
-          overview !== null && typeof overview.fetchedAt === 'string'
-            ? h('span', null, t('meta.updated', { time: stamp(overview.fetchedAt) }), overview.cached === true ? ` (${t('meta.cached')})` : '')
-            : null,
-          h('button', { type: 'button', className: 'dsc-btn', disabled: busy !== '', onClick: () => { void loadStatus(); void loadOverview({ force: true }) } }, t('action.refresh')),
-        ),
-      )
-
-      const body = []
-      if (status === null) {
-        body.push(h('div', { className: 'dsc-empty', key: 'loading' }, t('state.loading')))
-      } else {
-        // The setup block is shown for every reason the panel has nothing useful
-        // to render — and hidden once it does, so it never becomes furniture.
-        const needsSetup = status.gh?.available !== true
-          || status.gh?.authenticated !== true
-          || (Array.isArray(status.gh?.missingScopes) && status.gh.missingScopes.length > 0)
-          || (Array.isArray(status.repos) && status.repos.length === 0)
-          || (status.configProblem !== null && status.configProblem !== undefined)
-        if (needsSetup) {
-          body.push(h(Setup, { key: 'setup', t, status, onRecheck: () => { void loadStatus(); void loadOverview({ force: true }) } }))
-        }
-        if (overview?.configProblem) {
-          body.push(h('div', { className: 'dsc-warn', key: 'config' }, t('setup.configProblem', { reason: String(overview.configProblem) })))
-        }
-        for (const data of repos) {
-          body.push(h(RepoCard, { key: data.repo, t, data, busy, onAction, onPublish: (tag) => onPublish(data.repo, tag), logs, onLogs }))
-        }
-      }
+      const gh = status?.gh ?? {}
+      const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
+      const setupNeeded = status !== null && (needsAccountSetup(gh) || repos.length === 0)
 
       return h(
         'div',
         { className: 'dsc-root' },
-        header,
-        error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, error) : null,
+        h(
+          'div',
+          { className: 'dsc-bar' },
+          h(
+            'div',
+            { className: 'dsc-heading' },
+            h('span', { className: 'dsc-title' }, t('title')),
+            h('span', { className: 'dsc-subtitle' }, t('subtitle')),
+          ),
+          h(
+            'div',
+            { className: 'dsc-meta' },
+            gh.account !== null && gh.account !== undefined ? h(Chip, { state: 'idle' }, `${t('meta.account')} ${gh.account}`) : null,
+            overview !== null && typeof overview.fetchedAt === 'string'
+              ? h('span', null, t('meta.updated', { time: stamp(overview.fetchedAt) }), overview.cached === true ? ` (${t('meta.cached')})` : '')
+              : null,
+            h(Btn, { onClick: () => { void loadStatus(); void loadOverview({ force: true }) } }, t('action.refresh')),
+            h(Btn, { kind: managing ? 'primary' : undefined, onClick: () => setManaging((value) => !value) }, managing ? t('action.close') : t('action.manage')),
+          ),
+        ),
+
+        error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
         notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
-        ...body,
+
+        setupNeeded
+          ? h(
+              'div',
+              { className: 'dsc-setup' },
+              h('span', { className: 'dsc-setup-strong' }, gh.available !== true
+                ? t('setup.needGh')
+                : gh.authenticated !== true
+                  ? t('setup.needSignIn')
+                  : missing.length > 0
+                    ? t('setup.needScopes', { scopes: missing.join(', ') })
+                    : t('setup.needRepos')),
+              missing.length > 0 ? h('span', null, t('setup.scopeHint')) : null,
+              h(SignIn, { t, status, onChanged: () => { void loadStatus(); void loadOverview({ force: true }) } }),
+              h(
+                'details',
+                null,
+                h('summary', null, t('setup.advanced')),
+                h(
+                  'div',
+                  { className: 'dsc-sub' },
+                  h('span', null, t('setup.ghInstall')),
+                  h(CopyLine, { t, command: 'winget install --id GitHub.cli' }),
+                  h(CopyLine, { t, command: `node "${status?.helper?.configureScript ?? 'scripts/configure.mjs'}" list` }),
+                ),
+              ),
+            )
+          : null,
+
+        managing ? h(RepoPicker, { t, onChanged: () => { void loadStatus(); void loadOverview({ force: true }) } }) : null,
+
+        repos.length > 0
+          ? h(
+              'div',
+              { className: 'dsc-list' },
+              repos.map((data) => h(RepoRow, {
+                key: data.repo,
+                t,
+                data,
+                busy,
+                onAction,
+                onPublish: (tag) => onPublish(data.repo, tag),
+                logs,
+                onLogs,
+              })),
+            )
+          : null,
+      )
+    }
+
+    /** The Settings page: account, scopes, and the repository list. */
+    function AccountPage(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const { status, error, loadStatus } = useConsoleState()
+      const [managing, setManaging] = React.useState(false)
+
+      React.useEffect(() => {
+        void loadStatus()
+      }, [loadStatus])
+
+      const gh = status?.gh ?? {}
+      const config = status?.config ?? {}
+      const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
+      const scopes = Array.isArray(gh.scopes) ? gh.scopes : []
+      const registered = Array.isArray(status?.repos) ? status.repos.length : 0
+
+      return h(
+        'div',
+        { className: 'dsc-root' },
+        h(
+          'div',
+          { className: 'dsc-bar' },
+          h(
+            'div',
+            { className: 'dsc-heading' },
+            h('span', { className: 'dsc-title' }, t('settings.title')),
+            h('span', { className: 'dsc-subtitle' }, t('settings.subtitle')),
+          ),
+          h(Btn, { onClick: () => void loadStatus() }, t('action.recheck')),
+        ),
+
+        error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
+
+        status === null
+          ? h('div', { className: 'dsc-empty' }, t('state.loading'))
+          : h(
+              React.Fragment,
+              null,
+              h(
+                'div',
+                { className: 'dsc-list' },
+                h(
+                  'div',
+                  { className: 'dsc-item' },
+                  h(
+                    'div',
+                    { className: 'dsc-row' },
+                    h('span', { className: 'dsc-dot', 'data-state': gh.available !== true ? 'error' : gh.authenticated !== true ? 'warn' : 'success' }),
+                    h('span', { className: 'dsc-name' }, t('meta.gh')),
+                    h('span', { className: 'dsc-grow' }, gh.available !== true ? (gh.message ?? 'not found') : (gh.version ?? 'present')),
+                    gh.authenticated === true && typeof gh.account === 'string' && gh.account !== ''
+                      ? h(Chip, { state: 'success' }, gh.account)
+                      : h(Chip, { state: 'warn' }, t('setup.needSignIn')),
+                  ),
+                ),
+                h(
+                  'div',
+                  { className: 'dsc-item' },
+                  h(
+                    'div',
+                    { className: 'dsc-row' },
+                    h('span', { className: 'dsc-dot', 'data-state': missing.length > 0 ? 'warn' : 'success' }),
+                    h('span', { className: 'dsc-name' }, t('meta.scopes')),
+                    h('span', { className: 'dsc-grow' }, gh.authenticated !== true ? '—' : scopes.length > 0 ? scopes.join(', ') : t('meta.noScopes')),
+                    missing.length > 0 ? h(Chip, { state: 'warn' }, missing.join(', ')) : null,
+                  ),
+                ),
+                h(
+                  'div',
+                  { className: 'dsc-item' },
+                  h(
+                    'div',
+                    { className: 'dsc-row' },
+                    h('span', { className: 'dsc-dot', 'data-state': 'idle' }),
+                    h('span', { className: 'dsc-name' }, t('meta.configFrom')),
+                    h('span', { className: 'dsc-grow dsc-mono' }, `${status.configSource ?? '—'} · ${status.configFile ?? ''}`),
+                    h('span', null, String(registered)),
+                  ),
+                ),
+              ),
+
+              needsAccountSetup(gh)
+                ? h(
+                    'div',
+                    { className: 'dsc-setup' },
+                    h('span', { className: 'dsc-setup-strong' }, gh.available !== true
+                      ? t('setup.needGh')
+                      : gh.authenticated !== true
+                        ? t('setup.needSignIn')
+                        : t('setup.needScopes', { scopes: missing.join(', ') })),
+                    missing.length > 0 ? h('span', null, t('setup.scopeHint')) : null,
+                    h(SignIn, { t, status, onChanged: () => void loadStatus() }),
+                  )
+                : null,
+
+              h(
+                'div',
+                { className: 'dsc-bar' },
+                h('span', { className: 'dsc-subtitle' }, `${t('meta.projectsRoot')}: ${typeof config.projectsRoot === 'string' && config.projectsRoot !== '' ? config.projectsRoot : t('meta.projectsRootUnset')}`),
+                h(Btn, { kind: managing ? 'primary' : undefined, onClick: () => setManaging((value) => !value) }, managing ? t('action.close') : t('action.manage')),
+              ),
+              managing ? h(RepoPicker, { t, onChanged: () => void loadStatus() }) : null,
+            ),
       )
     }
 
@@ -888,6 +1155,15 @@ window.__ModuleLoader__.load({
             ctx.slots.register(
               { name: 'sidebar.panellist', id: PANEL_ID, order: 16, label: () => t('panel'), locale: NS },
               ConsoleIcon,
+            ),
+          ),
+          // The shipped `account` section belongs to another plugin, and reusing its
+          // id would REPLACE DSH's own account page. A sibling section is the
+          // additive seat, and `order: -9` puts it directly under Account.
+          ctx.slots.inject('settings.section', () =>
+            ctx.slots.register(
+              { name: 'settings.section', id: SETTINGS_ID, order: -9, label: () => t('settings.label'), locale: NS },
+              AccountPage,
             ),
           ),
         ]

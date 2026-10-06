@@ -19,7 +19,7 @@
  */
 
 import { createServer } from 'node:http'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -70,6 +70,14 @@ const EXPECTED = [
   '/api/dsh-cicd/run-action',
   '/api/dsh-cicd/release-action',
   '/api/dsh-cicd/logs',
+  // Setup without a terminal: the browser sign-in and the repository list are
+  // routes, not instructions to go and run something elsewhere.
+  '/api/dsh-cicd/auth-start',
+  '/api/dsh-cicd/auth-state',
+  '/api/dsh-cicd/auth-cancel',
+  '/api/dsh-cicd/repos-available',
+  '/api/dsh-cicd/config-add',
+  '/api/dsh-cicd/config-remove',
 ]
 check('every route is registered', EXPECTED.every((path) => routes.has(path)), `${routes.size} registered`)
 check('nothing extra is registered', routes.size === EXPECTED.length, [...routes.keys()].join(','))
@@ -131,6 +139,46 @@ try {
 
   const badTag = await call('/api/dsh-cicd/release-action', { repo: 'octocat/Hello-World', tag: '$(rm -rf /)', action: 'publish' })
   check('an unusable tag is refused before gh runs', badTag.status === 400, badTag.payload?.message ?? '')
+
+  /* --- setup routes -------------------------------------------------------
+     Only the refusal paths of `auth-start` are exercised: its success path spawns
+     `gh auth login --web`, which would start a real device flow and leave a child
+     polling GitHub for ten minutes. A test must not do that to whoever runs it. */
+  const idle = await call('/api/dsh-cicd/auth-state', {})
+  check('auth-state starts idle', idle.status === 200 && idle.payload?.value?.state === 'idle', JSON.stringify(idle.payload?.value))
+
+  const badMode = await call('/api/dsh-cicd/auth-start', { mode: 'sudo' })
+  check('an unsupported auth mode is refused without spawning', badMode.status === 400, badMode.payload?.message ?? '')
+
+  const emptyRefresh = await call('/api/dsh-cicd/auth-start', { mode: 'refresh', scopes: [] })
+  check('a refresh with no justifiable scope is refused', emptyRefresh.status === 400, emptyRefresh.payload?.message ?? '')
+
+  const cancelIdle = await call('/api/dsh-cicd/auth-cancel', {})
+  // Cancelling with nothing in flight is a no-op that reports the truth. Saying
+  // "cancelled" here would be a small lie the panel would then render.
+  check('cancelling with nothing in flight reports idle', cancelIdle.status === 200 && cancelIdle.payload?.value?.state === 'idle', JSON.stringify(cancelIdle.payload?.value))
+
+  const badAdd = await call('/api/dsh-cicd/config-add', { repo: '--flag' })
+  check('an unusable repository name is refused', badAdd.status === 400, badAdd.payload?.message ?? '')
+
+  const relativeAdd = await call('/api/dsh-cicd/config-add', { repo: 'octocat/Hello-World', localPath: 'relative\\dir' })
+  check('a relative localPath is refused', relativeAdd.status === 400, relativeAdd.payload?.message ?? '')
+
+  const added = await call('/api/dsh-cicd/config-add', { repo: 'octocat/Spoon-Knife' })
+  check('a repository can be registered from the panel', added.status === 200 && added.payload?.value?.registered === 2, JSON.stringify(added.payload?.value))
+  const listAfterAdd = JSON.parse(readFileSync(configFile, 'utf8'))
+  check('the registration really reached the file', listAfterAdd.repos.some((entry) => entry.repo === 'octocat/Spoon-Knife'), JSON.stringify(listAfterAdd.repos.map((entry) => entry.repo)))
+  check('a backup of the previous revision is kept', existsSync(`${configFile}.bak`))
+
+  const removed = await call('/api/dsh-cicd/config-remove', { repo: 'octocat/Spoon-Knife' })
+  check('a repository can be unregistered from the panel', removed.status === 200 && removed.payload?.value?.registered === 1, JSON.stringify(removed.payload?.value))
+  const removeAgain = await call('/api/dsh-cicd/config-remove', { repo: 'octocat/Spoon-Knife' })
+  check('removing twice is refused, not silent', removeAgain.status === 400, removeAgain.payload?.message ?? '')
+
+  const available = await call('/api/dsh-cicd/repos-available', { limit: 1 })
+  // Either it lists (signed in) or it reports why not (not signed in). What must
+  // never happen is a non-JSON answer or a hang.
+  check('repos-available answers with a verdict', available.payload !== null && typeof available.payload.ok === 'boolean', `HTTP ${available.status}`)
 
   if (process.env.DSH_CICD_LIVE === '1') {
     console.log('\n-- live over HTTP (DSH_CICD_LIVE=1) --')

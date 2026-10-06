@@ -26,6 +26,8 @@
 #   owner             default ''      GitHub login for bare `repo` entries
 #   repos             default []      hand-written fallback; the managed file wins
 #   configFile        default ''      '' = <DSH_HOME>/dsh-plugin-cicd/repos.json
+#   projectsRoot      default ''      where local checkouts live; the panel adds a
+#                                     repository by matching its package.json name there
 #   defaultBranch     default main    ref used when the panel triggers a workflow
 #   buildWorkflow     default ci.yml  the workflow the 构建 button dispatches
 #   releaseWorkflow   default release.yml

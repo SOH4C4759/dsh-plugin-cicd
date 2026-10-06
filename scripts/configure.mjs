@@ -24,13 +24,11 @@
  * here rewrites a path, so what you typed is what the plugin sees.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import { SLUG, SLUG_WITH_OWNER, isValidRepoName, readConfig, writeConfig } from '../lib/config-store.mjs'
 
-/** Same shape rules the Host applies before a name becomes one `gh` argument. */
-const SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
-const SLUG_WITH_OWNER = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
 const DEFAULT_HOST_URL = 'http://127.0.0.1:19387'
 
 const argv = process.argv.slice(2)
@@ -65,56 +63,17 @@ function configPath() {
   return join(home, 'dsh-plugin-cicd', 'repos.json')
 }
 
-/** Read the managed file; a missing file is an empty configuration, not an error. */
-function readConfig(file) {
-  if (!existsSync(file)) return { owner: '', repos: [] }
-  let parsed
-  try {
-    parsed = JSON.parse(readFileSync(file, 'utf8'))
-  } catch (error) {
-    fail(`${file} is not valid JSON (${error.message}). Fix or delete it, then retry.`)
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) fail(`${file} must contain a JSON object`)
-  const repos = []
-  for (const entry of Array.isArray(parsed.repos) ? parsed.repos : []) {
-    if (entry === null || typeof entry !== 'object') continue
-    if (typeof entry.repo !== 'string') continue
-    repos.push({
-      repo: entry.repo,
-      ...(typeof entry.localPath === 'string' && entry.localPath !== '' ? { localPath: entry.localPath } : {}),
-      ...(typeof entry.label === 'string' && entry.label !== '' ? { label: entry.label } : {}),
-    })
-  }
-  return { owner: typeof parsed.owner === 'string' ? parsed.owner : '', repos }
-}
-
-/**
- * Write the file atomically.
- *
- * A half-written configuration would be read by the running plugin as invalid and
- * would blank the panel, so the new content lands via rename and the previous
- * revision is kept beside it.
- */
-function writeConfig(file, config) {
-  const body = `${JSON.stringify({ owner: config.owner, repos: config.repos }, null, 2)}\n`
-  mkdirSync(dirname(file), { recursive: true })
-  if (existsSync(file)) {
-    try {
-      writeFileSync(`${file}.bak`, readFileSync(file))
-    } catch {
-      /* a missing backup must not block the write */
-    }
-  }
-  const temporary = `${file}.tmp`
-  writeFileSync(temporary, body, 'utf8')
-  renameSync(temporary, file)
-  return body
+/** Read the managed file and turn a problem into a CLI error. */
+function loadConfig(file) {
+  const stored = readConfig(file)
+  if (stored.problem !== null) fail(`${stored.problem}. Fix or delete the file, then retry.`)
+  return { owner: stored.owner, repos: stored.repos, dropped: stored.dropped }
 }
 
 /** Validate one repository argument the way the Host will. */
 function checkRepoSlug(repo) {
   if (repo === undefined) fail('a repository name is required')
-  if (!SLUG.test(repo) && !SLUG_WITH_OWNER.test(repo)) {
+  if (!isValidRepoName(repo)) {
     fail(`unusable repository name: ${JSON.stringify(repo)} — expected "name" or "owner/name"`)
   }
   return repo
@@ -133,7 +92,7 @@ function emit(payload, human) {
 }
 
 const file = configPath()
-const config = readConfig(file)
+const config = loadConfig(file)
 
 switch (command) {
   case 'list': {

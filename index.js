@@ -27,11 +27,18 @@
  * @module dsh-plugin-cicd
  */
 
-import { execFile } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import {
+  isValidRepoName,
+  normalizeEntry,
+  parseConfig,
+  readConfig,
+  writeConfig,
+} from './lib/config-store.mjs'
 
 /** Plugin name shown in loader logs. */
 export const name = 'dsh-plugin-cicd'
@@ -62,6 +69,13 @@ const MAX_BODY_BYTES = 32 * 1024
 const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
 
 /**
+ * How long a browser sign-in attempt may stay pending. GitHub expires the
+ * one-time code after about fifteen minutes; the panel should not hold a polling
+ * child longer than a person would plausibly take.
+ */
+const AUTH_TIMEOUT_MS = 10 * 60 * 1000
+
+/**
  * Scopes the panel actually needs. `repo` covers private repositories, releases
  * and the Actions API; `workflow` is what allows dispatching one. Nothing here
  * needs `admin:*`, so the guide asks for the minimum that makes the buttons work.
@@ -89,29 +103,16 @@ function text(value, fallback = '') {
 /**
  * Normalize one configured repository entry.
  *
- * Both shapes are accepted because both are natural to write by hand in a patch:
- *   - `dsh-plugin-restart`
- *   - `{ repo: dsh-plugin-restart, localPath: 'F:\CodeProj\dsh-plugin-restart' }`
+ * The rules live in `lib/config-store.mjs` because `scripts/configure.mjs` writes
+ * the same file the Host reads: two copies of "what a repository name may look
+ * like" would eventually disagree, and the failure mode of that disagreement is a
+ * registered repository the panel silently ignores.
  *
  * @param {unknown} entry - one element of `config.repos`.
  * @returns {{repo: string, localPath: string, label: string}|null}
  */
 export function normalizeRepoEntry(entry) {
-  if (typeof entry === 'string') {
-    const repo = entry.trim()
-    return SLUG.test(repo) || SLUG_WITH_OWNER.test(repo) ? { repo, localPath: '', label: '' } : null
-  }
-  if (entry === null || typeof entry !== 'object') return null
-  const repo = text(entry.repo ?? entry.name)
-  if (!SLUG.test(repo) && !SLUG_WITH_OWNER.test(repo)) return null
-  const localPath = text(entry.localPath ?? entry.path)
-  return {
-    repo,
-    // An absolute path only: a relative one would be resolved against the Host's
-    // own working directory, which is not the user's shell directory.
-    localPath: localPath !== '' && isAbsolute(localPath) ? localPath : '',
-    label: text(entry.label),
-  }
+  return normalizeEntry(entry)
 }
 
 /**
@@ -147,6 +148,12 @@ export function resolveConfig(raw) {
     logTailLines: clampNumber(raw?.logTailLines, 20, MAX_LOG_TAIL_LINES, DEFAULT_LOG_TAIL_LINES),
     pollSeconds: clampNumber(raw?.pollSeconds, 10, 900, DEFAULT_POLL_SECONDS),
     configFile: text(raw?.configFile),
+    /**
+     * Where local checkouts live. Used only to fill `localPath` automatically when
+     * a repository is registered from the panel: asking a person to type an
+     * absolute path is exactly the kind of step this plugin exists to remove.
+     */
+    projectsRoot: text(raw?.projectsRoot),
   }
 }
 
@@ -173,76 +180,46 @@ export function resolveConfigFilePath(config) {
  *
  * Rejects rather than repairs: a file this plugin wrote and cannot read is a
  * symptom worth showing, and silently falling back to "no repositories" would
- * look identical to "you configured nothing yet".
+ * look identical to "you configured nothing yet". The rules themselves live in
+ * `lib/config-store.mjs`, which `scripts/configure.mjs` and the mutation routes
+ * also use — one definition of the format, three callers.
  *
  * @param {string} raw - file contents.
- * @returns {{ok: true, owner: string, repos: object[]}|{ok: false, message: string}}
+ * @returns {{ok: true, owner: string, repos: object[], dropped: number}|{ok: false, message: string}}
  */
 export function parseReposFile(raw) {
-  let parsed
-  try {
-    parsed = JSON.parse(raw)
-  } catch (error) {
-    return { ok: false, message: `not valid JSON: ${error.message}` }
-  }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, message: 'expected a JSON object with "owner" and "repos"' }
-  }
-  const declared = Array.isArray(parsed.repos) ? parsed.repos : []
-  if (parsed.repos !== undefined && !Array.isArray(parsed.repos)) {
-    return { ok: false, message: '"repos" must be an array' }
-  }
-  const repos = []
-  const seen = new Set()
-  for (const entry of declared.slice(0, MAX_REPOS)) {
-    const normalized = normalizeRepoEntry(entry)
-    if (normalized === null || seen.has(normalized.repo)) continue
-    seen.add(normalized.repo)
-    repos.push(normalized)
-  }
-  const dropped = declared.length - repos.length
-  return {
-    ok: true,
-    owner: text(parsed.owner),
-    repos,
-    ...(dropped > 0 ? { dropped } : {}),
-  }
+  return parseConfig(raw)
 }
 
 /**
  * Resolve the configuration a request should actually use.
  *
- * The managed file is read on every call rather than at plugin load, so
- * `configure.mjs add` takes effect on the next poll instead of at the next
- * restart. The row config stays the fallback for a machine that never created the
- * file, which keeps a hand-written patch working exactly as documented.
+ * The managed file is read on every call rather than at plugin load, so a change
+ * made from the panel or from `configure.mjs` takes effect on the next poll
+ * instead of at the next restart. The row config stays the fallback for a machine
+ * that never created the file, which keeps a hand-written patch working exactly as
+ * documented.
  *
  * @param {object} config - the row-resolved config.
  * @returns {object} config plus `repos`, `owner`, `configSource`, `configFile`, `configProblem`.
  */
 export function effectiveConfig(config) {
   const file = resolveConfigFilePath(config)
-  let raw = null
-  try {
-    raw = readFileSync(file, 'utf8')
-  } catch {
-    raw = null
-  }
-  if (raw === null) {
+  const stored = readConfig(file)
+  if (!stored.exists) {
     return { ...config, configFile: file, configSource: config.repos.length > 0 ? 'row' : 'none', configProblem: null }
   }
-  const parsed = parseReposFile(raw)
-  if (!parsed.ok) {
-    return { ...config, configFile: file, configSource: 'file-invalid', configProblem: `${file}: ${parsed.message}` }
+  if (stored.problem !== null) {
+    return { ...config, configFile: file, configSource: 'file-invalid', configProblem: stored.problem }
   }
   return {
     ...config,
-    owner: parsed.owner !== '' ? parsed.owner : config.owner,
-    repos: parsed.repos,
+    owner: stored.owner !== '' ? stored.owner : config.owner,
+    repos: stored.repos,
     configFile: file,
     configSource: 'file',
     configProblem: null,
-    ...(parsed.dropped !== undefined ? { configDropped: parsed.dropped } : {}),
+    configDropped: stored.dropped,
   }
 }
 
@@ -761,6 +738,155 @@ export function apply(ctx, rawConfig) {
     return { ok: true, entry, slug }
   }
 
+  /* ------------------------------------------------------------- sign-in -- */
+
+  /**
+   * The single in-flight sign-in, if any.
+   *
+   * `gh auth login --web` prints a one-time code and a URL and then polls GitHub
+   * until the user approves in a browser. Measured behaviour, which is what makes
+   * this drivable from a panel at all: with stdin left untouched and not a
+   * terminal, `gh` still prints both, so nothing has to fake a keystroke — and
+   * nothing does, because a stray newline would answer whatever prompt came next.
+   */
+  let authAttempt = null
+
+  const stopAuth = () => {
+    const child = authAttempt?.child
+    if (child === null || child === undefined) return
+    try {
+      child.kill()
+    } catch {
+      /* already gone */
+    }
+  }
+
+  const settleAuth = (state, message = null) => {
+    if (authAttempt === null) return
+    if (authAttempt.timer !== null) clearTimeout(authAttempt.timer)
+    authAttempt.state = state
+    authAttempt.message = message
+    authAttempt.child = null
+    authAttempt.timer = null
+  }
+
+  const authSnapshot = () => authAttempt === null
+    ? { state: 'idle', mode: null, code: null, url: null, message: null, startedAt: null }
+    : {
+        state: authAttempt.state,
+        mode: authAttempt.mode,
+        code: authAttempt.code,
+        url: authAttempt.url,
+        message: authAttempt.message,
+        startedAt: new Date(authAttempt.startedAt).toISOString(),
+      }
+
+  const startAuth = (mode, scopes) => {
+    stopAuth()
+    const args = mode === 'refresh'
+      ? ['auth', 'refresh', '--hostname', 'github.com', '-s', scopes.join(',')]
+      : ['auth', 'login', '--hostname', 'github.com', '--git-protocol', 'https', '--web']
+    const child = spawn(ghPath, args, {
+      windowsHide: true,
+      // `GH_PROMPT_DISABLED` must stay unset here: this IS the interactive flow,
+      // just without a terminal. Everything else that would page or colour output
+      // is, because the panel renders what comes back.
+      env: { ...process.env, GH_PROMPT_DISABLED: '', GH_PAGER: 'cat', NO_COLOR: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    const attempt = {
+      id: String(Date.now()),
+      mode,
+      scopes,
+      child,
+      state: 'running',
+      code: null,
+      url: null,
+      output: '',
+      message: null,
+      startedAt: Date.now(),
+      timer: null,
+    }
+    authAttempt = attempt
+
+    const absorb = (chunk) => {
+      attempt.output = `${attempt.output}${chunk.toString()}`.slice(-8_000)
+      const code = /one-time code \(([A-Za-z0-9-]+)\)/i.exec(attempt.output)
+      if (code !== null && attempt.code === null) attempt.code = code[1].toUpperCase()
+      const url = /(https:\/\/\S*\/login\/device)/i.exec(attempt.output)
+      if (url !== null && attempt.url === null) attempt.url = url[1]
+    }
+    child.stdout?.on('data', absorb)
+    child.stderr?.on('data', absorb)
+    child.on('error', (error) => {
+      settleAuth('failed', error.message)
+    })
+    child.on('exit', (exitCode) => {
+      if (attempt.state !== 'running') return
+      if (exitCode === 0) settleAuth('succeeded')
+      else settleAuth('failed', firstLine(attempt.output) || `gh exited with code ${String(exitCode)}`)
+    })
+    // The one-time code is valid for about fifteen minutes; the panel should not
+    // keep a polling child alive for longer than a person would plausibly take.
+    attempt.timer = setTimeout(() => {
+      stopAuth()
+      settleAuth('expired', 'the one-time code expired — start again')
+    }, AUTH_TIMEOUT_MS)
+    if (typeof attempt.timer.unref === 'function') attempt.timer.unref()
+    return attempt
+  }
+
+  /* --------------------------------------------------- repository list -- */
+
+  /**
+   * Find the local checkout of a repository under a configured root.
+   *
+   * Matched by the `name` field of each candidate's package.json rather than by
+   * directory name, because the two genuinely differ here: the checkout that
+   * publishes `dsh-knowledge-console` lives in a directory called
+   * `dsh-plugin-knowledge-console`.
+   *
+   * @param {string} root - configured projects root.
+   * @param {string} repo - repository name (with or without an owner).
+   * @returns {string} absolute path, or '' when nothing matched.
+   */
+  const findLocalCheckout = (root, repo) => {
+    if (root === '' || !existsSync(root)) return ''
+    const wanted = repo.includes('/') ? repo.slice(repo.indexOf('/') + 1) : repo
+    let entries = []
+    try {
+      entries = readdirSync(root, { withFileTypes: true })
+    } catch {
+      return ''
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const directory = join(root, entry.name)
+      const manifest = join(directory, 'package.json')
+      if (!existsSync(manifest)) continue
+      try {
+        const parsed = JSON.parse(readFileSync(manifest, 'utf8'))
+        if (parsed?.name === wanted || parsed?.name === repo) return directory
+      } catch {
+        /* an unreadable manifest is simply not a match */
+      }
+    }
+    return ''
+  }
+
+  /** Persist a change to the managed list, creating the file when it is absent. */
+  const mutateConfig = (current, mutate) => {
+    const stored = readConfig(current.configFile)
+    if (stored.problem !== null && stored.exists) {
+      return { ok: false, message: `the config file cannot be read, so it was left alone: ${stored.problem}` }
+    }
+    const next = mutate({ owner: stored.owner !== '' ? stored.owner : current.owner, repos: [...stored.repos] })
+    if (next.ok !== true) return next
+    writeConfig(current.configFile, { owner: next.owner, repos: next.repos })
+    cache = null
+    return { ok: true, owner: next.owner, count: next.repos.length }
+  }
+
   const statusHandler = async (req, res) => {
     if (!guard(req, res)) return
     const current = live()
@@ -793,7 +919,9 @@ export function apply(ctx, rawConfig) {
           releaseWorkflow: current.releaseWorkflow,
           pollSeconds: current.pollSeconds,
           overviewTtlMs: current.overviewTtlMs,
+          projectsRoot: current.projectsRoot,
         },
+        auth: authSnapshot(),
         configFile: current.configFile,
         configSource: current.configSource,
         configProblem: current.configProblem,
@@ -1000,6 +1128,140 @@ export function apply(ctx, rawConfig) {
     writeJson(res, 200, { ok: true, value: { repo: target.entry.repo, runId, truncated: lines.length > tail.length, lines: tail } })
   }
 
+  /* --------------------------------------------------- setup, no terminal -- */
+
+  /**
+   * Start the browser sign-in.
+   *
+   * This is the whole point of the route: `gh auth login` normally needs a
+   * terminal, and asking someone with no programming background to open one is
+   * asking them not to use the feature. The panel renders the code and the URL and
+   * links the URL; `gh` does the polling and writes the credential itself, so the
+   * plugin still never stores a token.
+   */
+  const authStartHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const mode = text(body?.mode, 'login')
+    if (mode !== 'login' && mode !== 'refresh') {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: `unsupported auth mode: ${mode}` })
+      return
+    }
+    const current = live()
+    const scopes = mode === 'refresh'
+      // Only scopes this plugin can justify: `gh` refuses an unknown one, and the
+      // panel asks for the minimum that makes its buttons work.
+      ? (Array.isArray(body?.scopes) ? body.scopes : []).map((scope) => String(scope)).filter((scope) => REQUIRED_SCOPES.includes(scope))
+      : []
+    if (mode === 'refresh' && scopes.length === 0) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: 'refresh needs at least one of: repo, workflow' })
+      return
+    }
+    startAuth(mode, scopes)
+    // `gh` needs a moment to reach GitHub and print the code; the panel polls
+    // `auth-state`, so this only confirms that the attempt began.
+    writeJson(res, 202, { ok: true, value: { ...authSnapshot(), scopes, gh: ghPath, note: `waiting for the one-time code from ${current.configSource} configuration` } })
+  }
+
+  const authStateHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    writeJson(res, 200, { ok: true, value: authSnapshot() })
+  }
+
+  const authCancelHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    stopAuth()
+    settleAuth('cancelled', null)
+    writeJson(res, 200, { ok: true, value: authSnapshot() })
+  }
+
+  /** The repositories this account can see, with any local checkout already found. */
+  const reposAvailableHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const limit = clampNumber(body?.limit, 1, 200, 100)
+    const result = await ghJson(ghPath, ['api', `user/repos?per_page=${String(limit)}&sort=pushed`, '--jq', '[.[] | {full_name, private, pushed_at, description, fork}]'], current.requestTimeoutMs)
+    if (!result.ok) {
+      writeJson(res, 502, { ok: false, code: 'gh-failed', message: result.message })
+      return
+    }
+    const declared = new Map(current.repos.map((entry) => [entry.repo, entry]))
+    const repos = (Array.isArray(result.value) ? result.value : []).map((entry) => {
+      const fullName = typeof entry?.full_name === 'string' ? entry.full_name : ''
+      const bare = fullName.includes('/') ? fullName.slice(fullName.indexOf('/') + 1) : fullName
+      const existing = declared.get(bare) ?? declared.get(fullName) ?? null
+      return {
+        fullName,
+        bare,
+        private: entry?.private === true,
+        fork: entry?.fork === true,
+        pushedAt: typeof entry?.pushed_at === 'string' ? entry.pushed_at : '',
+        description: typeof entry?.description === 'string' ? entry.description : '',
+        registered: existing !== null,
+        localPath: existing !== null ? existing.localPath : findLocalCheckout(current.projectsRoot, bare),
+      }
+    })
+    writeJson(res, 200, { ok: true, value: { repos, projectsRoot: current.projectsRoot, registered: current.repos.length } })
+  }
+
+  /** Register a repository: the click-driven equivalent of `configure.mjs add`. */
+  const configAddHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const repo = typeof body?.repo === 'string' ? body.repo.trim() : ''
+    if (!isValidRepoName(repo)) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: `unusable repository name: ${JSON.stringify(repo)}` })
+      return
+    }
+    const requestedPath = typeof body?.localPath === 'string' ? body.localPath.trim() : ''
+    // A path that was not asked for is looked up rather than demanded: typing an
+    // absolute path is the step this route exists to remove.
+    const localPath = requestedPath !== '' ? requestedPath : findLocalCheckout(current.projectsRoot, repo)
+    if (localPath !== '' && !isAbsolute(localPath)) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: 'localPath must be absolute' })
+      return
+    }
+    const outcome = mutateConfig(current, (draft) => {
+      const entry = { repo, ...(localPath !== '' ? { localPath } : {}), label: '' }
+      const index = draft.repos.findIndex((candidate) => candidate.repo === repo)
+      if (index === -1) draft.repos.push(entry)
+      else draft.repos[index] = entry
+      return { ok: true, owner: draft.owner, repos: draft.repos }
+    })
+    if (!outcome.ok) {
+      writeJson(res, 502, { ok: false, code: 'config-failed', message: outcome.message })
+      return
+    }
+    writeJson(res, 200, { ok: true, value: { repo, localPath, registered: outcome.count, file: current.configFile } })
+  }
+
+  /** Unregister a repository. */
+  const configRemoveHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const repo = typeof body?.repo === 'string' ? body.repo.trim() : ''
+    if (repo === '') {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: 'body.repo is required' })
+      return
+    }
+    const outcome = mutateConfig(current, (draft) => {
+      const before = draft.repos.length
+      draft.repos = draft.repos.filter((candidate) => candidate.repo !== repo)
+      if (draft.repos.length === before) return { ok: false, message: `not registered: ${repo}` }
+      return { ok: true, owner: draft.owner, repos: draft.repos }
+    })
+    if (!outcome.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: outcome.message })
+      return
+    }
+    writeJson(res, 200, { ok: true, value: { repo, registered: outcome.count, file: current.configFile } })
+  }
+
   const routes = [
     [`${ROUTE_PREFIX}/status`, statusHandler],
     [`${ROUTE_PREFIX}/overview`, overviewHandler],
@@ -1008,7 +1270,16 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/run-action`, runActionHandler],
     [`${ROUTE_PREFIX}/release-action`, releaseActionHandler],
     [`${ROUTE_PREFIX}/logs`, logsHandler],
+    [`${ROUTE_PREFIX}/auth-start`, authStartHandler],
+    [`${ROUTE_PREFIX}/auth-state`, authStateHandler],
+    [`${ROUTE_PREFIX}/auth-cancel`, authCancelHandler],
+    [`${ROUTE_PREFIX}/repos-available`, reposAvailableHandler],
+    [`${ROUTE_PREFIX}/config-add`, configAddHandler],
+    [`${ROUTE_PREFIX}/config-remove`, configRemoveHandler],
   ]
+  // A sign-in child polls GitHub for up to ten minutes; it must not outlive the
+  // plugin that owns it.
+  if (typeof ctx.effect === 'function') ctx.effect(() => stopAuth, 'dsh-plugin-cicd: sign-in child')
   for (const [path, handler] of routes) {
     const dispose = ctx.webServer.register({ kind: 'exact', path, handler })
     if (typeof ctx.effect === 'function') ctx.effect(() => dispose, `dsh-plugin-cicd: ${path}`)
