@@ -75,6 +75,9 @@ const EXPECTED = [
   '/api/dsh-cicd/auth-start',
   '/api/dsh-cicd/auth-state',
   '/api/dsh-cicd/auth-cancel',
+  // Signing out belongs here for the same reason as signing in: the panel owns the
+  // credential's whole lifecycle, so no step of it should require a terminal.
+  '/api/dsh-cicd/auth-logout',
   '/api/dsh-cicd/repos-available',
   '/api/dsh-cicd/config-add',
   '/api/dsh-cicd/config-remove',

@@ -95,6 +95,9 @@ window.__ModuleLoader__.load({
       'action.copied': '已复制',
       'action.openDevicePage': '打开授权页面',
       'action.cancelSignIn': '取消登录',
+      'action.signOut': '退出登录',
+      'action.signOutConfirm': '确认退出登录？',
+      'state.signedOut': '已退出登录：令牌已从系统凭据存储移除。注意 git 推送会随之失效（git 的凭据本来就由 gh 提供），重新登录后恢复。',
       'label.runs': '运行记录',
       'chip.published': '已发布',
       'chip.unpublished': '未发布',
@@ -205,6 +208,9 @@ window.__ModuleLoader__.load({
       'action.copied': 'Copied',
       'action.openDevicePage': 'Open the authorization page',
       'action.cancelSignIn': 'Cancel sign-in',
+      'action.signOut': 'Sign out',
+      'action.signOutConfirm': 'Confirm sign out?',
+      'state.signedOut': 'Signed out: the token was removed from the operating system credential store. git push stops working until you sign in again — git takes its credential from gh.',
       'label.runs': 'Runs',
       'chip.published': 'Released',
       'chip.unpublished': 'Unreleased',
@@ -1318,8 +1324,11 @@ window.__ModuleLoader__.load({
     /** The Settings page: account, scopes, and the repository list. */
     function AccountPage(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const { status, error, loadStatus } = useConsoleState()
+      const { status, error, setError, loadStatus } = useConsoleState()
       const [managing, setManaging] = React.useState(false)
+      const [confirmingSignOut, setConfirmingSignOut] = React.useState(false)
+      const [signOutBusy, setSignOutBusy] = React.useState(false)
+      const [notice, setNotice] = React.useState(null)
 
       React.useEffect(() => {
         void loadStatus()
@@ -1345,9 +1354,37 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dsc-subtitle' }, t('settings.subtitle')),
           ),
           h(Btn, { onClick: () => void loadStatus() }, t('action.recheck')),
+          /* Signing out is destructive and easy to hit by accident, so it takes two
+             clicks — the same shape as publishing a draft. */
+          gh.authenticated === true
+            ? h(Btn, {
+                kind: 'quiet',
+                disabled: signOutBusy,
+                title: t('state.signedOut'),
+                onClick: () => {
+                  if (!confirmingSignOut) {
+                    setConfirmingSignOut(true)
+                    return
+                  }
+                  void (async () => {
+                    setSignOutBusy(true)
+                    const result = await postJson('/auth-logout', {}, ACTION_TIMEOUT_MS)
+                    setSignOutBusy(false)
+                    setConfirmingSignOut(false)
+                    if (!result.ok || result.payload?.ok !== true) {
+                      setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+                      return
+                    }
+                    setNotice(t('state.signedOut'))
+                    void loadStatus()
+                  })()
+                },
+              }, signOutBusy ? '…' : confirmingSignOut ? t('action.signOutConfirm') : t('action.signOut'))
+            : null,
         ),
 
         error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
+        notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
         stale
           ? h('div', { className: 'dsc-warn', role: 'alert' }, h('strong', null, t('stale.title')), ' — ', t('stale.how'))
           : null,

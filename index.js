@@ -1385,6 +1385,54 @@ export function apply(ctx, rawConfig) {
     writeJson(res, 200, { ok: true, value: authSnapshot() })
   }
 
+  /**
+   * Sign out of GitHub.
+   *
+   * The panel could log in, grant scopes, cancel and re-check, but not log out —
+   * leaving the one credential-destroying action available only from a terminal,
+   * which is the opposite of what this panel is for.
+   *
+   * `gh auth logout` asks for confirmation on stdin, so "y" has to be written to
+   * the child. That is the one prompt in this whole plugin where answering stdin is
+   * correct: there is nothing else the child could be waiting on.
+   */
+  const authLogoutHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    // An attempt that is still running would re-authenticate what this removes.
+    stopAuth()
+    settleAuth('idle', null)
+    const child = spawn(ghPath, ['auth', 'logout', '--hostname', 'github.com'], {
+      windowsHide: true,
+      env: { ...process.env, GH_PAGER: 'cat', NO_COLOR: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let output = ''
+    child.stdout?.on('data', (chunk) => { output += String(chunk) })
+    child.stderr?.on('data', (chunk) => { output += String(chunk) })
+    child.on('error', (error) => {
+      writeJson(res, 502, { ok: false, code: 'gh-failed', message: error.message })
+    })
+    child.stdin?.write('y\n')
+    child.stdin?.end()
+    const exitCode = await new Promise((resolve) => {
+      child.on('exit', (code) => resolve(code ?? 1))
+      child.on('error', () => resolve(1))
+      const killTimer = setTimeout(() => {
+        child.kill()
+        resolve(1)
+      }, 20_000)
+      if (typeof killTimer.unref === 'function') killTimer.unref()
+    })
+    if (exitCode !== 0 && !/logged out/i.test(output)) {
+      writeJson(res, 502, { ok: false, code: 'gh-failed', message: firstLine(output) || `gh exited with code ${String(exitCode)}` })
+      return
+    }
+    // The account is gone, so every cached answer about its repositories is stale.
+    cache = null
+    writeJson(res, 200, { ok: true, value: { ...authSnapshot(), note: firstLine(output) || null, gh: await readAuthStatus(ghPath, live().requestTimeoutMs) } })
+  }
+
   /** The repositories this account can see, with any local checkout already found. */
   const reposAvailableHandler = async (req, res) => {
     if (!guard(req, res)) return
@@ -1490,6 +1538,7 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/auth-start`, authStartHandler],
     [`${ROUTE_PREFIX}/auth-state`, authStateHandler],
     [`${ROUTE_PREFIX}/auth-cancel`, authCancelHandler],
+    [`${ROUTE_PREFIX}/auth-logout`, authLogoutHandler],
     [`${ROUTE_PREFIX}/repos-available`, reposAvailableHandler],
     [`${ROUTE_PREFIX}/config-add`, configAddHandler],
     [`${ROUTE_PREFIX}/config-remove`, configRemoveHandler],
