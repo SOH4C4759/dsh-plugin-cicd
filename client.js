@@ -44,6 +44,14 @@ window.__ModuleLoader__.load({
     const STYLE_ID = 'dsh-plugin-cicd-styles'
 
     const BASE = '/api/dsh-cicd'
+    /**
+     * The Host protocol this page needs.
+     *
+     * A page refresh replaces this file but not the Host process, so a route can
+     * be missing while the button that calls it is on screen. Comparing this
+     * number turns that into one sentence instead of a bare HTTP status.
+     */
+    const PROTOCOL = 2
     const STATUS_TIMEOUT_MS = 20_000
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
@@ -93,6 +101,9 @@ window.__ModuleLoader__.load({
       'state.loading': '正在读取…',
       'state.hostGone': '无法连接 Host；面板会保留上一次的数据，稍后自动重试。',
       'state.timeout': '请求超时，Host 没有在时限内回答。',
+      'stale.title': '页面与宿主半边版本不一致',
+      'stale.text': '页面已经是最新的，但运行中的宿主半边还是旧版本——它里面没有这条接口，所以按钮会报 401/404。刷新页面不会更新宿主。',
+      'stale.how': '点侧边栏底部的一键重启（或重启 DeepSeek Harness）之后，两半就一致了。',
       'state.noRuns': '还没有运行记录',
       'state.noReleases': '还没有 Release',
       'state.dispatched': '已触发 {workflow}（{repo}）。',
@@ -187,6 +198,9 @@ window.__ModuleLoader__.load({
       'state.loading': 'Loading…',
       'state.hostGone': 'Cannot reach the Host; the panel keeps the last known data and retries on its own.',
       'state.timeout': 'The request timed out without an answer from the Host.',
+      'stale.title': 'The page and the Host half are different versions',
+      'stale.text': 'This page is current, but the running Host half is older and does not have this route, so the buttons answer 401/404. Refreshing the page does not replace the Host.',
+      'stale.how': 'Use the one-click restart at the foot of the sidebar (or restart DeepSeek Harness) and the two halves match again.',
       'state.noRuns': 'no runs yet',
       'state.noReleases': 'no releases yet',
       'state.dispatched': 'Triggered {workflow} on {repo}.',
@@ -624,7 +638,10 @@ window.__ModuleLoader__.load({
           return
         }
         if (!result.response.ok || result.payload?.ok !== true) {
-          setError(t('picker.failed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          // A missing route is a version mismatch, not a failure of the account.
+          setError(isMissingRoute(result.response.status)
+            ? t('stale.text')
+            : t('picker.failed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
           return
         }
         setRepos(result.payload.value.repos ?? [])
@@ -843,7 +860,7 @@ window.__ModuleLoader__.load({
           setError(null)
           return result.payload.value
         }
-        setError(result.payload?.message ?? `HTTP ${String(result.response.status)}`)
+        setError(isMissingRoute(result.response.status) ? 'stale-host' : (result.payload?.message ?? `HTTP ${String(result.response.status)}`))
         return null
       }, [])
 
@@ -866,11 +883,23 @@ window.__ModuleLoader__.load({
       return { status, overview, error, setError, loadStatus, loadOverview }
     }
 
-    /** Human-readable text for the two transport failures. */
+    /** Human-readable text for the transport and version failures. */
     function errorText(t, code) {
       if (code === 'timeout') return t('state.timeout')
       if (code === 'host') return t('state.hostGone')
+      if (code === 'stale-host') return t('stale.text')
       return code
+    }
+
+    /**
+     * Whether a response means "this Host half does not have that route".
+     *
+     * The local web server answers an unmounted `/api/*` path with 401; a Host
+     * that mounts a different set can also 404. Both are version mismatches first
+     * and request failures second, so they get the version message.
+     */
+    function isMissingRoute(status) {
+      return status === 401 || status === 404
     }
 
     /** Whether a sign-in or a scope grant is still required. */
@@ -976,6 +1005,8 @@ window.__ModuleLoader__.load({
       const gh = status?.gh ?? {}
       const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
       const setupNeeded = status !== null && (needsAccountSetup(gh) || repos.length === 0)
+      // The page and the Host half load independently, so they can disagree.
+      const stale = status !== null && status.protocol !== PROTOCOL
 
       return h(
         'div',
@@ -1003,8 +1034,11 @@ window.__ModuleLoader__.load({
 
         error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
         notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
+        stale
+          ? h('div', { className: 'dsc-warn', role: 'alert' }, h('strong', null, t('stale.title')), ' — ', t('stale.how'))
+          : null,
 
-        setupNeeded
+        setupNeeded && !stale
           ? h(
               'div',
               { className: 'dsc-setup' },
@@ -1032,7 +1066,7 @@ window.__ModuleLoader__.load({
             )
           : null,
 
-        managing ? h(RepoPicker, { t, onChanged: () => { void loadStatus(); void loadOverview({ force: true }) } }) : null,
+        managing && !stale ? h(RepoPicker, { t, onChanged: () => { void loadStatus(); void loadOverview({ force: true }) } }) : null,
 
         repos.length > 0
           ? h(
@@ -1068,6 +1102,7 @@ window.__ModuleLoader__.load({
       const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
       const scopes = Array.isArray(gh.scopes) ? gh.scopes : []
       const registered = Array.isArray(status?.repos) ? status.repos.length : 0
+      const stale = status !== null && status.protocol !== PROTOCOL
 
       return h(
         'div',
@@ -1085,6 +1120,9 @@ window.__ModuleLoader__.load({
         ),
 
         error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
+        stale
+          ? h('div', { className: 'dsc-warn', role: 'alert' }, h('strong', null, t('stale.title')), ' — ', t('stale.how'))
+          : null,
 
         status === null
           ? h('div', { className: 'dsc-empty' }, t('state.loading'))
@@ -1134,7 +1172,7 @@ window.__ModuleLoader__.load({
                 ),
               ),
 
-              needsAccountSetup(gh)
+              needsAccountSetup(gh) && !stale
                 ? h(
                     'div',
                     { className: 'dsc-setup' },
@@ -1154,7 +1192,7 @@ window.__ModuleLoader__.load({
                 h('span', { className: 'dsc-subtitle' }, `${t('meta.projectsRoot')}: ${typeof config.projectsRoot === 'string' && config.projectsRoot !== '' ? config.projectsRoot : t('meta.projectsRootUnset')}`),
                 h(Btn, { kind: managing ? 'primary' : undefined, onClick: () => setManaging((value) => !value) }, managing ? t('action.close') : t('action.manage')),
               ),
-              managing ? h(RepoPicker, { t, onChanged: () => void loadStatus() }) : null,
+              managing && !stale ? h(RepoPicker, { t, onChanged: () => void loadStatus() }) : null,
             ),
       )
     }

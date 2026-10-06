@@ -65,6 +65,18 @@ const DEFAULT_LOG_TAIL_LINES = 120
 const MAX_LOG_TAIL_LINES = 400
 const MAX_BODY_BYTES = 32 * 1024
 
+/**
+ * Wire protocol of the browser half this Host half can serve.
+ *
+ * The two halves do not reload together: the browser bundle is read from disk on
+ * every page load, while this module is imported once per Host process. A page
+ * refresh therefore produces "new client, old host", where the client calls a
+ * route that does not exist yet and reports it as a request failure — which reads
+ * like a GitHub or credential problem and is neither. The client compares this
+ * number and says what to do instead.
+ */
+const PROTOCOL = 2
+
 /** The managed repository list, written by `scripts/configure.mjs`. */
 const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
 
@@ -901,6 +913,7 @@ export function apply(ctx, rawConfig) {
     writeJson(res, 200, {
       ok: true,
       value: {
+        protocol: PROTOCOL,
         enabled: current.enabled,
         gh: {
           path: ghPath,

@@ -117,6 +117,9 @@ try {
   const status = await call('/api/dsh-cicd/status', {})
   check('status answers over HTTP', status.status === 200 && status.payload?.ok === true, `HTTP ${status.status}`)
   const value = status.payload?.value ?? {}
+  // The page and the Host half load independently, so the handshake is part of the
+  // contract: without it a stale Host looks like a broken account.
+  check('the Host declares a protocol version', typeof value.protocol === 'number' && value.protocol >= 2, String(value.protocol))
   // `gh` ships on GitHub's runners and on the machine this was written for, so
   // "installed" is a safe expectation; "signed in" is not, and is not asserted.
   check('gh is reported as available', value.gh?.available === true, String(value.gh?.version ?? value.gh?.message))
