@@ -132,6 +132,8 @@ jobs:
           test -f "$STAGE/package/cordis.patch.yml"
           node "$STAGE/package/scripts/verify-bundle.mjs" "$STAGE/package"
           node "$STAGE/package/tests/host-checks.mjs"
+          # The decisive one: mount the published copy and serve its routes.
+          node "$STAGE/package/tests/mount-check.mjs" "$STAGE/package"
 
       - name: Publish the release
         env:

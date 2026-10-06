@@ -37,6 +37,10 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: host checks
         run: node tests/host-checks.mjs
+      # Separates "the functions are correct" from "the package activates": this
+      # one calls apply() with a real webServer and talks to the mounted routes.
+      - name: mount check
+        run: node tests/mount-check.mjs
 
   # The bundle half of CI: continuous build. It checks the manifest contract and
   # then builds the exact archive the release workflow would publish, so a broken
@@ -105,6 +109,7 @@ jobs:
           test -f "$STAGE/package/cordis.patch.yml"
           node "$STAGE/package/scripts/verify-bundle.mjs" "$STAGE/package"
           node "$STAGE/package/tests/host-checks.mjs"
+          node "$STAGE/package/tests/mount-check.mjs" "$STAGE/package"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-build
