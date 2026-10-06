@@ -90,15 +90,16 @@ const AUTH_TIMEOUT_MS = 10 * 60 * 1000
 
 /**
  * How long `gh auth login` may go without printing a one-time code before the
- * attempt is reported as failed.
+ * attempt is reported as stalled.
  *
  * This is not a nicety. Measured on a machine where `github.com:443` was blocked:
  * `gh auth login --web` printed NOTHING and was still running after 20 seconds —
- * no code, no error, no exit. Without this deadline the panel waits for the full
- * fifteen-minute code lifetime saying "waiting for the code", which is both wrong
- * and useless. The deadline converts silence into a diagnosis.
+ * no code, no error, no exit. The code otherwise arrives in well under a second, so
+ * six seconds without one is already abnormal and worth saying out loud. The report
+ * is advisory: the attempt keeps running, because gh was measured producing the code
+ * once the network recovered.
  */
-const AUTH_CODE_DEADLINE_MS = 15_000
+const AUTH_CODE_DEADLINE_MS = 6_000
 
 /**
  * Can this process open a TCP connection to `host:port`?

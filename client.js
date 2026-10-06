@@ -148,7 +148,7 @@ window.__ModuleLoader__.load({
       'setup.codeHint': '在浏览器里打开下面的地址，输入这个一次性代码：',
       'setup.waiting': '等待授权…（在浏览器里完成即可，这里会自动继续）',
       'setup.requestingCode': '正在向 GitHub 申请一次性码…',
-      'setup.codePending': '码还没到。等它出现再打开授权页面——提前打开只会得到一个没有内容可输入的页面。',
+      'setup.codePending': '授权页面已打开——请把下面出现的码输入进去。码还没到，稍等一下它就会出现。',
       'setup.stalled': '已等待 {seconds} 秒仍没有一次性码：{detail}。最常见的原因是 github.com 不可达（面板读取仓库用的 api.github.com 是另一条线路，可能仍然正常）。你可以继续等——网络恢复后码会自己出现——也可以取消后重试。',
       'setup.stalledNoOutput': 'gh 完全没有输出',
       'setup.stalledQuietOutput': 'gh 只输出了空白内容（通常在重试连接）',
@@ -256,7 +256,7 @@ window.__ModuleLoader__.load({
       'setup.codeHint': 'Open the address below in your browser and enter this one-time code:',
       'setup.waiting': 'Waiting for authorization… finish in the browser and this continues by itself.',
       'setup.requestingCode': 'Requesting a one-time code from GitHub…',
-      'setup.codePending': 'The code has not arrived yet. Wait for it before opening the authorization page — opening early leaves you with nothing to enter.',
+      'setup.codePending': 'The authorization page is open — enter the code below once it appears. It has not arrived yet; give it a moment.',
       'setup.stalled': 'No one-time code after {seconds}s: {detail}. The usual cause is that github.com cannot be reached (the panel reads repositories over api.github.com, a different route, so that can still work). You can keep waiting — the code appears once the network recovers — or cancel and try again.',
       'setup.stalledNoOutput': 'gh has printed nothing at all',
       'setup.stalledQuietOutput': 'gh has printed only whitespace (it is usually retrying the connection)',
@@ -647,7 +647,10 @@ window.__ModuleLoader__.load({
                 /* Opening the page before the code exists is the reported failure:
                    the browser shows GitHub's device page and there is nothing to
                    type. The button therefore stays disabled until there is a code. */
-                h(Btn, { kind: 'primary', disabled: code === null, onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
+                /* Always usable: the device page's address is static, so opening it
+                   costs nothing and waiting for the code to enable it was the reason
+                   nothing at all appeared to happen. */
+                h(Btn, { kind: 'primary', onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
                 code !== null ? h(CopyLine, { t, command: code }) : null,
               ),
               h('span', null, code === null ? t('setup.codePending') : t('setup.waiting')),
@@ -677,7 +680,20 @@ window.__ModuleLoader__.load({
                 ? h(Btn, { kind: 'primary', onClick: () => globalThis.open('https://cli.github.com/', '_blank', 'noopener,noreferrer') }, 'cli.github.com')
                 : missing.length > 0
                   ? h(Btn, { kind: 'primary', disabled: busy, onClick: () => void start('refresh') }, t('action.grantScopes'))
-                  : h(Btn, { kind: 'primary', disabled: busy, onClick: () => void start('login') }, t('action.signIn')),
+                  /*
+                   * Open the page from inside the click.
+                   *
+                   * The address is static and does not depend on the code, and opening
+                   * it here is what makes the click keep its promise. It has to happen
+                   * synchronously in the handler: a window opened from an effect after
+                   * an await is outside the user gesture and browsers block it. gh's
+                   * own browser launch does not happen until it has a code — which is
+                   * precisely the situation where nothing seems to happen.
+                   */
+                  : h(Btn, { kind: 'primary', disabled: busy, onClick: () => {
+                      globalThis.open('https://github.com/login/device', '_blank', 'noopener,noreferrer')
+                      void start('login')
+                    } }, t('action.signIn')),
               h(Btn, { disabled: busy, onClick: onChanged }, t('action.recheck')),
             ),
         attempt.state === 'succeeded' ? h('span', null, t('setup.succeeded')) : null,
