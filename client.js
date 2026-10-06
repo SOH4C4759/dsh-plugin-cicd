@@ -524,6 +524,11 @@ window.__ModuleLoader__.load({
     /** A value with a copy button — the fallback path, never the instruction. */
     function CopyLine(props) {
       const { t, command } = props
+      /**
+       * When the value is already on screen, showing it again beside the copy button
+       * just prints the same string twice. The button is then the whole control.
+       */
+      const hideCommand = props.hideCommand === true
       const [copied, setCopied] = React.useState(false)
       React.useEffect(() => {
         if (!copied) return undefined
@@ -537,7 +542,7 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'dsc-cmd' },
-        h('code', null, command),
+        hideCommand ? null : h('code', null, command),
         h(
           Btn,
           {
@@ -661,7 +666,7 @@ window.__ModuleLoader__.load({
                    costs nothing and waiting for the code to enable it was the reason
                    nothing at all appeared to happen. */
                 h(Btn, { kind: 'primary', onClick: () => globalThis.open(url, '_blank', 'noopener,noreferrer') }, t('action.openDevicePage')),
-                code !== null ? h(CopyLine, { t, command: code }) : null,
+                code !== null ? h(CopyLine, { t, command: code, hideCommand: true }) : null,
               ),
               h('span', null, code === null ? t('setup.codePending') : t('setup.waiting')),
               /* Advisory, never a refusal: the probe cannot see a proxy that gh
