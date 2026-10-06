@@ -99,6 +99,7 @@ window.__ModuleLoader__.load({
       'chip.behind': '落后 {count}',
       'chip.private': '私有',
       'state.loading': '正在读取…',
+      'state.reading': '读取中…',
       'state.hostGone': '无法连接 Host；面板会保留上一次的数据，稍后自动重试。',
       'state.timeout': '请求超时，Host 没有在时限内回答。',
       'stale.title': '页面与宿主半边版本不一致',
@@ -198,6 +199,7 @@ window.__ModuleLoader__.load({
       'chip.behind': '{count} behind',
       'chip.private': 'private',
       'state.loading': 'Loading…',
+      'state.reading': 'reading…',
       'state.hostGone': 'Cannot reach the Host; the panel keeps the last known data and retries on its own.',
       'state.timeout': 'The request timed out without an answer from the Host.',
       'stale.title': 'The page and the Host half are different versions',
@@ -784,16 +786,22 @@ window.__ModuleLoader__.load({
           { className: 'dsc-row' },
           h('span', { className: 'dsc-dot', 'data-state': state, title: run === null ? t('state.noRuns') : `${run.workflow} · ${run.conclusion || run.status}` }),
           h('span', { className: 'dsc-name' }, data.label),
-          data.versionKnown === true && data.version !== null ? h(Chip, { state: 'idle' }, `v${data.version}`) : null,
-          data.draftTag !== null
-            ? h(Chip, { state: 'warn' }, `${t('chip.draft')} ${data.draftTag}`)
-            : data.published
-              // Name the tag: without a local checkout the panel knows the release
-              // from GitHub alone, and the tag is the fact it actually has.
-              ? h(Chip, { state: 'success' }, data.publishedTag === null ? t('chip.published') : `${t('chip.published')} ${data.publishedTag}`)
-              : h(Chip, { state: 'idle' }, t('chip.unpublished')),
+          /* Registered, but GitHub has not been read yet: say so rather than
+             showing "未发布", which would be a claim the panel cannot make. */
+          data.pending === true
+            ? h(Chip, { state: 'busy' }, t('state.reading'))
+            : data.versionKnown === true && data.version !== null ? h(Chip, { state: 'idle' }, `v${data.version}`) : null,
+          data.pending === true
+            ? null
+            : data.draftTag !== null
+              ? h(Chip, { state: 'warn' }, `${t('chip.draft')} ${data.draftTag}`)
+              : data.published
+                // Name the tag: without a local checkout the panel knows the release
+                // from GitHub alone, and the tag is the fact it actually has.
+                ? h(Chip, { state: 'success' }, data.publishedTag === null ? t('chip.published') : `${t('chip.published')} ${data.publishedTag}`)
+                : h(Chip, { state: 'idle' }, t('chip.unpublished')),
           chips,
-          h('span', { className: 'dsc-grow' }, run === null ? t('state.noRuns') : `${run.workflow} · ${duration(run)} · ${stamp(run.createdAt)}`),
+          h('span', { className: 'dsc-grow' }, data.pending === true ? t('state.reading') : run === null ? t('state.noRuns') : `${run.workflow} · ${duration(run)} · ${stamp(run.createdAt)}`),
           h(
             'div',
             { className: 'dsc-right' },
@@ -992,6 +1000,25 @@ window.__ModuleLoader__.load({
         }
       }, [loadOverview, pollSeconds])
 
+      /**
+       * Refresh when the panel comes back into view.
+       *
+       * This panel can stay mounted while another one is selected, so re-entering it
+       * used to show whatever had last been rendered — up to a full poll interval
+       * old, which reads as "it still shows the old screen".
+       */
+      React.useEffect(() => {
+        const onVisible = () => {
+          if (document.visibilityState === 'visible') void loadOverview({ force: true })
+        }
+        document.addEventListener('visibilitychange', onVisible)
+        globalThis.addEventListener?.('focus', onVisible)
+        return () => {
+          document.removeEventListener('visibilitychange', onVisible)
+          globalThis.removeEventListener?.('focus', onVisible)
+        }
+      }, [loadOverview])
+
       React.useEffect(() => {
         if (notice === null) return undefined
         const timer = globalThis.setTimeout(() => {
@@ -1060,11 +1087,48 @@ window.__ModuleLoader__.load({
         setLogs({ repo: data.repo, runId: entry.id, lines: result.payload.value?.lines ?? [], truncated: result.payload.value?.truncated === true })
       }, [logs, setError, t])
 
+      /**
+       * The configured list comes from `/status`, the loaded detail from
+       * `/overview`.
+       *
+       * They are not interchangeable. `/status` is cheap and knows the
+       * configuration; `/overview` fans out three GitHub calls per repository and
+       * takes a moment. Deciding "is anything registered?" from the expensive one
+       * meant that any moment before it landed — or any failure — made the panel
+       * announce 还没有登记仓库 to someone who had just registered five, and it hid
+       * the reason at the same time.
+       */
+      const configured = status?.repos ?? []
       const repos = overview?.repos ?? []
       const gh = status?.gh ?? {}
       const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
-      const setupNeeded = status !== null && (needsAccountSetup(gh) || repos.length === 0)
+      const setupNeeded = status !== null && (needsAccountSetup(gh) || configured.length === 0)
       const draftCount = repos.filter((entry) => entry.draftTag !== null && entry.draftTag !== undefined).length
+      /** Configured repositories whose detail has not arrived yet, shown as placeholders. */
+      const pendingRows = configured.length > repos.length
+        ? configured
+            .filter((entry) => !repos.some((loaded) => loaded.repo === entry.repo))
+            .map((entry) => ({
+              repo: entry.repo,
+              label: entry.label,
+              localPath: entry.localPath,
+              pending: true,
+              version: null,
+              versionKnown: false,
+              expectedTag: null,
+              published: false,
+              publishedTag: null,
+              draftTag: null,
+              latestRun: null,
+              runs: [],
+              releases: [],
+              workflows: [],
+              hasBuildWorkflow: false,
+              hasReleaseWorkflow: false,
+              problems: [],
+              local: { available: false },
+            }))
+        : []
       // The page and the Host half load independently, so they can disagree.
       const stale = status !== null && status.protocol !== PROTOCOL
 
@@ -1139,7 +1203,7 @@ window.__ModuleLoader__.load({
 
         managing && !stale ? h(RepoPicker, { t, onChanged: () => { void loadStatus(); void loadOverview({ force: true }) } }) : null,
 
-        repos.length > 0
+        repos.length > 0 || pendingRows.length > 0
           ? h(
               'div',
               { className: 'dsc-list' },
@@ -1152,6 +1216,18 @@ window.__ModuleLoader__.load({
                 onPublish: (tag) => onPublish(data.repo, tag),
                 logs,
                 onLogs,
+              })),
+              // Registered but not read yet: show the row with an honest "reading"
+              // state instead of rendering nothing and implying an empty list.
+              pendingRows.map((data) => h(RepoRow, {
+                key: data.repo,
+                t,
+                data,
+                busy,
+                onAction,
+                onPublish: () => {},
+                logs: null,
+                onLogs: async () => {},
               })),
             )
           : null,
