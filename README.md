@@ -139,8 +139,9 @@ scope 是从 `gh auth status` 真读出来的：缺 `repo` 读不到私有仓库
 
 ## 安全边界
 
-- 七条路由全部是 **POST + 仅回环 + 同源**（`isTrustedRequest`），与宿主设置桥对自家回环路由的信任策略一致：只有「来自本机」且「来自这个 Host 服务的文档」的请求能过。这些路由以本机 GitHub 凭据行事，所以不能只按端口放行。
-- 只读部分：状态、概览、运行、日志。**有副作用的只有三条**：`dispatch`、`run-action`、`release-action`。
+- 所有路由都是 **POST + 仅回环 + 同源**（`isTrustedRequest`），与宿主设置桥对自家回环路由的信任策略一致：只有「来自本机」且「来自这个 Host 服务的文档」的请求能过。这些路由以本机 GitHub 凭据行事，所以不能只按端口放行。
+- 只读部分：状态、概览、运行、日志。**有副作用的是四条**：`dispatch`、`run-action`、`release-action`、`version-bump`。
+- `version-bump` 是唯一会**写本地检出**的路由：只改 `package.json` 的版本行，然后 `git commit` 只提交这一个文件并推送当前分支。工作区不干净、分支没有上游、或落后于上游时它直接拒绝，不做任何写入。
 - `公开发布草稿` 是唯一的不可逆动作，所以它要两次点击、中间那一步明说「发布后任何人可见，无法收回」。
 
 ## HTTP 接口
@@ -152,12 +153,26 @@ scope 是从 `gh auth status` 真读出来的：缺 `repo` 读不到私有仓库
 | `POST /api/dsh-cicd/status` | `gh` 身份与解析后的仓库列表 |
 | `POST /api/dsh-cicd/overview` | 每个仓库的运行 + Release + 本地 git 状态（`{force:true}` 绕过缓存） |
 | `POST /api/dsh-cicd/runs` | `{repo, limit}` 单仓库运行列表 |
-| `POST /api/dsh-cicd/dispatch` | `{repo, workflow?, ref?, inputs?}` 触发 workflow_dispatch |
+| `POST /api/dsh-cicd/dispatch` | `{repo, workflow?, ref?, inputs?}` 触发 workflow_dispatch；触发**发布流程**时会先做发布预检（见下节） |
 | `POST /api/dsh-cicd/run-action` | `{repo, runId, action}`，action ∈ `rerun` / `rerun-failed` / `cancel` |
 | `POST /api/dsh-cicd/release-action` | `{repo, tag, action}`，action ∈ `publish` / `delete`（`delete` 有意不给按钮） |
+| `POST /api/dsh-cicd/version-bump` | `{repo, release?}`，release ∈ `patch`（默认）/ `minor` / `major`：升 `package.json`、提交、推送当前分支 |
 | `POST /api/dsh-cicd/logs` | `{repo, runId}` 失败步骤日志的尾部 |
 
 一律返回 `{ ok: true, value }` 或 `{ ok: false, code, message }`。
+
+## 为什么「发布」曾经必然失败，以及现在的做法
+
+**根因**：发布用的是 `package.json` 里的版本号，而 `release.yml` 有意拒绝覆盖**属于另一个提交的同号 Release**（否则公开草稿会创建旧提交上的 tag，tag 与资产从此不一致，而且整个过程静默）。于是只要树往前走了而版本没升，点「发布」触发的运行一定在第一步失败，约 10 秒后红掉；面板却提前宣告「已产出草稿」，真正的原因还藏在两层点击之后。实测有四个失败运行属于这一类（`dsh-plugin-restart` ×3、`dsh-plugin-cicd` ×1）。
+
+**现在**：
+
+1. **概览行先给出判决**（`releaseCheck`）。宿主拿 `releases[].target_commitish` 与「这次发布会构建的提交」对比：只有**能证明**版本已被另一个提交占用时才判 `blocked`（脏工作区、分支名 target、读不到远端提交都算「证明不了」，一律放行）——预检拦下一个本来能成功的发布，比没有预检更糟。行上出现【版本被占用】标记，展开即写明 `v1.0.0 已属于 48ce81c，而这次发布会构建 e6a1cc1`。
+2. **`dispatch` 会拒绝注定失败的发布**，返回 `409 version-taken`，不再浪费一次运行。
+3. **面板给出解法**：被占用时按钮变成【升版本并发布】，确认框里写明「从 1.0.1 升到 1.0.2、提交并推送到 main」——一次点击完成 `version-bump` + 发布触发。
+4. **文案不再替运行结果打包票**：触发后说的是「是否真的产出草稿要看这次运行的结果，失败时展开点【日志】」。
+
+`version-bump` 的拒绝清单（都保证**一个字节都没写**）：工作区有未提交改动（发布构建的是已推送的提交，这些文件会**静默缺席**于发布包）、分支没有上游、落后于上游、版本号不是 `major.minor.patch`、清单里出现第二个 `version` 键。推送失败**不回滚**：提交是真的，失败通常是 `github.com:443` 的老问题，所以如实回「本地已提交 X，推送失败」并让你重试推送。
 
 ## 设计取舍
 
@@ -168,7 +183,7 @@ scope 是从 `gh auth status` 真读出来的：缺 `repo` 读不到私有仓库
 
 ## 本仓库自身的 CI/CD
 
-它自己也用同一套：[`ci.yml`](.github/workflows/ci.yml) 每次 push 跑 [`tests/host-checks.mjs`](tests/host-checks.mjs)（29 条离线检查，覆盖入口校验/配置夹取/降级路径）并真造一个发布包，[`release.yml`](.github/workflows/release.yml) 在 `v*` tag 上构建并上传 Release。发布流程见 [RELEASING.md](RELEASING.md)。
+它自己也用同一套：[`ci.yml`](.github/workflows/ci.yml) 每次 push 跑 [`tests/host-checks.mjs`](tests/host-checks.mjs)（81 条离线检查，覆盖入口校验/配置夹取/降级路径/发布预检与版本号运算）、[`tests/mount-check.mjs`](tests/mount-check.mjs)（27 条：真挂载、真起 HTTP、真走路由）、[`tests/bump-e2e.mjs`](tests/bump-e2e.mjs)（29 条：真 git 仓库、真提交、真推送，以及每条拒绝都不留半截改动）与 [`tests/client-render.mjs`](tests/client-render.mjs)（21 条：用桩 React 真渲染面板，证明「发布」与【升版本并发布】确实按判决切换，且被拦的原因真的到了屏幕上），并真造一个发布包；[`release.yml`](.github/workflows/release.yml) 在 `v*` tag 上构建并上传 Release，**对解包后的资产**再跑一遍这几套。发布流程见 [RELEASING.md](RELEASING.md)。
 
 `tests/host-checks.mjs` 里另有一半检查需要真实的 `gh` 与特定的仓库状态，用 `DSH_CICD_LIVE=1` 打开：
 

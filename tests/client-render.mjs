@@ -1,0 +1,425 @@
+#!/usr/bin/env node
+/**
+ * Render the panel's client half in a stub React and assert what it says.
+ *
+ * The Host half has `mount-check` to prove it activates; the client half had only
+ * `node --check`, which proves a file parses and nothing else. That gap matters for
+ * exactly the change this file was written for: whether a row offers 发布 or 【升版本
+ * 并发布】 depends on a render branch, and a branch nothing exercises is the kind of
+ * code that breaks only in front of the user.
+ *
+ * So this is a small but real renderer. It is not React and does not try to be: it
+ * walks the element tree, calls function components, keeps `useState` per component
+ * instance, memoises `useCallback`/`useMemo`, and runs `useEffect` with dependency
+ * comparison until nothing is dirty. That is enough to run the panel, let its
+ * effects fetch, and read the tree it produced.
+ *
+ *   node tests/client-render.mjs
+ *   node /tmp/asset/package/tests/client-render.mjs /tmp/asset/package
+ */
+
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import vm from 'node:vm'
+
+const here = fileURLToPath(new URL('.', import.meta.url))
+const packageRoot = resolve(process.argv[2] ?? join(here, '..'))
+const source = readFileSync(join(packageRoot, 'client.js'), 'utf8')
+
+const results = []
+let failed = 0
+function check(label, condition, detail = '') {
+  const pass = condition === true
+  if (!pass) failed += 1
+  results.push({ label, pass })
+  console.log(`${pass ? 'ok  ' : 'FAIL'}  ${label}${detail === '' ? '' : `  — ${detail}`}`)
+}
+
+/* ---- the smallest React that can render this panel ------------------------ */
+
+const values = new Map()
+const effectSlots = new Map()
+const ownerPath = []
+let cursor = 0
+let dirty = false
+let pendingEffects = []
+
+/** A hook slot is keyed by the component instance, not by call order alone. */
+function hookKey() {
+  return `${ownerPath.join('/')}#${String(cursor++)}`
+}
+
+const React = {
+  Fragment: Symbol('Fragment'),
+  /* `children` belongs in props as well as on the element: a function component
+     reads `props.children`, which is how every Chip and Btn in this panel is
+     written. Passing it only on the element renders rows with empty buttons. */
+  createElement: (type, props, ...children) => {
+    const flat = children.flat(Infinity)
+    return {
+      type,
+      props: { ...(props ?? {}), children: flat.length === 0 ? undefined : (flat.length === 1 ? flat[0] : flat) },
+      children: flat,
+    }
+  },
+  useState: (initial) => {
+    const key = hookKey()
+    if (!values.has(key)) values.set(key, typeof initial === 'function' ? initial() : initial)
+    const set = (next) => {
+      const value = typeof next === 'function' ? next(values.get(key)) : next
+      if (value !== values.get(key)) {
+        values.set(key, value)
+        dirty = true
+      }
+    }
+    return [values.get(key), set]
+  },
+  useRef: (initial) => {
+    const key = hookKey()
+    if (!values.has(key)) values.set(key, { current: initial })
+    return values.get(key)
+  },
+  useEffect: (fn, deps) => {
+    const key = hookKey()
+    pendingEffects.push({ key, fn, deps })
+  },
+  /* Memoised like React with `[]` deps: the panel's callbacks are what its effects
+     depend on, and a new identity every pass would re-run every effect forever. */
+  useCallback: (fn) => {
+    const key = hookKey()
+    if (!values.has(key)) values.set(key, fn)
+    return values.get(key)
+  },
+  useMemo: (fn) => {
+    const key = hookKey()
+    if (!values.has(key)) values.set(key, fn())
+    return values.get(key)
+  },
+}
+
+/** Render function components down to host elements, as React would. */
+function walk(node, path) {
+  if (node === null || node === undefined || typeof node === 'boolean') return null
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map((child, at) => walk(child, `${path}.${String(at)}`))
+  if (typeof node.type === 'function' || typeof node.type === 'object') {
+    const name = node.type?.name ?? node.type?.displayName ?? 'Component'
+    const child = `${path}<${name}>`
+    const saved = cursor
+    ownerPath.push(child)
+    cursor = 0
+    let output
+    try {
+      output = node.type(node.props)
+    } finally {
+      cursor = saved
+      ownerPath.pop()
+    }
+    return { type: child, props: {}, children: [walk(output, child)] }
+  }
+  return { type: node.type, props: node.props, children: (node.children ?? []).map((child, at) => walk(child, `${path}.${String(at)}`)) }
+}
+
+/** Run the effects whose dependencies changed, then let their promises resolve. */
+async function runEffects() {
+  for (const effect of pendingEffects) {
+    const slot = effectSlots.get(effect.key)
+    const deps = effect.deps
+    const changed = slot === undefined
+      || deps === undefined
+      || slot.deps === undefined
+      || deps.length !== slot.deps.length
+      || deps.some((value, at) => value !== slot.deps[at])
+    if (!changed) continue
+    if (typeof slot?.cleanup === 'function') slot.cleanup()
+    effectSlots.set(effect.key, { deps, cleanup: effect.fn() })
+  }
+  await new Promise((settle) => { setTimeout(settle, 0) })
+}
+
+/** Render one root component until nothing is dirty, and return its last tree. */
+async function render(component, props, rounds = 10) {
+  let tree = null
+  for (let round = 0; round < rounds; round += 1) {
+    dirty = false
+    pendingEffects = []
+    cursor = 0
+    ownerPath.length = 0
+    ownerPath.push('root')
+    const output = component(props)
+    tree = walk(output, 'root')
+    await runEffects()
+    if (!dirty) break
+  }
+  return tree
+}
+
+/** Every string in the tree, in order. */
+function textOf(node) {
+  if (node === null || node === undefined || typeof node === 'boolean') return ''
+  if (typeof node === 'string') return node
+  return (node.children ?? []).map(textOf).join(' ')
+}
+
+/** Whether a rendered tree contains a button carrying this label. */
+function hasButton(node, label) {
+  if (node === null || typeof node !== 'object') return false
+  if (Array.isArray(node)) return node.some((child) => hasButton(child, label))
+  const own = node.type === 'button' && textOf(node).includes(label)
+  return own || hasButton(node.children, label)
+}
+
+/**
+ * Press the first button whose text contains this label, as a user would.
+ *
+ * The row's explanation and its confirmation both live behind the expansion, so a
+ * test that never expands only ever sees the summary line — which is how the most
+ * important sentence on screen could be missing while every check still passed.
+ *
+ * @returns {boolean} whether a button was found.
+ */
+function clickButton(node, label) {
+  if (node === null || typeof node !== 'object') return false
+  if (Array.isArray(node)) return node.some((child) => clickButton(child, label))
+  if (node.type === 'button' && textOf(node).includes(label) && typeof node.props?.onClick === 'function') {
+    node.props.onClick()
+    return true
+  }
+  return clickButton(node.children, label)
+}
+
+/* ---- a document, a fetch that answers from a fixture, and the loader ---- */
+
+const styleElements = []
+const document = {
+  visibilityState: 'visible',
+  getElementById: () => null,
+  createElement: () => ({ setAttribute: () => {}, append: () => {}, textContent: '' }),
+  head: { append: (element) => styleElements.push(element) },
+  addEventListener: () => {},
+  removeEventListener: () => {},
+}
+
+let fixture = {}
+const calls = []
+async function fetchStub(url) {
+  const path = String(url).slice(String(url).indexOf('/api/dsh-cicd') + '/api/dsh-cicd'.length)
+  calls.push(path)
+  const body = fixture[path] ?? { ok: false, code: 'not-found', message: `no fixture for ${path}` }
+  return {
+    ok: body.__status === undefined || (body.__status >= 200 && body.__status < 300),
+    status: body.__status ?? 200,
+    json: async () => body,
+  }
+}
+
+const sandbox = {
+  React,
+  console,
+  setTimeout,
+  clearTimeout,
+  /* The panel polls with `setInterval`; here the tick never fires, because the test
+     wants the render that follows the first load, not a stream of refreshes. */
+  setInterval: () => 0,
+  clearInterval: () => {},
+  fetch: fetchStub,
+  AbortController,
+  URL,
+  JSON,
+  Date,
+  Math,
+  Number,
+  String,
+  Boolean,
+  Array,
+  Object,
+  Error,
+  Promise,
+  RegExp,
+  Symbol,
+  document,
+  /* A returning user: a first visit opens the picker, and this test is about the
+     repository rows, so the stored preference says "show the list". */
+  localStorage: { getItem: () => 'false', setItem: () => {} },
+  __load: null,
+}
+sandbox.window = sandbox
+sandbox.globalThis = sandbox
+sandbox.window.__ModuleLoader__ = {
+  load: ({ factory }) => {
+    sandbox.__load = factory((name) => {
+      if (name === 'react') return React
+      throw new Error(`unexpected require: ${name}`)
+    })
+  },
+}
+
+vm.createContext(sandbox)
+vm.runInContext(source, sandbox, { filename: 'client.js' })
+
+check('the client registers itself with the loader', typeof sandbox.__load?.apply === 'function')
+check('the client declares the services it needs', Array.isArray(sandbox.__load?.inject) && sandbox.__load.inject.includes('slots'))
+
+/* Mount it the way the Host does, and capture what it registers. */
+const registered = new Map()
+let dictionary = null
+sandbox.__load.apply({
+  effect: (fn) => fn(),
+  locale: {
+    register: (ns, dicts) => { dictionary = dicts },
+    bind: () => translate,
+  },
+  slots: {
+    inject: (name, fn) => fn(),
+    register: (meta, component) => {
+      registered.set(meta.name, component)
+      return () => registered.delete(meta.name)
+    },
+  },
+})
+
+/** The panel's own dictionary, with `{name}` substitution — what a user reads. */
+function translate(key, params) {
+  const template = dictionary?.zh?.[key] ?? key
+  return params === undefined ? template : template.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
+}
+
+check('the main view is registered', typeof registered.get('main') === 'function')
+check('the theme is injected once', styleElements.length === 1)
+
+const ConsolePage = registered.get('main')
+
+/** One repository row fixture. */
+function repoFixture(overrides) {
+  return {
+    repo: 'dsh-plugin-restart',
+    slug: 'SOH4C4759/dsh-plugin-restart',
+    label: 'dsh-plugin-restart',
+    localPath: 'F:\\CodeProj\\dsh-plugin-restart',
+    problems: [],
+    version: '1.0.0',
+    expectedTag: 'v1.0.0',
+    versionKnown: true,
+    published: true,
+    publishedTag: 'v1.0.0',
+    draftTag: null,
+    releaseCheck: { state: 'ready', code: 'version-free', tag: 'v1.0.0', owner: null, built: null, message: '', next: '1.0.1', nextTag: 'v1.0.1' },
+    latestRun: null,
+    runs: [],
+    releases: [{ tag: 'v1.0.0', name: '', draft: false, prerelease: false, targetCommitish: 'a'.repeat(40), createdAt: '2026-10-06T19:00:19Z', url: '', assets: [] }],
+    workflows: [{ name: 'CI', path: 'ci.yml', state: 'active' }, { name: 'Release', path: 'release.yml', state: 'active' }],
+    hasBuildWorkflow: true,
+    hasReleaseWorkflow: true,
+    local: { available: true, branch: 'main', head: 'b'.repeat(40), dirty: 0, ahead: 0, behind: 0, upstreamKnown: true },
+    ...overrides,
+  }
+}
+
+const baseStatus = {
+  ok: true,
+  value: {
+    protocol: 3,
+    config: { buildWorkflow: 'ci.yml', releaseWorkflow: 'release.yml', defaultBranch: 'main', pollSeconds: 30 },
+    helper: { configureScript: 'F:\\CodeProj\\dsh-plugin-cicd\\scripts\\configure.mjs' },
+    gh: { path: 'gh', available: true, version: 'gh version 2.102.0', authenticated: true, account: 'SOH4C4759', scopes: ['repo', 'workflow'], missingScopes: [], message: null },
+    repos: [{ repo: 'dsh-plugin-restart', label: 'dsh-plugin-restart', localPath: 'F:\\CodeProj\\dsh-plugin-restart' }],
+  },
+}
+
+/** Render the panel against one fixture, from a clean hook state. */
+async function renderPanel(repos, statusValue = baseStatus.value) {
+  fixture = {
+    '/status': { ok: true, value: statusValue },
+    '/overview': { ok: true, value: { repos } },
+  }
+  values.clear()
+  effectSlots.clear()
+  calls.length = 0
+  return render(ConsolePage, { t: translate })
+}
+
+/** Re-render the same mounted panel, keeping its state — after a click, say. */
+async function rerender() {
+  return render(ConsolePage, { t: translate })
+}
+
+/** Expand the first row and return the tree with its detail visible. */
+async function expandFirstRow(tree) {
+  const pressed = clickButton(tree, '▾')
+  return { pressed, tree: await rerender() }
+}
+
+/* -- 1. A version taken by another commit offers the bump ------------------- */
+{
+  const collapsed = await renderPanel([repoFixture({
+    releaseCheck: {
+      state: 'blocked',
+      code: 'version-taken',
+      tag: 'v1.0.0',
+      owner: '48ce81c'.padEnd(40, '0'),
+      built: 'e6a1cc1'.padEnd(40, '0'),
+      message: 'english fallback',
+      next: '1.0.1',
+      nextTag: 'v1.0.1',
+    },
+  })])
+  const summary = textOf(collapsed)
+
+  check('the overview is actually read', calls.includes('/overview'), calls.join(','))
+  check('the blocked row is marked', summary.includes('版本被占用'), summary.replace(/\s+/g, ' ').slice(0, 140))
+  check('the blocked row offers the bump instead of a plain release', hasButton(collapsed, '升版本并发布'))
+  check('the English fallback is not what a Chinese user reads', summary.includes('english fallback') === false)
+
+  const { pressed, tree } = await expandFirstRow(collapsed)
+  const detail = textOf(tree)
+  check('a row can be expanded', pressed === true)
+  check('the blocked row names both commits', detail.includes('48ce81c') && detail.includes('e6a1cc1'), detail.replace(/\s+/g, ' ').slice(0, 160))
+  check('the reason is in the panel, not only in the logs', detail.includes('release.yml 会拒绝覆盖'))
+  check('the expansion offers the bump too', hasButton(tree, '升版本并发布'))
+
+  /* The bump commits and pushes, so it must be a deliberate second click — the
+     same shape as publishing a draft, which is the other one-way action here. */
+  const asked = clickButton(tree, '升版本并发布')
+  const confirm = textOf(await rerender())
+  check('the bump asks before it writes anything', asked === true && confirm.includes('这会创建一个提交'), confirm.replace(/\s+/g, ' ').slice(0, 200))
+  check('the confirmation names the version it would write', confirm.includes('1.0.1'))
+}
+
+/* -- 2. A free version keeps the ordinary release button ------------------- */
+{
+  const tree = await renderPanel([repoFixture({ published: false, publishedTag: null })])
+  const text = textOf(tree)
+
+  check('a free version offers 发布', hasButton(tree, '发布'))
+  check('a free version does not offer a bump', hasButton(tree, '升版本并发布') === false)
+  check('a free version is not marked as taken', text.includes('版本被占用') === false)
+}
+
+/* -- 3. An uncommitted tree warns that the release would miss it ----------- */
+{
+  const collapsed = await renderPanel([repoFixture({
+    local: { available: true, branch: 'main', head: 'b'.repeat(40), dirty: 7, ahead: 0, behind: 0, upstreamKnown: true },
+  })])
+  check('uncommitted work is counted on the row', textOf(collapsed).includes('未提交 7'), textOf(collapsed).replace(/\s+/g, ' ').slice(0, 140))
+  const { tree } = await expandFirstRow(collapsed)
+  check('uncommitted work is explained, not just counted', textOf(tree).includes('不会进入发布包'), textOf(tree).replace(/\s+/g, ' ').slice(0, 200))
+}
+
+/* -- 4. A stale Host is named as a version mismatch, not a bare error ------ */
+{
+  const tree = await renderPanel([repoFixture()], { ...baseStatus.value, protocol: 2 })
+  check('a stale Host is named as such', textOf(tree).includes('页面与宿主半边版本不一致'), textOf(tree).replace(/\s+/g, ' ').slice(0, 140))
+}
+
+/* -- 5. A Host that needs setup says so instead of showing an empty list --- */
+{
+  const tree = await renderPanel([repoFixture()], {
+    ...baseStatus.value,
+    gh: { ...baseStatus.value.gh, available: false, message: 'gh not found' },
+  })
+  check('a missing gh is explained', textOf(tree).includes('没有找到 gh CLI'), textOf(tree).replace(/\s+/g, ' ').slice(0, 140))
+}
+
+console.log(`\n${results.length - failed}/${results.length} checks passed`)
+if (failed > 0) process.exit(1)

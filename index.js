@@ -20,7 +20,18 @@
  *   /api/dsh-cicd/dispatch         trigger a workflow (`workflow_dispatch`)
  *   /api/dsh-cicd/run-action       rerun / rerun-failed / cancel one run
  *   /api/dsh-cicd/release-action   publish a draft, or delete a release
+ *   /api/dsh-cicd/version-bump     bump package.json, commit it, push the branch
  *   /api/dsh-cicd/logs             the tail of the failed steps of one run
+ *
+ * The release dispatch carries a preflight, and that is not a convenience. Every
+ * repository in this set releases from `package.json`'s version, and its release
+ * workflow refuses to reuse a version that already belongs to another commit
+ * (otherwise the tag and the uploaded assets silently disagree). So pressing
+ * 发布 without bumping the version produced a run that could only fail — measured
+ * four times across two repositories, each ~10 s in, at the first step — while the
+ * panel announced a draft that was never created. `releasePreflight` turns that
+ * into one answer before anything is dispatched, and `version-bump` is the step
+ * the button was missing.
  *
  * Every route answers `{ ok: true, value }` or `{ ok: false, code, message }`.
  *
@@ -28,7 +39,7 @@
  */
 
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { lookup } from 'node:dns/promises'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -76,8 +87,12 @@ const MAX_BODY_BYTES = 32 * 1024
  * route that does not exist yet and reports it as a request failure — which reads
  * like a GitHub or credential problem and is neither. The client compares this
  * number and says what to do instead.
+ *
+ * 3: `version-bump`, the `releaseCheck` verdict on every overview row, and the
+ * release dispatch's preflight. A 2.x client asking a 2.x host to publish a
+ * version that is already taken is the bug this protocol bump retires.
  */
-const PROTOCOL = 2
+const PROTOCOL = 3
 
 /** The managed repository list, written by `scripts/configure.mjs`. */
 const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
@@ -517,6 +532,23 @@ function firstLine(value) {
 }
 
 /**
+ * The file name of a workflow reference, lowercased.
+ *
+ * `release.yml`, `./.github/workflows/release.yml` and a Windows-spelled path all
+ * name the same workflow, and the configured value is a file name while a caller
+ * may pass the path GitHub reports. Comparing the last segment is what makes the
+ * release preflight apply to every spelling of "the release workflow" instead of
+ * only to the one the panel happens to send.
+ *
+ * @param {unknown} value - workflow reference.
+ * @returns {string} lowercased file name.
+ */
+function workflowFileName(value) {
+  const trimmed = text(value).replace(/\\/g, '/')
+  return trimmed.slice(trimmed.lastIndexOf('/') + 1).toLowerCase()
+}
+
+/**
  * Run one external command.
  *
  * `GH_PROMPT_DISABLED` matters more than it looks: without it a `gh` that
@@ -690,6 +722,116 @@ export function readLocalVersion(localPath) {
 }
 
 /**
+ * A full commit id, or null.
+ *
+ * Only a 40-character id counts as evidence. GitHub stores a release's
+ * `target_commitish` as whatever `gh release create --target` was given, and a
+ * hand-made release can carry a branch name there; resolving that name locally
+ * would answer a different question than the one that matters (which commit the
+ * *workflow* will build), so it is reported as unknown instead.
+ *
+ * @param {unknown} value - candidate.
+ * @returns {string|null} lowercase id, or null when it is not one.
+ */
+export function fullSha(value) {
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim().toLowerCase()
+  return /^[0-9a-f]{40}$/.test(trimmed) ? trimmed : null
+}
+
+/**
+ * Whether the release workflow can publish the version this checkout declares.
+ *
+ * The workflow refuses to touch a version that already belongs to another commit,
+ * and it is right to: publishing it would create the tag at the old commit, whose
+ * own build would overwrite the fresh assets — a release whose tag and contents
+ * disagree, produced silently. The cost of that guard is that a dispatch without a
+ * version bump cannot succeed, which is invisible from the panel and was measured
+ * failing four times. So the panel asks the same question first, and only answers
+ * `blocked` when it can PROVE the mismatch: a release whose target commit is a full
+ * id that differs from the commit the run would build. Anything unprovable — no
+ * local version, a branch name for a target, an unknown build commit — is `ready`,
+ * because a preflight that refuses a release that would have worked is worse than
+ * no preflight at all.
+ *
+ * @param {object} params - the two sides of the comparison.
+ * @param {string|null} params.version - local package.json version.
+ * @param {string|null} params.expectedTag - `v<version>`, when known.
+ * @param {object[]} params.releases - normalized releases.
+ * @param {string|null} params.builtSha - commit the dispatch would build.
+ * @returns {{state: string, code: string, tag: string|null, owner: string|null, built: string|null, message: string}}
+ */
+export function releasePreflight({ version = null, expectedTag = null, releases = [], builtSha = null } = {}) {
+  const tag = typeof expectedTag === 'string' && expectedTag !== ''
+    ? expectedTag
+    : (typeof version === 'string' && version !== '' ? `v${version}` : null)
+  if (tag === null) {
+    return { state: 'unknown', code: 'no-local-version', tag: null, owner: null, built: null, message: 'no package.json version to release' }
+  }
+  const match = Array.isArray(releases) ? releases.find((release) => release?.tag === tag) ?? null : null
+  if (match === null) {
+    return { state: 'ready', code: 'version-free', tag, owner: null, built: null, message: '' }
+  }
+  const owner = fullSha(match.targetCommitish)
+  const built = fullSha(builtSha)
+  if (owner !== null && built !== null && owner !== built) {
+    return {
+      state: 'blocked',
+      code: 'version-taken',
+      tag,
+      owner,
+      built,
+      message: `release ${tag} was created from ${owner.slice(0, 7)}, but this run would build ${built.slice(0, 7)} — bump the version first`,
+    }
+  }
+  return { state: 'ready', code: match.draft ? 'draft-replace' : 'same-commit', tag, owner, built, message: '' }
+}
+
+/**
+ * The next version in a `major.minor.patch` line, as a string.
+ *
+ * Deliberately refuses anything else. A prerelease or build suffix (`1.0.0-rc.1`)
+ * is a human's decision about what the release means, and guessing a successor for
+ * it is how a console publishes something nobody asked for.
+ *
+ * @param {string} version - current version.
+ * @param {string} kind - `patch`, `minor`, or `major`.
+ * @returns {{ok: true, from: string, to: string}|{ok: false, message: string}}
+ */
+export function nextVersion(version, kind) {
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(typeof version === 'string' ? version.trim() : '')
+  if (match === null) return { ok: false, message: `package.json version is not a plain major.minor.patch: ${String(version)}` }
+  if (!['patch', 'minor', 'major'].includes(kind)) return { ok: false, message: `unsupported release kind: ${String(kind)}` }
+  const [major, minor, patch] = [Number(match[1]), Number(match[2]), Number(match[3])]
+  const to = kind === 'major' ? `${major + 1}.0.0` : kind === 'minor' ? `${major}.${minor + 1}.0` : `${major}.${minor}.${patch + 1}`
+  return { ok: true, from: `${major}.${minor}.${patch}`, to }
+}
+
+/**
+ * Rewrite the top-level `version` of a package.json text, byte-for-byte elsewhere.
+ *
+ * `JSON.parse` + `JSON.stringify` would reformat the whole manifest — key order,
+ * indentation, the escaping of every non-ASCII string — and those files carry
+ * hand-written prose in their metadata. A release commit must contain exactly one
+ * changed line. Only an unambiguous single occurrence is accepted: two `version`
+ * keys mean the text is not a manifest this can safely edit.
+ *
+ * @param {string} source - the file's text.
+ * @param {string} to - the new version.
+ * @returns {{ok: true, text: string}|{ok: false, message: string}}
+ */
+export function rewriteVersion(source, to) {
+  if (typeof source !== 'string' || source === '') return { ok: false, message: 'package.json is empty' }
+  if (!/^\d+\.\d+\.\d+$/.test(String(to))) return { ok: false, message: `refusing to write a non-version: ${String(to)}` }
+  const matches = [...source.matchAll(/^([ \t]*"version"[ \t]*:[ \t]*")([^"]*)(")/gm)]
+  if (matches.length !== 1) {
+    return { ok: false, message: `expected exactly one top-level "version" key, found ${matches.length}` }
+  }
+  const match = matches[0]
+  return { ok: true, text: `${source.slice(0, match.index)}${match[1]}${to}${match[3]}${source.slice(match.index + match[0].length)}` }
+}
+
+/**
  * Read what the local checkout knows that the remote does not.
  *
  * This is the half of "should I release?" that GitHub cannot answer: a tree with
@@ -711,12 +853,16 @@ export async function readLocalState(localPath, timeoutMs) {
     return result.ok ? result.stdout.trim() : null
   }
 
-  const [branch, status, counts] = await Promise.all([
+  const [branch, status, counts, head] = await Promise.all([
     git(['rev-parse', '--abbrev-ref', 'HEAD']),
     git(['status', '--porcelain']),
     // `@{u}` fails when the branch has no upstream; that is reported as "unknown",
     // not as zero, because "0 ahead" and "cannot tell" mean different things here.
     git(['rev-list', '--left-right', '--count', '@{u}...HEAD']),
+    // The commit a dispatch of this branch would build, when the branch is in sync
+    // with its upstream. Comparisons that decide whether a release may proceed are
+    // only made when the two provably agree (see `releasePreflight`).
+    git(['rev-parse', 'HEAD']),
   ])
 
   let ahead = null
@@ -732,6 +878,7 @@ export async function readLocalState(localPath, timeoutMs) {
   return {
     available: true,
     branch: branch ?? null,
+    head: typeof head === 'string' && head !== '' ? head : null,
     dirty: typeof status === 'string' ? status.split('\n').filter((line) => line.trim() !== '').length : null,
     ahead,
     behind,
@@ -765,7 +912,16 @@ function normalizeRun(run) {
   }
 }
 
-/** Normalize one REST release record into the panel's shape. */
+/**
+ * Normalize one REST release record into the panel's shape.
+ *
+ * `targetCommitish` is kept because it is the only evidence for the question the
+ * release workflow asks itself: does this version already belong to a different
+ * commit? The workflow passes `--target "$GITHUB_SHA"`, so it is a full commit id
+ * for every release this set produces; a release made by hand can carry a branch
+ * name there instead, which `fullSha` treats as "cannot prove" rather than as a
+ * mismatch.
+ */
 function normalizeRelease(release) {
   if (release === null || typeof release !== 'object') return null
   const assets = Array.isArray(release.assets) ? release.assets : []
@@ -774,6 +930,7 @@ function normalizeRelease(release) {
     name: typeof release.name === 'string' ? release.name : '',
     draft: release.draft === true,
     prerelease: release.prerelease === true,
+    targetCommitish: typeof release.target_commitish === 'string' ? release.target_commitish : '',
     createdAt: typeof release.created_at === 'string' ? release.created_at : '',
     url: typeof release.html_url === 'string' ? release.html_url : '',
     assets: assets.map((asset) => ({
@@ -862,6 +1019,20 @@ export async function collectRepo({ config, ghPath, entry }) {
     ? (matching.draft ? matching : null)
     : releases.find((release) => release.draft) ?? null
   const local = await readLocalState(entry.localPath, config.requestTimeoutMs)
+  /*
+   * The commit a dispatch of the configured branch would build, known only when
+   * this checkout provably IS that commit: same branch, upstream known, and no
+   * divergence in either direction. When either side is in doubt the panel says
+   * nothing rather than guessing, because a wrong "this version is taken" sends
+   * someone to bump a version that did not need bumping.
+   */
+  const builtSha = local.available === true
+    && local.upstreamKnown === true
+    && local.ahead === 0
+    && local.behind === 0
+    && local.branch === config.defaultBranch
+    ? local.head ?? null
+    : null
 
   return {
     ...base,
@@ -874,6 +1045,21 @@ export async function collectRepo({ config, ghPath, entry }) {
     publishedTag: publishedRelease === null ? null : publishedRelease.tag,
     /** A draft release is waiting, for the local version when known, else the newest. */
     draftTag: draftRelease === null ? null : draftRelease.tag,
+    /**
+     * Whether releasing the local version is possible right now, and why not when
+     * it is not. Computed on the Host so the panel and the dispatch route cannot
+     * disagree about it.
+     */
+    releaseCheck: (() => {
+      const verdict = releasePreflight({ version, expectedTag, releases, builtSha })
+      const next = version === null ? { ok: false } : nextVersion(version, 'patch')
+      return {
+        ...verdict,
+        /** What the panel offers when the version is taken: the next patch, if any. */
+        next: next.ok === true ? next.to : null,
+        nextTag: next.ok === true ? `v${next.to}` : null,
+      }
+    })(),
     latestRun: runs[0] ?? null,
     runs,
     releases,
@@ -1320,6 +1506,54 @@ export function apply(ctx, rawConfig) {
       return
     }
     const ref = text(body?.ref, config.defaultBranch)
+    /*
+     * A release dispatch is preflighted, because the run it would start cannot
+     * succeed when the local version is already taken by another commit. The check
+     * asks GitHub for the two facts the workflow's own guard uses — the commit this
+     * ref would build, and the release that owns `v<version>` — and refuses only on
+     * a proven mismatch. An unreadable answer dispatches as before: a preflight that
+     * blocks a release that would have worked is worse than no preflight.
+     */
+    if (workflowFileName(workflow) === workflowFileName(config.releaseWorkflow)) {
+      const version = readLocalVersion(target.entry.localPath)
+      const expectedTag = version === null ? null : `v${version}`
+      if (expectedTag !== null) {
+        const [headResult, releasesResult] = await Promise.all([
+          runTool(ghPath, ['api', `repos/${target.slug}/commits/${encodeURIComponent(ref)}`, '--jq', '.sha'], config.requestTimeoutMs),
+          ghJson(ghPath, ['api', `repos/${target.slug}/releases?per_page=5`], config.requestTimeoutMs),
+        ])
+        if (releasesResult.ok) {
+          const releases = Array.isArray(releasesResult.value)
+            ? releasesResult.value.map(normalizeRelease).filter((release) => release !== null)
+            : []
+          const verdict = releasePreflight({
+            version,
+            expectedTag,
+            releases,
+            builtSha: headResult.ok ? headResult.stdout.trim() : null,
+          })
+          if (verdict.state === 'blocked') {
+            const next = nextVersion(version, 'patch')
+            cache = null
+            writeJson(res, 409, {
+              ok: false,
+              code: 'version-taken',
+              message: verdict.message,
+              value: {
+                repo: target.entry.repo,
+                workflow,
+                ref,
+                tag: verdict.tag,
+                owner: verdict.owner,
+                built: verdict.built,
+                nextTag: next.ok === true ? `v${next.to}` : null,
+              },
+            })
+            return
+          }
+        }
+      }
+    }
     const args = ['workflow', 'run', workflow, '-R', target.slug, '--ref', ref]
     const inputs = body?.inputs
     if (inputs !== null && typeof inputs === 'object') {
@@ -1408,6 +1642,169 @@ export function apply(ctx, rawConfig) {
       return
     }
     writeJson(res, 200, { ok: true, value: { repo: target.entry.repo, tag, action, note: firstLine(result.stdout) || null } })
+  }
+
+  /**
+   * Bump `package.json`, commit it, and push the branch.
+   *
+   * This is the step 发布 was silently missing. Every repository in this set
+   * releases from `package.json`'s version, and re-releasing a version that already
+   * belongs to another commit is refused by the workflow on purpose (it would leave
+   * the tag and the uploaded assets disagreeing) — so a console that cannot bump the
+   * version cannot release a repository whose tree has moved on.
+   *
+   * It is the only route that writes to a checkout, so it is conservative:
+   *   - a dirty tree is refused rather than warned about, because the release is
+   *     built from the commit GitHub has and every uncommitted file would be
+   *     silently missing from the published package;
+   *   - a branch that is behind its upstream, or has none, is refused: "push" would
+   *     either fail or need a decision (merge? rebase?) that is not this button's;
+   *   - only the version line of `package.json` is written, and it is restored
+   *     verbatim if the commit does not go through, so a failed bump leaves no
+   *     half-applied state behind.
+   *
+   * A failed PUSH is not rolled back. The commit is real and the failure is usually
+   * the intermittent block on `github.com:443` this machine already documents, so
+   * the honest answer is "committed locally, not pushed" with the reason — retrying
+   * the push is a decision the user can make, and a hidden reset is not.
+   */
+  const versionBumpHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const target = findEntry(live(), body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const kind = text(body?.release, 'patch')
+    const localPath = target.entry.localPath
+    if (localPath === '' || !existsSync(join(localPath, 'package.json'))) {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'no-checkout',
+        message: 'this repository has no local checkout with a package.json to bump',
+        value: { repo: target.entry.repo },
+      })
+      return
+    }
+    const state = await readLocalState(localPath, config.requestTimeoutMs)
+    if (state.available !== true) {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'no-checkout',
+        message: `cannot bump from here: ${state.reason ?? 'the local checkout is unusable'}`,
+        value: { repo: target.entry.repo },
+      })
+      return
+    }
+    if (state.dirty !== 0) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'dirty-tree',
+        message: `the checkout has ${String(state.dirty)} uncommitted change(s); commit or stash them first — they would not be in the released package`,
+        value: { repo: target.entry.repo, dirty: state.dirty },
+      })
+      return
+    }
+    if (state.upstreamKnown !== true || typeof state.branch !== 'string' || state.branch === '') {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'no-upstream',
+        message: `branch ${state.branch ?? '(unknown)'} has no upstream, so a bump could not be pushed`,
+        value: { repo: target.entry.repo, branch: state.branch ?? null },
+      })
+      return
+    }
+    if (Number.isInteger(state.behind) && state.behind > 0) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'behind',
+        message: `the branch is ${String(state.behind)} commit(s) behind its upstream; pull before releasing`,
+        value: { repo: target.entry.repo, behind: state.behind },
+      })
+      return
+    }
+
+    const manifest = join(localPath, 'package.json')
+    let source = ''
+    try {
+      source = readFileSync(manifest, 'utf8')
+    } catch (error) {
+      writeJson(res, 502, { ok: false, code: 'read-failed', message: String(error?.message ?? error) })
+      return
+    }
+    const next = nextVersion(readLocalVersion(localPath), kind)
+    if (next.ok !== true) {
+      writeJson(res, 400, { ok: false, code: 'unusable-version', message: next.message })
+      return
+    }
+    const rewritten = rewriteVersion(source, next.to)
+    if (rewritten.ok !== true) {
+      writeJson(res, 400, { ok: false, code: 'unusable-manifest', message: rewritten.message })
+      return
+    }
+
+    const git = (args) => runTool('git', ['-C', localPath, ...args], config.requestTimeoutMs)
+    const restore = () => {
+      try {
+        writeFileSync(manifest, source, 'utf8')
+      } catch {
+        /* Reported through the failure that follows; a second failure here is not the story. */
+      }
+    }
+
+    try {
+      writeFileSync(manifest, rewritten.text, 'utf8')
+    } catch (error) {
+      writeJson(res, 502, { ok: false, code: 'write-failed', message: String(error?.message ?? error) })
+      return
+    }
+
+    const tag = `v${next.to}`
+    const staged = await git(['add', '--', 'package.json'])
+    if (staged.ok !== true) {
+      restore()
+      writeJson(res, 502, { ok: false, code: 'git-failed', message: firstLine(staged.stderr) || 'git add failed' })
+      return
+    }
+    // `-- package.json` is `--only` semantics: the commit contains this one path,
+    // whatever else the index happens to hold.
+    const committed = await git(['commit', '-m', `chore(release): ${tag}`, '--', 'package.json'])
+    if (committed.ok !== true) {
+      restore()
+      writeJson(res, 502, {
+        ok: false,
+        code: 'git-failed',
+        message: firstLine(committed.stderr) || firstLine(committed.stdout) || 'git commit failed',
+      })
+      return
+    }
+    const head = await git(['rev-parse', 'HEAD'])
+    const pushed = await git(['push', 'origin', state.branch])
+    cache = null
+    if (pushed.ok !== true) {
+      writeJson(res, 502, {
+        ok: false,
+        code: 'push-failed',
+        message: `committed ${tag} locally, but the push failed: ${firstLine(pushed.stderr) || firstLine(pushed.stdout) || 'git push failed'}`,
+        value: { repo: target.entry.repo, from: next.from, to: next.to, tag, branch: state.branch, pushed: false },
+      })
+      return
+    }
+    writeJson(res, 200, {
+      ok: true,
+      value: {
+        repo: target.entry.repo,
+        from: next.from,
+        to: next.to,
+        tag,
+        branch: state.branch,
+        commit: head.ok === true ? head.stdout.trim() : null,
+        pushed: true,
+        /** Local commits that this push also delivered, so the panel can say so. */
+        carried: Number.isInteger(state.ahead) ? state.ahead : 0,
+      },
+    })
   }
 
   const logsHandler = async (req, res) => {
@@ -1650,6 +2047,7 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/dispatch`, dispatchHandler],
     [`${ROUTE_PREFIX}/run-action`, runActionHandler],
     [`${ROUTE_PREFIX}/release-action`, releaseActionHandler],
+    [`${ROUTE_PREFIX}/version-bump`, versionBumpHandler],
     [`${ROUTE_PREFIX}/logs`, logsHandler],
     [`${ROUTE_PREFIX}/auth-start`, authStartHandler],
     [`${ROUTE_PREFIX}/auth-state`, authStateHandler],

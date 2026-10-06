@@ -151,6 +151,8 @@ jobs:
           # proves the released bytes — not the checkout — are installable.
           node "$STAGE/${NAME}-${VERSION}/scripts/verify-bundle.mjs" "$STAGE/${NAME}-${VERSION}"
           node "$STAGE/${NAME}-${VERSION}/tests/host-checks.mjs"
+          node "$STAGE/${NAME}-${VERSION}/tests/bump-e2e.mjs" "$STAGE/${NAME}-${VERSION}"
+          node "$STAGE/${NAME}-${VERSION}/tests/client-render.mjs" "$STAGE/${NAME}-${VERSION}"
 
       - name: Prove the tarball is self-contained
         env:
@@ -167,6 +169,8 @@ jobs:
           test -f "$STAGE/package/cordis.patch.yml"
           node "$STAGE/package/scripts/verify-bundle.mjs" "$STAGE/package"
           node "$STAGE/package/tests/host-checks.mjs"
+          node "$STAGE/package/tests/bump-e2e.mjs" "$STAGE/package"
+          node "$STAGE/package/tests/client-render.mjs" "$STAGE/package"
           # The decisive one: mount the published copy and serve its routes.
           node "$STAGE/package/tests/mount-check.mjs" "$STAGE/package"
 

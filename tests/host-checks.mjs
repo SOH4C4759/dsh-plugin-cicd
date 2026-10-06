@@ -20,7 +20,7 @@
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { collectRepo, effectiveConfig, ghJson, normalizeRepoEntry, parseAuthStatus, parseReposFile, readLocalState, readLocalVersion, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveSlug, runTool } from '../index.js'
+import { collectRepo, effectiveConfig, fullSha, ghJson, nextVersion, normalizeRepoEntry, parseAuthStatus, parseReposFile, readLocalState, readLocalVersion, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveSlug, rewriteVersion, runTool } from '../index.js'
 
 const results = []
 let failed = 0
@@ -178,7 +178,48 @@ const signedOut = parseAuthStatus('github.com\n  X No oauth token found for gith
 check('a signed-out status is recognised', signedOut.authenticated === false)
 check('a signed-out status reports no account', signedOut.account === null)
 
-/* -- 8. Live checks (opt-in) ------------------------------------------------ */
+/* -- 8. Release preflight and the version bump ------------------------------
+   Every repository here releases from `package.json`'s version, and the release
+   workflow refuses to reuse a version that already belongs to another commit — so a
+   dispatch without a bump could only fail (measured four times, ~10 s in, at the
+   first step, while the panel announced a draft that never appeared). Two
+   properties matter, and they pull in opposite directions: a PROVEN mismatch must
+   be blocked, and an unprovable one must never be. */
+const shaA = 'a'.repeat(40)
+const shaB = 'b'.repeat(40)
+const releaseAt = (sha, draft = false) => ({ tag: 'v1.0.0', draft, targetCommitish: sha })
+
+const blockedVerdict = releasePreflight({ version: '1.0.0', expectedTag: 'v1.0.0', releases: [releaseAt(shaA)], builtSha: shaB })
+check('a version taken by another commit blocks the release', blockedVerdict.state === 'blocked' && blockedVerdict.code === 'version-taken', blockedVerdict.code)
+check('the block names both commits', blockedVerdict.owner === shaA && blockedVerdict.built === shaB)
+check('a DRAFT of that version blocks it too', releasePreflight({ version: '1.0.0', expectedTag: 'v1.0.0', releases: [releaseAt(shaA, true)], builtSha: shaB }).state === 'blocked')
+check('an unreleased version is ready', releasePreflight({ version: '1.0.0', expectedTag: 'v1.0.0', releases: [], builtSha: shaB }).state === 'ready')
+check('the same commit is ready — replacing its assets is safe', releasePreflight({ version: '1.0.0', expectedTag: 'v1.0.0', releases: [releaseAt(shaB)], builtSha: shaB }).state === 'ready')
+check('a branch-name target cannot prove a mismatch, so it does not block', releasePreflight({ version: '1.0.0', expectedTag: 'v1.0.0', releases: [{ tag: 'v1.0.0', draft: false, targetCommitish: 'main' }], builtSha: shaB }).state === 'ready')
+check('an unknown build commit cannot prove one either', releasePreflight({ version: '1.0.0', expectedTag: 'v1.0.0', releases: [releaseAt(shaA)], builtSha: null }).state === 'ready')
+check('no local version is unknown, not blocked', releasePreflight({ version: null, expectedTag: null, releases: [releaseAt(shaA)], builtSha: shaB }).state === 'unknown')
+check('an empty call answers instead of throwing', releasePreflight().state === 'unknown')
+check('the tag is derived from the version when absent', releasePreflight({ version: '1.0.0', expectedTag: null, releases: [releaseAt(shaA)], builtSha: shaB }).state === 'blocked')
+check('fullSha accepts a full id only', fullSha(shaA) === shaA && fullSha('abc1234') === null && fullSha(42) === null)
+
+check('patch bumps the third field', nextVersion('1.0.1', 'patch').to === '1.0.2')
+check('minor resets the patch', nextVersion('1.0.1', 'minor').to === '1.1.0')
+check('major resets both', nextVersion('1.2.3', 'major').to === '2.0.0')
+check('a prerelease is refused rather than guessed', nextVersion('1.0.0-rc.1', 'patch').ok === false)
+check('an unknown release kind is refused', nextVersion('1.0.0', 'rollup').ok === false)
+
+/* The manifest is hand-written prose in places (escaped CJK, key order), so the
+   bump must be a one-line edit, never a JSON round-trip. */
+const manifest = '{\n  "name": "x",\n  "version": "1.0.0",\n  "meta": { "title": "\\u4e00" }\n}\n'
+const rewrittenManifest = rewriteVersion(manifest, '1.0.1')
+check('only the version line changes', rewrittenManifest.ok === true && rewrittenManifest.text === manifest.replace('"version": "1.0.0"', '"version": "1.0.1"'), rewrittenManifest.ok ? '' : rewrittenManifest.message)
+check('the rewritten manifest still parses', JSON.parse(rewrittenManifest.text).version === '1.0.1')
+check('escaping elsewhere is untouched', rewrittenManifest.ok === true && rewrittenManifest.text.includes('\\u4e00') === manifest.includes('\\u4e00'))
+check('two version keys are refused, not guessed at', rewriteVersion('{\n  "version": "1.0.0",\n  "x": {\n    "version": "2.0.0"\n  }\n}\n', '1.0.1').ok === false)
+check('a non-version target is refused', rewriteVersion(manifest, '1.0').ok === false)
+check('an empty manifest is refused', rewriteVersion('', '1.0.1').ok === false)
+
+/* -- 9. Live checks (opt-in) ------------------------------------------------ */
 if (process.env.DSH_CICD_LIVE === '1') {
   console.log('\n-- live checks (DSH_CICD_LIVE=1) --')
   const version = await runTool(ghPath, ['--version'], 10_000)

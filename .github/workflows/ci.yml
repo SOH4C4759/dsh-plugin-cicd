@@ -41,6 +41,15 @@ jobs:
       # one calls apply() with a real webServer and talks to the mounted routes.
       - name: mount check
         run: node tests/mount-check.mjs
+      # The only route that writes to a checkout: a scratch clone, a scratch bare
+      # origin, and every refusal proven to leave the manifest byte-identical.
+      - name: bump e2e
+        run: node tests/bump-e2e.mjs
+      # The browser half, rendered in a stub React: proves the row that offers 发布
+      # versus 【升版本并发布】 really renders that way, and that the reason a release
+      # is blocked reaches the screen instead of staying in a log.
+      - name: client render
+        run: node tests/client-render.mjs
 
   # The bundle half of CI: continuous build. It checks the manifest contract and
   # then builds the exact archive the release workflow would publish, so a broken

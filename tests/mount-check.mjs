@@ -69,6 +69,10 @@ const EXPECTED = [
   '/api/dsh-cicd/dispatch',
   '/api/dsh-cicd/run-action',
   '/api/dsh-cicd/release-action',
+  // The step 发布 was missing: the release workflow refuses to reuse a version
+  // that belongs to another commit, so the console has to be able to move the
+  // version forward itself.
+  '/api/dsh-cicd/version-bump',
   '/api/dsh-cicd/logs',
   // Setup without a terminal: the browser sign-in and the repository list are
   // routes, not instructions to go and run something elsewhere.

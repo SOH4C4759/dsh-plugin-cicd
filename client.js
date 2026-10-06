@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
      * be missing while the button that calls it is on screen. Comparing this
      * number turns that into one sentence instead of a bare HTTP status.
      */
-    const PROTOCOL = 2
+    const PROTOCOL = 3
     const STATUS_TIMEOUT_MS = 20_000
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
@@ -77,6 +77,7 @@ window.__ModuleLoader__.load({
       'action.close': '收起',
       'action.build': '构建',
       'action.release': '发布',
+      'action.bumpRelease': '升版本并发布',
       'action.publishDraft': '公开草稿',
       'action.confirmPublish': '确认公开？',
       'action.open': '打开',
@@ -102,6 +103,7 @@ window.__ModuleLoader__.load({
       'chip.published': '已发布',
       'chip.unpublished': '未发布',
       'chip.draft': '草稿',
+      'chip.versionTaken': '版本被占用',
       'chip.dirty': '未提交 {count}',
       'chip.ahead': '领先 {count}',
       'chip.behind': '落后 {count}',
@@ -116,7 +118,8 @@ window.__ModuleLoader__.load({
       'state.noRuns': '还没有运行记录',
       'state.noReleases': '还没有 Release',
       'state.dispatched': '已触发 {workflow}（{repo}）。',
-      'state.releaseDispatched': '已触发发布流程（{repo}）；它产出的是草稿——草稿对外不可见，展开该行点【公开草稿】即可公开。',
+      'state.releaseDispatched': '已触发发布流程（{repo}）。它产出的是草稿——但草稿是否真的出现，要看这次运行的结果：失败时展开该行点【日志】就能看到原因（最常见的是版本号没升）。',
+      'state.releaseBumped': '已把 {from} 升到 {tag} 并推送 {branch}，发布流程也已触发。产出的是草稿，是否成功看这次运行的结果。',
       'state.published': '{tag} 已公开。',
       'state.rerun': '已请求重跑。',
       'state.cancelled': '已请求取消。',
@@ -141,6 +144,19 @@ window.__ModuleLoader__.load({
       'meta.projectsRoot': '本地检出根目录',
       'meta.projectsRootUnset': '未设置，添加仓库时无法自动找到本地检出',
       'run.unknown': '未知',
+      'release.takenTitle': '发布前检查：这个版本号已经属于另一个提交',
+      'release.taken': '{tag} 已属于 {owner}，而这次发布会构建 {built}——release.yml 会拒绝覆盖属于另一个提交的同号 Release（否则 tag 与资产会不一致），所以直接发布必然失败。先把它升到 {next} 再发布。',
+      'release.takenNoNext': '{tag} 已属于 {owner}，而这次发布会构建 {built}——release.yml 会拒绝覆盖属于另一个提交的同号 Release，所以直接发布必然失败。先把版本号升到下一号。',
+      'release.dirtyNote': '工作区有 {count} 个未提交改动：发布构建的是已推送的提交，这些改动不会进入发布包（升版本也会因此被拒绝）。',
+      'release.aheadNote': '有 {count} 个提交还没推送：发布构建的是远端分支，推送之前它们不会进入发布包。',
+      'release.dirty': '工作区有 {count} 个未提交改动，先提交或暂存它们。',
+      'release.noUpstream': '分支 {branch} 没有上游，无法推送。',
+      'release.behind': '分支落后上游 {count} 个提交，先拉取再发布。',
+      'release.noCheckout': '这个仓库没有可用的本地检出（找不到 package.json）。',
+      'release.noVersion': '本地读不到可升级的版本号。',
+      'release.pushFailed': '本地已提交 {tag}，但推送失败：{reason}（提交还在本地，重试推送即可）',
+      'release.carried': '这次推送同时带上了此前未推送的 {count} 个提交。',
+      'confirm.bumpRelease': '把 package.json 从 {from} 升到 {to}、提交并推送到 {branch}，然后触发发布？这会创建一个提交。',
       'confirm.publish': '公开发布 {tag}？发布后任何人可见，无法收回。',
       'confirm.cancel': '再想想',
       'setup.needGh': '没有找到 gh CLI，发布台无法访问 GitHub。',
@@ -190,6 +206,7 @@ window.__ModuleLoader__.load({
       'action.close': 'Done',
       'action.build': 'Build',
       'action.release': 'Release',
+      'action.bumpRelease': 'Bump and release',
       'action.publishDraft': 'Publish',
       'action.confirmPublish': 'Publish?',
       'action.open': 'Open',
@@ -215,6 +232,7 @@ window.__ModuleLoader__.load({
       'chip.published': 'Released',
       'chip.unpublished': 'Unreleased',
       'chip.draft': 'Draft',
+      'chip.versionTaken': 'version taken',
       'chip.dirty': '{count} uncommitted',
       'chip.ahead': '{count} ahead',
       'chip.behind': '{count} behind',
@@ -229,7 +247,8 @@ window.__ModuleLoader__.load({
       'state.noRuns': 'no runs yet',
       'state.noReleases': 'no releases yet',
       'state.dispatched': 'Triggered {workflow} on {repo}.',
-      'state.releaseDispatched': 'Release workflow triggered for {repo}. It produces a DRAFT: drafts are invisible to everyone else, so expand that row and press Publish to make it public.',
+      'state.releaseDispatched': 'Release workflow triggered for {repo}. It produces a DRAFT — but whether a draft actually appears depends on that run: if it fails, expand the row and press Logs to see why (a stale version number is the usual reason).',
+      'state.releaseBumped': 'Bumped {from} to {tag} and pushed {branch}; the release workflow is triggered. It produces a draft, and whether it succeeds depends on that run.',
       'state.published': '{tag} is public now.',
       'state.rerun': 'Re-run requested.',
       'state.cancelled': 'Cancellation requested.',
@@ -254,6 +273,19 @@ window.__ModuleLoader__.load({
       'meta.projectsRoot': 'Checkout root',
       'meta.projectsRootUnset': 'not set, so adding a repository cannot find its local checkout',
       'run.unknown': 'unknown',
+      'release.takenTitle': 'Release preflight: this version already belongs to another commit',
+      'release.taken': '{tag} was created from {owner}, but this release would build {built} — release.yml refuses to overwrite a release of the same version that belongs to another commit (the tag and its assets would disagree), so dispatching now cannot succeed. Bump it to {next} first.',
+      'release.takenNoNext': '{tag} was created from {owner}, but this release would build {built} — release.yml refuses to overwrite a release of the same version that belongs to another commit, so dispatching now cannot succeed. Bump the version first.',
+      'release.dirtyNote': '{count} uncommitted change(s): a release builds the commit that was pushed, so these files would not be in the published package (and a version bump is refused for the same reason).',
+      'release.aheadNote': '{count} commit(s) not pushed yet: a release builds the remote branch, so they would not be in the published package until they are pushed.',
+      'release.dirty': 'The checkout has {count} uncommitted change(s); commit or stash them first.',
+      'release.noUpstream': 'Branch {branch} has no upstream to push to.',
+      'release.behind': 'The branch is {count} commit(s) behind its upstream; pull before releasing.',
+      'release.noCheckout': 'This repository has no usable local checkout (no package.json).',
+      'release.noVersion': 'No bumpable version number was found locally.',
+      'release.pushFailed': 'Committed {tag} locally, but the push failed: {reason} (the commit is still local — retry the push)',
+      'release.carried': 'This push also delivered {count} commit(s) that were not pushed before.',
+      'confirm.bumpRelease': 'Bump package.json from {from} to {to}, commit it, push {branch}, then trigger the release? This creates a commit.',
       'confirm.publish': 'Publish {tag} publicly? Once published, anyone can see it.',
       'confirm.cancel': 'Not yet',
       'setup.needGh': 'The gh CLI was not found, so the console cannot reach GitHub.',
@@ -480,6 +512,44 @@ window.__ModuleLoader__.load({
       if (run.conclusion === 'success') return 'success'
       if (run.conclusion === 'failure' || run.conclusion === 'timed_out' || run.conclusion === 'startup_failure') return 'error'
       return 'idle'
+    }
+
+    /** The 7-character commit form git itself prints, for a message a person reads. */
+    function shortSha(value) {
+      return typeof value === 'string' && value !== '' ? value.slice(0, 7) : '?'
+    }
+
+    /**
+     * A failed release route's reason, in the panel's language.
+     *
+     * The Host answers with a stable `code` plus the facts, and its `message` is the
+     * English fallback a log would show. Rendering the fallback here would put an
+     * English sentence in an otherwise Chinese panel, so the codes that the panel
+     * can explain are translated and anything unknown falls back to the raw message.
+     *
+     * @param {Function} t - dictionary lookup.
+     * @param {object|null} payload - route body.
+     * @param {object|null} response - fetch response, for the status fallback.
+     * @returns {string} a sentence for the error line.
+     */
+    function releaseFailure(t, payload, response) {
+      const code = typeof payload?.code === 'string' ? payload.code : ''
+      const value = payload?.value ?? {}
+      if (code === 'dirty-tree') return t('release.dirty', { count: String(value.dirty ?? '?') })
+      if (code === 'no-upstream') return t('release.noUpstream', { branch: String(value.branch ?? '?') })
+      if (code === 'behind') return t('release.behind', { count: String(value.behind ?? '?') })
+      if (code === 'no-checkout') return t('release.noCheckout')
+      if (code === 'unusable-version' || code === 'unusable-manifest') return t('release.noVersion')
+      if (code === 'push-failed') return t('release.pushFailed', { tag: String(value.tag ?? ''), reason: String(payload?.message ?? '') })
+      if (code === 'version-taken') {
+        return t(value.nextTag === null || value.nextTag === undefined ? 'release.takenNoNext' : 'release.taken', {
+          tag: String(value.tag ?? ''),
+          owner: shortSha(value.owner),
+          built: shortSha(value.built),
+          next: String(value.nextTag ?? ''),
+        })
+      }
+      return typeof payload?.message === 'string' && payload.message !== '' ? payload.message : `HTTP ${String(response?.status ?? '?')}`
     }
 
     /** A compact isometric package, drawn with `currentColor`. */
@@ -843,7 +913,7 @@ window.__ModuleLoader__.load({
 
     /** One repository row, expandable into path, releases, runs and logs. */
     function RepoRow(props) {
-      const { t, data, busy, onAction, onPublish, logs, onLogs } = props
+      const { t, data, busy, onAction, onBump, onPublish, logs, onLogs } = props
       const [open, setOpen] = React.useState(false)
       /**
        * A draft release is the panel's one invisible outcome: it exists, it is not
@@ -857,13 +927,25 @@ window.__ModuleLoader__.load({
         if (data.draftTag !== null && data.draftTag !== undefined) setOpen(true)
       }, [data.draftTag])
       const [confirming, setConfirming] = React.useState(null)
+      /** The bump confirmation is inline, like publishing a draft: it creates a commit. */
+      const [bumping, setBumping] = React.useState(false)
       const run = data.latestRun
       const local = data.local ?? { available: false }
+      /**
+       * Whether releasing the local version is possible, decided by the Host so this
+       * panel and the dispatch route cannot disagree. `blocked` is only ever proven
+       * (the version's release belongs to another commit), never guessed.
+       */
+      const check = data.releaseCheck ?? null
+      const blocked = check !== null && check.state === 'blocked'
       const state = runState(run)
 
       /* Only non-zero local signals are shown: a column of "clean" chips is noise,
          and the row exists to make the exceptions visible. */
       const chips = []
+      /* A version that is already taken makes 发布 impossible, so the row says so
+         before the button is pressed rather than after a run has failed. */
+      if (blocked) chips.push(h(Chip, { key: 'v', state: 'warn', title: t('release.takenTitle') }, t('chip.versionTaken')))
       if (local.available === true) {
         if (Number.isFinite(local.dirty) && local.dirty > 0) chips.push(h(Chip, { key: 'd', state: 'warn' }, t('chip.dirty', { count: String(local.dirty) })))
         if (Number.isFinite(local.ahead) && local.ahead > 0) chips.push(h(Chip, { key: 'a', state: 'warn' }, `↑${local.ahead}`))
@@ -898,7 +980,22 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'dsc-right' },
             data.hasBuildWorkflow ? h(Btn, { disabled: busy !== '', title: t('action.build'), onClick: () => onAction('build', data) }, busy === `build:${data.repo}` ? '…' : t('action.build')) : null,
-            data.hasReleaseWorkflow ? h(Btn, { kind: 'primary', disabled: busy !== '', title: t('action.release'), onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? '…' : t('action.release')) : null,
+            data.hasReleaseWorkflow
+              ? blocked && typeof check.nextTag === 'string' && check.nextTag !== ''
+                /* The version is the obstacle, so the button that works is the one
+                   that removes it — refusing to dispatch and leaving the user to edit
+                   package.json by hand would be the same dead end, one click later. */
+                ? h(Btn, {
+                    kind: 'primary',
+                    disabled: busy !== '',
+                    title: t('action.bumpRelease'),
+                    onClick: () => {
+                      setOpen(true)
+                      setBumping(true)
+                    },
+                  }, busy === `bump:${data.repo}` ? '…' : t('action.bumpRelease'))
+                : h(Btn, { kind: 'primary', disabled: busy !== '', title: t('action.release'), onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? '…' : t('action.release'))
+              : null,
             h(Btn, { kind: 'quiet', square: true, onClick: () => setOpen((value) => !value), title: open ? t('action.collapse') : t('action.expand') }, open ? '▴' : '▾'),
           ),
         ),
@@ -910,6 +1007,41 @@ window.__ModuleLoader__.load({
                 ? h('span', null, t('meta.noLocal'))
                 : h('span', { className: 'dsc-mono' }, `${t('meta.path')} ${data.localPath}`),
               data.problems.length > 0 ? h('div', { className: 'dsc-warn' }, data.problems.join(' · ')) : null,
+
+              /* Why 发布 cannot work, and what would make it work. Both notes are
+                 about the same trap: a release builds the pushed commit, so anything
+                 only in the working tree or only local is silently absent from it. */
+              blocked
+                ? h('div', { className: 'dsc-warn' }, check.nextTag === null
+                    ? t('release.takenNoNext', { tag: check.tag ?? '', owner: shortSha(check.owner), built: shortSha(check.built) })
+                    : t('release.taken', { tag: check.tag ?? '', owner: shortSha(check.owner), built: shortSha(check.built), next: check.nextTag }))
+                : null,
+              local.available === true && Number.isFinite(local.dirty) && local.dirty > 0
+                ? h('div', { className: 'dsc-warn' }, t('release.dirtyNote', { count: String(local.dirty) }))
+                : null,
+              local.available === true && Number.isFinite(local.ahead) && local.ahead > 0
+                ? h('div', { className: 'dsc-warn' }, t('release.aheadNote', { count: String(local.ahead) }))
+                : null,
+              bumping && blocked && typeof check.nextTag === 'string'
+                ? h(
+                    'div',
+                    { className: 'dsc-line' },
+                    h('span', { className: 'dsc-grow' }, t('confirm.bumpRelease', {
+                      from: data.version ?? '?',
+                      to: check.nextTag,
+                      branch: typeof local.branch === 'string' && local.branch !== '' ? local.branch : 'main',
+                    })),
+                    h(Btn, {
+                      kind: 'danger',
+                      disabled: busy !== '',
+                      onClick: () => {
+                        setBumping(false)
+                        onBump(data)
+                      },
+                    }, t('action.bumpRelease')),
+                    h(Btn, { kind: 'quiet', onClick: () => setBumping(false) }, t('confirm.cancel')),
+                  )
+                : null,
 
               h(
                 'div',
@@ -1166,6 +1298,55 @@ window.__ModuleLoader__.load({
         [run],
       )
 
+      /**
+       * Bump the version, push it, then dispatch the release.
+       *
+       * One action rather than two buttons because neither half stands alone: a bump
+       * with no release leaves a commit nobody asked for, and a release with no bump
+       * is the run that could only fail. The new version is the Host's own
+       * arithmetic — the number in the confirmation is the number that gets written —
+       * and a failed bump reports why without dispatching anything.
+       */
+      const onBump = React.useCallback(
+        async (data) => {
+          const key = `bump:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const bumped = await postJson('/version-bump', { repo: data.repo, release: 'patch' }, ACTION_TIMEOUT_MS)
+          if (!bumped.ok) {
+            setBusy('')
+            setError('timeout')
+            return
+          }
+          if (!bumped.response.ok || bumped.payload?.ok !== true) {
+            setBusy('')
+            setError(t('state.actionFailed', { reason: releaseFailure(t, bumped.payload, bumped.response) }))
+            await loadOverview({ force: true })
+            return
+          }
+          const value = bumped.payload.value ?? {}
+          const dispatched = await postJson('/dispatch', {
+            repo: data.repo,
+            workflow: status?.config?.releaseWorkflow ?? 'release.yml',
+            inputs: { draft: 'true' },
+          }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!dispatched.ok || !dispatched.response.ok || dispatched.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: releaseFailure(t, dispatched.payload, dispatched.response) }))
+            await loadOverview({ force: true })
+            return
+          }
+          setNotice(t('state.releaseBumped', {
+            from: String(value.from ?? '?'),
+            tag: String(value.tag ?? ''),
+            branch: String(value.branch ?? ''),
+          }))
+          await loadOverview({ force: true })
+        },
+        [loadOverview, setError, status, t],
+      )
+
       const onLogs = React.useCallback(async (data, entry) => {
         if (logs !== null && logs.repo === data.repo && logs.runId === entry.id) {
           setLogs(null)
@@ -1305,6 +1486,7 @@ window.__ModuleLoader__.load({
                 data,
                 busy,
                 onAction,
+                onBump: () => onBump(data),
                 onPublish: (tag) => onPublish(data.repo, tag),
                 logs,
                 onLogs,
@@ -1317,6 +1499,7 @@ window.__ModuleLoader__.load({
                 data,
                 busy,
                 onAction,
+                onBump: () => {},
                 onPublish: () => {},
                 logs: null,
                 onLogs: async () => {},
