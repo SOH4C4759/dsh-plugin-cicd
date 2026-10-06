@@ -155,6 +155,8 @@ window.__ModuleLoader__.load({
       'setup.stalledSaid': 'gh 说：{text}',
       'setup.unreachableTitle': 'github.com 当前连不上',
       'setup.unreachable': '提示：从本机连不上 github.com:443，而设备码流程需要它——如果一直不出码，多半是这个原因。gh 已经在尝试；若它其实能连上（例如走代理），码仍会出现。',
+      'setup.dnsTitle': 'DNS 解析 github.com 失败',
+      'setup.dns': '提示：本机解析不出 github.com 的地址，而地址本身是通的（实测直连它的 IP 只需几十毫秒）。gh 也要自行解析域名，所以它连请求都发不出去，这就是一直不出码的原因。换个 DNS 或稍后重试即可；gh 已在尝试，解析一恢复码就会出现。',
       'setup.succeeded': '授权成功，正在读取账号…',
       'setup.failed': '授权未完成：{reason}',
       'setup.expired': '一次性代码已过期，请重新开始。',
@@ -263,6 +265,8 @@ window.__ModuleLoader__.load({
       'setup.stalledSaid': 'gh said: {text}',
       'setup.unreachableTitle': 'github.com is not reachable right now',
       'setup.unreachable': 'Note: this machine cannot open a connection to github.com:443, which the device-code flow needs — if no code appears, that is the likely reason. gh is already trying; if it can reach GitHub by another route (a proxy, for instance) the code will still appear.',
+      'setup.dnsTitle': 'Cannot resolve github.com',
+      'setup.dns': 'Note: this machine cannot resolve github.com to an address, while the address itself is reachable (connecting straight to its IP takes tens of milliseconds). gh resolves the name too, so it cannot even send the request — which is why no code appears. A different resolver, or simply retrying later, fixes it; gh is already trying and the code appears as soon as resolution works.',
       'setup.succeeded': 'Authorized. Reading the account…',
       'setup.failed': 'Sign-in did not finish: {reason}',
       'setup.expired': 'The one-time code expired. Start again.',
@@ -658,7 +662,13 @@ window.__ModuleLoader__.load({
                  might be using, so this reports a likely cause without stopping
                  an attempt that could still succeed. */
               pending && attempt.reachable === false
-                ? h('span', { className: 'dsc-warn' }, h('strong', null, t('setup.unreachableTitle')), ' — ', t('setup.unreachable'))
+                ? h(
+                    'span',
+                    { className: 'dsc-warn' },
+                    h('strong', null, t(attempt.reachabilityStage === 'dns' ? 'setup.dnsTitle' : 'setup.unreachableTitle')),
+                    ' — ',
+                    t(attempt.reachabilityStage === 'dns' ? 'setup.dns' : 'setup.unreachable'),
+                  )
                 : null,
               /* A stalled attempt keeps running — the code has been observed to
                  arrive once the network recovers — so this reports the wait

@@ -30,6 +30,7 @@
 import { execFile, spawn } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { connect } from 'node:net'
+import { lookup } from 'node:dns/promises'
 import { dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -102,21 +103,33 @@ const AUTH_TIMEOUT_MS = 10 * 60 * 1000
 const AUTH_CODE_DEADLINE_MS = 6_000
 
 /**
- * Can this process open a TCP connection to `host:port`?
+ * Probe `host:port` and say WHICH layer failed.
  *
- * The device-code flow talks to `github.com`. Where that host is intermittently
- * blocked, `gh` does not fail fast — it hangs with no output. A short probe turns
- * a silent minute into an immediate, specific message.
+ * Resolving first is the whole point. A DNS failure and a blocked port look
+ * identical from a bare connect, and they have different causes and different
+ * fixes. Measured on this machine: connecting to github.com by name timed out,
+ * while connecting to the very address it resolves to succeeded in 83ms — so the
+ * name resolution is what flaps, and a message saying "cannot open a connection to
+ * github.com:443" described the wrong layer.
  *
- * @param {string} host - hostname to probe.
+ * @param {string} host - hostname to resolve and connect to.
  * @param {number} port - TCP port.
- * @param {number} timeoutMs - how long to wait before calling it unreachable.
- * @returns {Promise<boolean>} whether a connection was established.
+ * @param {number} timeoutMs - per-stage budget.
+ * @returns {Promise<{ok: boolean, stage: 'ok'|'dns'|'tcp', address: string|null}>} probe result.
  */
-export async function canReach(host, port, timeoutMs) {
-  return new Promise((resolve) => {
+export async function probeHost(host, port, timeoutMs) {
+  let address = null
+  try {
+    const resolved = await withTimeout(lookup(host, { all: true }), timeoutMs)
+    const first = Array.isArray(resolved) ? resolved[0] : resolved
+    address = typeof first?.address === 'string' ? first.address : null
+  } catch {
+    return { ok: false, stage: 'dns', address: null }
+  }
+  if (address === null) return { ok: false, stage: 'dns', address: null }
+  const connected = await new Promise((resolve) => {
     let settled = false
-    const socket = connect({ host, port })
+    const socket = connect({ host: address, port })
     const finish = (value) => {
       if (settled) return
       settled = true
@@ -128,6 +141,41 @@ export async function canReach(host, port, timeoutMs) {
     socket.once('connect', () => finish(true))
     socket.once('timeout', () => finish(false))
     socket.once('error', () => finish(false))
+  })
+  return connected ? { ok: true, stage: 'ok', address } : { ok: false, stage: 'tcp', address }
+}
+
+/**
+ * Can this process open a TCP connection to `host:port`, name resolution included?
+ * @param {string} host - hostname.
+ * @param {number} port - TCP port.
+ * @param {number} timeoutMs - per-stage budget.
+ * @returns {Promise<boolean>} whether the connection was established.
+ */
+export async function canReach(host, port, timeoutMs) {
+  return (await probeHost(host, port, timeoutMs)).ok
+}
+
+/**
+ * Resolve a promise, or reject once `timeoutMs` has passed.
+ * @param {Promise<unknown>} promise - work to bound.
+ * @param {number} timeoutMs - budget in milliseconds.
+ * @returns {Promise<unknown>} the value, or a rejection on timeout.
+ */
+function withTimeout(promise, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs} ms`)), timeoutMs)
+    if (typeof timer.unref === 'function') timer.unref()
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
+    )
   })
 }
 
@@ -843,7 +891,7 @@ export function apply(ctx, rawConfig) {
   }
 
   const authSnapshot = () => authAttempt === null
-    ? { state: 'idle', mode: null, code: null, url: null, message: null, startedAt: null, waitedMs: 0, stalled: false, reachable: null, outputBytes: 0, outputExcerpt: null }
+    ? { state: 'idle', mode: null, code: null, url: null, message: null, startedAt: null, waitedMs: 0, stalled: false, reachable: null, reachabilityStage: null, reachabilityAddress: null, outputBytes: 0, outputExcerpt: null }
     : {
         state: authAttempt.state,
         mode: authAttempt.mode,
@@ -868,6 +916,12 @@ export function apply(ctx, rawConfig) {
          * this probe cannot see.
          */
         reachable: typeof authAttempt.reachable === 'boolean' ? authAttempt.reachable : null,
+        /**
+         * Which layer the probe failed at: `dns`, `tcp`, or `ok`. They need
+         * different advice — a resolver problem is not a blocked port.
+         */
+        reachabilityStage: typeof authAttempt.reachabilityStage === 'string' ? authAttempt.reachabilityStage : null,
+        reachabilityAddress: typeof authAttempt.reachabilityAddress === 'string' ? authAttempt.reachabilityAddress : null,
         outputBytes: authAttempt.output.length,
         /**
          * What `gh` actually printed, for the case where it printed nothing useful.
@@ -955,9 +1009,14 @@ export function apply(ctx, rawConfig) {
        * prevent the attempt — see the note in `auth-start`.
        */
       attempt.reachable = null
-      void canReach('github.com', 443, 3000)
-        .then((ok) => {
-          if (authAttempt === attempt) attempt.reachable = ok
+      attempt.reachabilityStage = null
+      void probeHost('github.com', 443, 3000)
+        .then((probe) => {
+          if (authAttempt !== attempt) return
+          attempt.reachable = probe.ok
+          /* 'dns' and 'tcp' need different advice, so the stage is kept. */
+          attempt.reachabilityStage = probe.stage
+          attempt.reachabilityAddress = probe.address
         })
         .catch(() => {
           if (authAttempt === attempt) attempt.reachable = null
