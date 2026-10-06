@@ -43,7 +43,16 @@ function check(label, condition, detail = '') {
    flag-looking string from being read as an option. */
 check('bare name accepted', normalizeRepoEntry('dsh-plugin-restart')?.repo === 'dsh-plugin-restart')
 check('owner/name accepted', normalizeRepoEntry('other/repo')?.repo === 'other/repo')
-check('object form accepted', normalizeRepoEntry({ repo: 'x', localPath: 'F:\\CodeProj\\x' })?.localPath === 'F:\\CodeProj\\x')
+/* `path.isAbsolute` is platform-specific, and this suite runs on a Linux runner
+   as well as on the Windows machine the plugin actually targets. So the shape
+   that must hold everywhere is asserted everywhere, and the Windows drive-letter
+   shape is pinned only where it is meaningful — asserting it on Linux would fail
+   for a reason that has nothing to do with the code under test. */
+const absoluteCheckout = join(tmpdir(), 'some-checkout')
+check('object form accepted', normalizeRepoEntry({ repo: 'x', localPath: absoluteCheckout })?.localPath === absoluteCheckout)
+if (process.platform === 'win32') {
+  check('a Windows absolute path is kept', normalizeRepoEntry({ repo: 'x', localPath: 'F:\\CodeProj\\x' })?.localPath === 'F:\\CodeProj\\x')
+}
 check('label falls back to the name', normalizeRepoEntry({ repo: 'x' })?.label === '')
 check('relative localPath refused', normalizeRepoEntry({ repo: 'x', localPath: 'CodeProj\\x' })?.localPath === '')
 check('flag-shaped name refused', normalizeRepoEntry('--help') === null)
