@@ -842,7 +842,7 @@ export function apply(ctx, rawConfig) {
   }
 
   const authSnapshot = () => authAttempt === null
-    ? { state: 'idle', mode: null, code: null, url: null, message: null, startedAt: null }
+    ? { state: 'idle', mode: null, code: null, url: null, message: null, startedAt: null, waitedMs: 0, stalled: false, outputBytes: 0, outputExcerpt: null }
     : {
         state: authAttempt.state,
         mode: authAttempt.mode,
@@ -850,6 +850,29 @@ export function apply(ctx, rawConfig) {
         url: authAttempt.url,
         message: authAttempt.message,
         startedAt: new Date(authAttempt.startedAt).toISOString(),
+        waitedMs: Date.now() - authAttempt.startedAt,
+        /**
+         * True once the code has been missing for AUTH_CODE_DEADLINE_MS.
+         *
+         * This does NOT end the attempt. `gh` was measured printing nothing while
+         * github.com was unreachable and then producing the code once the network
+         * came back, so ending it on a timer would turn a recoverable wait into a
+         * failure the user has to notice and retry. The panel keeps its cancel
+         * button, and the hard limit stays the code's own lifetime.
+         */
+        stalled: authAttempt.stalled === true,
+        outputBytes: authAttempt.output.length,
+        /**
+         * What `gh` actually printed, for the case where it printed nothing useful.
+         *
+         * Measured shape: output beginning with a bare newline, so the first line is
+         * empty — which is how a message came to read "its output began:" followed by
+         * nothing. Whitespace-only output is reported as such rather than quoted.
+         */
+        outputExcerpt: (() => {
+          const cleaned = authAttempt.output.replace(/\s+/g, ' ').trim()
+          return cleaned === '' ? null : cleaned.slice(0, 200)
+        })(),
       }
 
   const startAuth = (mode, scopes) => {
@@ -908,24 +931,17 @@ export function apply(ctx, rawConfig) {
     }, AUTH_TIMEOUT_MS)
     if (typeof attempt.timer.unref === 'function') attempt.timer.unref()
     /*
-     * `login` is the flow that has a one-time code, and the one that goes silent
-     * when github.com is unreachable. If no code has appeared by the deadline, say
-     * what happened instead of waiting out the code's lifetime.
+     * `login` is the flow that has a one-time code. Mark — do not fail — an attempt
+     * that has gone AUTH_CODE_DEADLINE_MS without one: `gh` was measured producing
+     * the code once the network recovered, so the panel reports the wait and lets
+     * the user decide, while the fifteen-minute expiry still bounds it.
      */
     if (mode === 'login') {
-      const codeTimer = setTimeout(() => {
-        if (attempt.state !== 'running' || attempt.code !== null) return
-        const printed = firstLine(attempt.output)
-        settleAuth(
-          'failed',
-          printed === null
-            ? 'gh printed no one-time code within 15s (it produced no output at all, which is what happens when github.com cannot be reached) — check the network and try again'
-            : `gh printed no one-time code within 15s; its output began: ${printed}`,
-        )
-        stopAuth()
+      const stallTimer = setTimeout(() => {
+        if (attempt.state === 'running' && attempt.code === null) attempt.stalled = true
       }, AUTH_CODE_DEADLINE_MS)
-      if (typeof codeTimer.unref === 'function') codeTimer.unref()
-      attempt.codeTimer = codeTimer
+      if (typeof stallTimer.unref === 'function') stallTimer.unref()
+      attempt.stallTimer = stallTimer
     }
     return attempt
   }

@@ -149,6 +149,10 @@ window.__ModuleLoader__.load({
       'setup.waiting': '等待授权…（在浏览器里完成即可，这里会自动继续）',
       'setup.requestingCode': '正在向 GitHub 申请一次性码…',
       'setup.codePending': '码还没到。等它出现再打开授权页面——提前打开只会得到一个没有内容可输入的页面。',
+      'setup.stalled': '已等待 {seconds} 秒仍没有一次性码：{detail}。最常见的原因是 github.com 不可达（面板读取仓库用的 api.github.com 是另一条线路，可能仍然正常）。你可以继续等——网络恢复后码会自己出现——也可以取消后重试。',
+      'setup.stalledNoOutput': 'gh 完全没有输出',
+      'setup.stalledQuietOutput': 'gh 只输出了空白内容（通常在重试连接）',
+      'setup.stalledSaid': 'gh 说：{text}',
       'setup.succeeded': '授权成功，正在读取账号…',
       'setup.failed': '授权未完成：{reason}',
       'setup.expired': '一次性代码已过期，请重新开始。',
@@ -251,6 +255,10 @@ window.__ModuleLoader__.load({
       'setup.waiting': 'Waiting for authorization… finish in the browser and this continues by itself.',
       'setup.requestingCode': 'Requesting a one-time code from GitHub…',
       'setup.codePending': 'The code has not arrived yet. Wait for it before opening the authorization page — opening early leaves you with nothing to enter.',
+      'setup.stalled': 'No one-time code after {seconds}s: {detail}. The usual cause is that github.com cannot be reached (the panel reads repositories over api.github.com, a different route, so that can still work). You can keep waiting — the code appears once the network recovers — or cancel and try again.',
+      'setup.stalledNoOutput': 'gh has printed nothing at all',
+      'setup.stalledQuietOutput': 'gh has printed only whitespace (it is usually retrying the connection)',
+      'setup.stalledSaid': 'gh said: {text}',
       'setup.succeeded': 'Authorized. Reading the account…',
       'setup.failed': 'Sign-in did not finish: {reason}',
       'setup.expired': 'The one-time code expired. Start again.',
@@ -639,6 +647,17 @@ window.__ModuleLoader__.load({
                 code !== null ? h(CopyLine, { t, command: code }) : null,
               ),
               h('span', null, code === null ? t('setup.codePending') : t('setup.waiting')),
+              /* A stalled attempt keeps running — the code has been observed to
+                 arrive once the network recovers — so this reports the wait
+                 instead of declaring a failure the user would have to retry. */
+              pending && attempt.stalled === true
+                ? h('span', { className: 'dsc-warn' }, t('setup.stalled', {
+                    seconds: String(Math.max(1, Math.round((typeof attempt.waitedMs === 'number' ? attempt.waitedMs : 0) / 1000))),
+                    detail: typeof attempt.outputExcerpt === 'string' && attempt.outputExcerpt !== ''
+                      ? t('setup.stalledSaid', { text: attempt.outputExcerpt })
+                      : (typeof attempt.outputBytes === 'number' && attempt.outputBytes > 0 ? t('setup.stalledQuietOutput') : t('setup.stalledNoOutput')),
+                  }))
+                : null,
               h('div', { className: 'dsc-actions' }, h(Btn, { onClick: cancel }, t('action.cancelSignIn'))),
             )
           : h(
