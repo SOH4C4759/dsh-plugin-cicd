@@ -27,7 +27,7 @@
  * @module dsh-plugin-cicd
  */
 
-import { execFile, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { connect } from 'node:net'
 import { lookup } from 'node:dns/promises'
@@ -146,6 +146,65 @@ export async function probeHost(host, port, timeoutMs) {
 }
 
 /**
+ * Work out which proxy `gh` should use.
+ *
+ * `gh` and `git` honour the HTTP(S)_PROXY environment variables and ignore the
+ * Windows internet settings that a browser follows. On a machine whose browser can
+ * open github.com while `gh auth login` prints nothing, that difference is the whole
+ * story, so the system setting is read here and handed to the gh children.
+ *
+ * @param {string} explicit - `proxy` from the row config; wins when set.
+ * @param {string} [platform] - injectable for tests.
+ * @returns {{url: string|null, source: 'config'|'windows'|'none'}} the proxy to use.
+ */
+export function resolveProxy(explicit, platform = process.platform) {
+  if (typeof explicit === 'string' && explicit.trim() !== '') {
+    const value = explicit.trim()
+    return { url: value.includes('://') ? value : `http://${value}`, source: 'config' }
+  }
+  if (platform !== 'win32') return { url: null, source: 'none' }
+  try {
+    const out = execFileSync(
+      'reg',
+      ['query', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings'],
+      { encoding: 'utf8', windowsHide: true, timeout: 5_000 },
+    )
+    const enabled = /ProxyEnable\s+REG_DWORD\s+0x1/i.test(out)
+    const server = /ProxyServer\s+REG_SZ\s+(\S+)/i.exec(out)?.[1] ?? null
+    if (!enabled || server === null) return { url: null, source: 'none' }
+    return { url: server.includes('://') ? server : `http://${server}`, source: 'windows' }
+  } catch {
+    return { url: null, source: 'none' }
+  }
+}
+
+/**
+ * Environment additions that make `gh` use a proxy.
+ * @param {string|null} url - proxy URL, or null for none.
+ * @returns {object} environment entries to spread into a child's env.
+ */
+export function proxyEnvironment(url) {
+  if (url === null) return {}
+  return {
+    HTTP_PROXY: url,
+    HTTPS_PROXY: url,
+    ALL_PROXY: url,
+    // The loopback surface this plugin serves must never be routed through it.
+    NO_PROXY: 'localhost,127.0.0.1,::1',
+    no_proxy: 'localhost,127.0.0.1,::1',
+  }
+}
+
+/**
+ * Proxy for the gh children, set once by `apply`.
+ *
+ * A module-level value because `runTool` is a plain function called from dozens of
+ * host handlers; threading the config through all of them would be a larger change
+ * than this deserves, and one plugin instance serves one process.
+ */
+let activeProxyEnvironment = {}
+
+/**
  * Can this process open a TCP connection to `host:port`, name resolution included?
  * @param {string} host - hostname.
  * @param {number} port - TCP port.
@@ -258,6 +317,15 @@ export function resolveConfig(raw) {
      * absolute path is exactly the kind of step this plugin exists to remove.
      */
     projectsRoot: text(raw?.projectsRoot),
+    /**
+     * An explicit proxy for gh, e.g. `http://127.0.0.1:7897`.
+     *
+     * Empty means "work it out from the system settings". gh, like git, reads the
+     * HTTP(S)_PROXY environment variables and ignores the Windows proxy that the
+     * browser uses — which is how a machine can open github.com in a browser while
+     * `gh auth login` sits there printing nothing at all.
+     */
+    proxy: text(raw?.proxy),
   }
 }
 
@@ -469,6 +537,10 @@ export async function runTool(executable, args, timeoutMs) {
       maxBuffer: 8 * 1024 * 1024,
       env: {
         ...process.env,
+        // gh ignores the Windows proxy settings that a browser follows. Without
+        // this, a machine can open github.com in a browser while gh cannot send a
+        // single request — which is exactly what was happening here.
+        ...activeProxyEnvironment,
         GH_PROMPT_DISABLED: '1',
         GH_NO_UPDATE_NOTIFIER: '1',
         GH_PAGER: 'cat',
@@ -835,6 +907,33 @@ export function apply(ctx, rawConfig) {
    */
   const live = () => effectiveConfig(config)
 
+  /*
+   * Hand gh the proxy the browser is already using.
+   *
+   * Resolved once, from the row config or the Windows internet settings, because
+   * gh reads HTTP(S)_PROXY and ignores the setting the browser follows — which is
+   * how a machine can open github.com in a browser while `gh auth login` prints
+   * nothing at all.
+   *
+   * Injected only once the proxy has answered on its port. A local proxy that is
+   * not running would otherwise be worse than no proxy: gh would fail to connect to
+   * 127.0.0.1 instead of trying GitHub directly. Until the check completes the
+   * children simply go direct.
+   */
+  const proxy = resolveProxy(live().proxy)
+  if (proxy.url !== null) {
+    try {
+      const parsed = new URL(proxy.url)
+      const host = parsed.hostname
+      const port = Number(parsed.port === '' ? (parsed.protocol === 'https:' ? 443 : 80) : parsed.port)
+      void probeHost(host, port, 1_500).then((probe) => {
+        if (probe.ok) activeProxyEnvironment = proxyEnvironment(proxy.url)
+      })
+    } catch {
+      /* A malformed proxy URL is gh's to report; going direct is the safe default. */
+    }
+  }
+
   const guard = (req, res) => {
     if (!isTrustedRequest(req)) {
       writeJson(res, 403, { ok: false, code: 'forbidden', message: 'release-console routes are loopback-only' })
@@ -949,7 +1048,7 @@ export function apply(ctx, rawConfig) {
       // `GH_PROMPT_DISABLED` must stay unset here: this IS the interactive flow,
       // just without a terminal. Everything else that would page or colour output
       // is, because the panel renders what comes back.
-      env: { ...process.env, GH_PROMPT_DISABLED: '', GH_PAGER: 'cat', NO_COLOR: '1' },
+      env: { ...process.env, ...activeProxyEnvironment, GH_PROMPT_DISABLED: '', GH_PAGER: 'cat', NO_COLOR: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     const attempt = {
@@ -1010,13 +1109,30 @@ export function apply(ctx, rawConfig) {
        */
       attempt.reachable = null
       attempt.reachabilityStage = null
-      void probeHost('github.com', 443, 3000)
+      /*
+       * Probe the PROXY when one is in use, not github.com.
+       *
+       * gh reaches GitHub through the proxy, so a direct connection failing says
+       * nothing about whether gh will succeed — and reporting it would send the
+       * reader off to fix a network that is already working.
+       */
+      const proxyUrl = typeof activeProxyEnvironment.HTTPS_PROXY === 'string' ? activeProxyEnvironment.HTTPS_PROXY : null
+      let probeTarget = { host: 'github.com', port: 443, via: null }
+      if (proxyUrl !== null) {
+        try {
+          const parsed = new URL(proxyUrl)
+          probeTarget = { host: parsed.hostname, port: Number(parsed.port === '' ? (parsed.protocol === 'https:' ? 443 : 80) : parsed.port), via: proxyUrl }
+        } catch {
+          /* A malformed proxy URL is reported by gh itself; keep the direct probe. */
+        }
+      }
+      void probeHost(probeTarget.host, probeTarget.port, 3000)
         .then((probe) => {
           if (authAttempt !== attempt) return
           attempt.reachable = probe.ok
           /* 'dns' and 'tcp' need different advice, so the stage is kept. */
-          attempt.reachabilityStage = probe.stage
-          attempt.reachabilityAddress = probe.address
+          attempt.reachabilityStage = probeTarget.via === null ? probe.stage : (probe.ok ? 'proxy' : 'proxy-failed')
+          attempt.reachabilityAddress = probeTarget.via === null ? probe.address : probeTarget.via
         })
         .catch(() => {
           if (authAttempt === attempt) attempt.reachable = null
@@ -1404,7 +1520,7 @@ export function apply(ctx, rawConfig) {
     settleAuth('idle', null)
     const child = spawn(ghPath, ['auth', 'logout', '--hostname', 'github.com'], {
       windowsHide: true,
-      env: { ...process.env, GH_PAGER: 'cat', NO_COLOR: '1' },
+      env: { ...process.env, ...activeProxyEnvironment, GH_PAGER: 'cat', NO_COLOR: '1' },
       stdio: ['pipe', 'pipe', 'pipe'],
     })
     let output = ''
