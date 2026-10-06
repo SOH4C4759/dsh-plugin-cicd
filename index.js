@@ -1214,6 +1214,15 @@ export function apply(ctx, rawConfig) {
         pushedAt: typeof entry?.pushed_at === 'string' ? entry.pushed_at : '',
         description: typeof entry?.description === 'string' ? entry.description : '',
         registered: existing !== null,
+        /**
+         * The exact string this repository is registered under.
+         *
+         * The panel must remove by that string, not by the name it would have
+         * chosen: a list registered when `owner` was set holds bare names, while
+         * one registered from the picker holds `owner/name`, and both are
+         * legitimate. Removing by the wrong form silently fails to match.
+         */
+        registeredAs: existing !== null ? existing.repo : null,
         localPath: existing !== null ? existing.localPath : findLocalCheckout(current.projectsRoot, bare),
       }
     })

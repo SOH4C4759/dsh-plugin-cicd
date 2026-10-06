@@ -659,9 +659,16 @@ window.__ModuleLoader__.load({
         async (entry) => {
           setBusy(entry.fullName)
           setError(null)
+          /**
+           * Add with the full `owner/name`: the picker knows it, and it is
+           * self-sufficient — a fresh install has no `owner` configured, and a bare
+           * name would then register something the Host cannot resolve to a slug.
+           * Remove with whatever form is actually stored.
+           */
+          const target = entry.registered && typeof entry.registeredAs === 'string' ? entry.registeredAs : entry.fullName
           const result = entry.registered
-            ? await postJson('/config-remove', { repo: entry.bare }, ACTION_TIMEOUT_MS)
-            : await postJson('/config-add', { repo: entry.bare }, ACTION_TIMEOUT_MS)
+            ? await postJson('/config-remove', { repo: target }, ACTION_TIMEOUT_MS)
+            : await postJson('/config-add', { repo: target }, ACTION_TIMEOUT_MS)
           setBusy('')
           if (!result.ok) {
             setError(result.aborted ? t('state.timeout') : t('state.hostGone'))
