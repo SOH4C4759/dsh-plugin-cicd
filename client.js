@@ -61,9 +61,9 @@ window.__ModuleLoader__.load({
 
     /** Simplified Chinese dictionary (key-set source of truth). */
     const zh = {
-      'panel': '发布台',
-      'title': '发布台',
-      'subtitle': 'GitHub Actions 的构建与发布',
+      'panel': 'DSH 插件发布台',
+      'title': 'DSH 插件发布台',
+      'subtitle': '持续构建与发布（CI/CD）',
       'settings.label': 'GitHub 账户',
       'settings.title': 'GitHub 账户',
       'settings.subtitle': '发布台用这台机器上的 gh 访问 GitHub，插件自己不保存任何凭据。',
@@ -160,9 +160,9 @@ window.__ModuleLoader__.load({
 
     /** English dictionary, same key set. */
     const en = {
-      'panel': 'Release Console',
-      'title': 'Release Console',
-      'subtitle': 'Builds and releases from GitHub Actions',
+      'panel': 'DSH Plugin CI/CD',
+      'title': 'DSH Plugin CI/CD',
+      'subtitle': 'Continuous builds and releases for DSH plugins',
       'settings.label': 'GitHub account',
       'settings.title': 'GitHub account',
       'settings.subtitle': 'The console reaches GitHub through the gh CLI on this machine; the plugin stores no credential of its own.',

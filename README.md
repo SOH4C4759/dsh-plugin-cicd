@@ -1,6 +1,8 @@
-# dsh-plugin-cicd（发布台）
+# dsh-plugin-cicd（DSH 插件发布台）
 
-把 **GitHub Actions 的持续构建与发布**搬进 DeepSeek Harness：侧边栏一个图标，点开是一个占满主区域的独立面板。
+把 **DSH 插件的持续构建与发布（CI/CD）**搬进 DeepSeek Harness：侧边栏一个图标，点开是一个占满主区域的独立面板。
+
+> **名字**：界面显示名为「DSH 插件发布台」（副标题「持续构建与发布（CI/CD）」；英文界面为 `DSH Plugin CI/CD`）。包名与仓库 id 保持 `dsh-plugin-cicd` —— 它们只是技术标识，改名会破坏已有安装（profile 的 `link:` 路径、bundles 条目、patch 里的 row id、配置文件路径）。
 
 它回答三个 GitHub 页面各自只说了一部分的问题：
 

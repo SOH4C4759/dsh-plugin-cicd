@@ -1,6 +1,6 @@
 {
   "name": "dsh-plugin-cicd",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "发布台（Release Console）for DeepSeek Harness: a sidebar entry and a full main-panel page that show what each repository has built, what it has released, and whether the local checkout is ahead of the release — with buttons to trigger a build, cut a release, and publish a draft. Reuses the machine's authenticated gh CLI, so the plugin stores no credential of its own.",
   "type": "module",
   "icon": "./icon.svg",
@@ -23,8 +23,8 @@
     "LICENSE"
   ],
   "meta": {
-    "title": "发布台",
-    "description": "GitHub Actions 的持续构建与发布面板：每个仓库的最近一次运行、已发布的 Release、本地是否领先于发布，以及一键构建 / 发布 / 公开草稿。复用本机已登录的 gh，不另存凭据。"
+    "title": "DSH 插件发布台",
+    "description": "面向 DSH 插件仓库的持续构建与发布（CI/CD）：侧边栏图标 + 独立主面板，显示每个仓库的最近一次运行、已发布的 Release、以及本地是否领先于发布。浏览器登录、勾选仓库即可，复用本机已登录的 gh，不另存凭据。门禁与产包形状按 DSH bundle 设计（契约检查 + 整树 zip + 可安装 tgz），任何带 ci.yml / release.yml 的仓库都能接。"
   },
   "dsh": {
     "bundle": {
