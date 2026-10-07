@@ -153,6 +153,10 @@ jobs:
           node "$STAGE/${NAME}-${VERSION}/tests/host-checks.mjs"
           node "$STAGE/${NAME}-${VERSION}/tests/bump-e2e.mjs" "$STAGE/${NAME}-${VERSION}"
           node "$STAGE/${NAME}-${VERSION}/tests/client-render.mjs" "$STAGE/${NAME}-${VERSION}"
+          # The Bilibili half is part of the released bytes too: `lib/bilibili.mjs`
+          # is in the `files` allow-list, so a broken one would ship unremarked if
+          # only the checkout ran its suite.
+          node "$STAGE/${NAME}-${VERSION}/tests/bilibili-check.mjs" "$STAGE/${NAME}-${VERSION}"
 
       - name: Prove the tarball is self-contained
         env:
@@ -171,6 +175,7 @@ jobs:
           node "$STAGE/package/tests/host-checks.mjs"
           node "$STAGE/package/tests/bump-e2e.mjs" "$STAGE/package"
           node "$STAGE/package/tests/client-render.mjs" "$STAGE/package"
+          node "$STAGE/package/tests/bilibili-check.mjs" "$STAGE/package"
           # The decisive one: mount the published copy and serve its routes.
           node "$STAGE/package/tests/mount-check.mjs" "$STAGE/package"
 

@@ -80,6 +80,7 @@ import {
   parseCookieJar,
   parseLedger,
   recordLedgerEntry,
+  withDeviceIds,
 } from './lib/bilibili.mjs'
 
 /** Plugin name shown in loader logs. */
@@ -3707,8 +3708,8 @@ export function apply(ctx, rawConfig) {
      * not a reason to hold back a comment that is otherwise ready.
      */
     const fingerprint = await client.fingerPrint().catch(() => ({ buvid3: '', buvid4: '' }))
-    const cookies = { ...credential.jar.cookies }
-    if (fingerprint.buvid3 !== '' && cookies.buvid3 === undefined) cookies.buvid3 = fingerprint.buvid3
+    /* Both device ids, and the credential's own value wins — see `withDeviceIds`. */
+    const cookies = withDeviceIds(credential.jar.cookies, fingerprint)
 
     const posted = await client.postComment({
       cookie: cookieHeader(cookies),

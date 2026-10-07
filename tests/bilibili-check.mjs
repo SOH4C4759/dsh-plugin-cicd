@@ -28,6 +28,7 @@ import {
   announcementVerdict,
   composeComment,
   cookieHeader,
+  cookiesFromLoginUrl,
   createBilibiliClient,
   credentialVerdict,
   emptyLedger,
@@ -40,6 +41,7 @@ import {
   recordLedgerEntry,
   replyFailure,
   summarizeRelease,
+  withDeviceIds,
 } from '../lib/bilibili.mjs'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
@@ -239,6 +241,43 @@ const expired = await createBilibiliClient({ fetchImpl: fakeFetch([['qrcode/poll
 check('an expired code is named', expired.state === 'expired')
 const noCookie = await createBilibiliClient({ fetchImpl: fakeFetch([['qrcode/poll', { code: 0, data: { code: 0 } }]]) }).pollQrLogin('k')
 check('a success with no cookie is a failure, not a sign-in', noCookie.ok === false && noCookie.message.includes('Cookie'), noCookie.message)
+
+/* The same credential also arrives as a query string on `data.url`, and which half
+   of the answer a client can see is not something this plugin controls. Reading only
+   `Set-Cookie` turned a completed sign-in into "回了成功，但没有下发 Cookie" — honest
+   and useless, because the credential was in the other half all along. */
+const urlOnly = await createBilibiliClient({ fetchImpl: fakeFetch([['qrcode/poll', {
+  code: 0,
+  data: { code: 0, url: 'https://passport.biligame.com/crossDomain?DedeUserID=42&SESSDATA=sess%2Cfrom%2Curl&bili_jct=jct-from-url&gourl=https%3A%2F%2Fwww.bilibili.com&Expires=1806856570' },
+}]]) }).pollQrLogin('k')
+check('a sign-in whose credential arrives only in the URL still completes', urlOnly.ok === true && urlOnly.state === 'succeeded' && urlOnly.cookies.SESSDATA === 'sess,from,url', JSON.stringify(urlOnly.cookies))
+check('the URL source does not invent cookies from gourl or Expires', urlOnly.cookies.gourl === undefined && urlOnly.cookies.Expires === undefined, Object.keys(urlOnly.cookies).join(','))
+check('the account id comes along from the URL too', urlOnly.cookies.DedeUserID === '42')
+
+const bothSources = await createBilibiliClient({ fetchImpl: fakeFetch([['qrcode/poll', {
+  code: 0,
+  data: { code: 0, url: 'https://passport.biligame.com/crossDomain?SESSDATA=from-url&bili_jct=from-url' },
+  setCookie: ['SESSDATA=from-header; Path=/', 'buvid3=dev; Path=/'],
+}]]) }).pollQrLogin('k')
+check('a partial Set-Cookie is filled in from the URL', bothSources.cookies.bili_jct === 'from-url', JSON.stringify(bothSources.cookies))
+check('the header wins where both carry the same name', bothSources.cookies.SESSDATA === 'from-header', bothSources.cookies.SESSDATA)
+check('the device cookie the header brought is kept', bothSources.cookies.buvid3 === 'dev')
+
+check('a malformed login URL yields no cookies rather than throwing', Object.keys(cookiesFromLoginUrl('not a url')).length === 0)
+check('an absent login URL yields no cookies', Object.keys(cookiesFromLoginUrl(undefined)).length === 0)
+
+/* The device cookies: fetched in one call, both of which belong on the request. This
+   is the risk-control half that decides between a posted comment and a `-412`. */
+const seeded = withDeviceIds({ SESSDATA: 's' }, { buvid3: 'b3', buvid4: 'b4' })
+check('both device ids are added', seeded.buvid3 === 'b3' && seeded.buvid4 === 'b4', JSON.stringify(seeded))
+check('the credential that was passed in is still there', seeded.SESSDATA === 's')
+check('the credential it was given is not mutated', Object.keys({ SESSDATA: 's' }).length === 1)
+const own = withDeviceIds({ buvid3: 'mine', buvid4: 'mine4' }, { buvid3: 'theirs', buvid4: 'theirs4' })
+check('a device id the credential already carries is not replaced', own.buvid3 === 'mine' && own.buvid4 === 'mine4', JSON.stringify(own))
+const nothing = withDeviceIds({ SESSDATA: 's' }, { buvid3: '', buvid4: '   ' })
+check('an empty fingerprint adds nothing', nothing.buvid3 === undefined && nothing.buvid4 === undefined && nothing.SESSDATA === 's')
+check('a missing fingerprint adds nothing rather than throwing', Object.keys(withDeviceIds({ SESSDATA: 's' })).length === 1)
+check('missing cookies answer with the device ids alone', withDeviceIds(undefined, { buvid3: 'b3' }).buvid3 === 'b3')
 
 /* ---- 5. the routes, mounted on a real server ----------------------------- */
 
