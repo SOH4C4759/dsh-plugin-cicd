@@ -625,6 +625,9 @@ async function expandFirstRow(tree) {
   check('the npm status is actually asked for', calls.includes('/npm-status'), calls.join(','))
   check('a version npm does not have is marked on the row', textOf(collapsed).includes('npm 待推 v1.0.1'), textOf(collapsed).replace(/\s+/g, ' ').slice(0, 180))
   check('the npm account is shown in the header', textOf(collapsed).includes('npm soh4c4759'))
+  /* The four-step guide is for someone who has no credential; showing it to someone
+     who has one is the panel nagging about a solved problem. */
+  check('a signed-in machine is not shown the credential guide', textOf(collapsed).includes('① 还没有 npm 账号？') === false)
 
   const { tree } = await expandFirstRow(collapsed)
   const detail = textOf(tree)
