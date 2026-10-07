@@ -95,6 +95,17 @@ const EXPECTED = [
   '/api/dsh-cicd/repos-available',
   '/api/dsh-cicd/config-add',
   '/api/dsh-cicd/config-remove',
+  // The third channel: an update note under the video that introduces the plugin.
+  // A separate credential system with its own sign-in, its own storage, and one
+  // route that writes something the whole world can read.
+  '/api/dsh-cicd/bilibili-status',
+  '/api/dsh-cicd/bilibili-login-start',
+  '/api/dsh-cicd/bilibili-login-poll',
+  '/api/dsh-cicd/bilibili-login-cancel',
+  '/api/dsh-cicd/bilibili-credential',
+  '/api/dsh-cicd/bilibili-logout',
+  '/api/dsh-cicd/bilibili-bind',
+  '/api/dsh-cicd/bilibili-announce',
 ]
 check('every route is registered', EXPECTED.every((path) => routes.has(path)), `${routes.size} registered`)
 check('nothing extra is registered', routes.size === EXPECTED.length, [...routes.keys()].join(','))
@@ -199,6 +210,22 @@ try {
 
   const npmStatus = await call('/api/dsh-cicd/npm-status', {})
   check('npm-status answers with a verdict', npmStatus.payload !== null && typeof npmStatus.payload.ok === 'boolean', `HTTP ${npmStatus.status}`)
+
+  /*
+   * The Bilibili family, on the paths that must not touch the network: no
+   * credential is stored in this scratch directory, no repository is bound to a
+   * video, and a BV id that is not one is refused before anything is asked of
+   * Bilibili. The deeper flow — a bound video, a staged sign-in, a comment that
+   * posts — is driven with a fake transport in `tests/bilibili-check.mjs`.
+   */
+  const biliStatus = await call('/api/dsh-cicd/bilibili-status', {})
+  check('bilibili-status answers with a credential verdict', biliStatus.status === 200 && typeof biliStatus.payload?.value?.credential?.state === 'string', `HTTP ${biliStatus.status}`)
+  const biliBadBvid = await call('/api/dsh-cicd/bilibili-bind', { repo: 'octocat/Hello-World', bvid: 'not-a-bv' })
+  check('a BV id that is not one is refused', biliBadBvid.status === 400 && biliBadBvid.payload?.code === 'bad-bvid', biliBadBvid.payload?.message ?? '')
+  const biliUnknownRepo = await call('/api/dsh-cicd/bilibili-announce', { repo: 'someone/else' })
+  check('announcing an unconfigured repository is refused', biliUnknownRepo.status === 400 && /not configured/.test(biliUnknownRepo.payload?.message ?? ''), biliUnknownRepo.payload?.message ?? '')
+  const biliNoLogin = await call('/api/dsh-cicd/bilibili-login-poll', {})
+  check('polling a sign-in that was never started is refused', biliNoLogin.status === 409 && biliNoLogin.payload?.code === 'no-login', biliNoLogin.payload?.message ?? '')
 
   /* --- setup routes -------------------------------------------------------
      Only the refusal paths of `auth-start` are exercised: its success path spawns

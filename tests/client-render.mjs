@@ -291,9 +291,13 @@ sandbox.__load.apply({
   },
   slots: {
     inject: (name, fn) => fn(),
+    /* Key by `id` where there is one: several settings sections share the slot name
+       `settings.section`, and keying by name made the second silently replace the
+       first — which is exactly how a missing settings page passes a whole suite. */
     register: (meta, component) => {
-      registered.set(meta.name, component)
-      return () => registered.delete(meta.name)
+      const key = typeof meta.id === 'string' && meta.id !== '' ? meta.id : meta.name
+      registered.set(key, component)
+      return () => registered.delete(key)
     },
   },
 })
@@ -306,8 +310,13 @@ function translate(key, params) {
 
 check('the main view is registered', typeof registered.get('main') === 'function')
 check('the theme is injected once', styleElements.length === 1)
+check('the GitHub settings section is registered', typeof registered.get('github-account') === 'function')
+/* The npm guide is a configuration page, not a paragraph in the panel — so it has to
+   be a registration of its own, beside the GitHub one rather than replacing it. */
+check('npm credentials get a settings section of their own', typeof registered.get('npm-credentials') === 'function')
 
 const ConsolePage = registered.get('main')
+const NpmCredentialsPage = registered.get('npm-credentials')
 
 /** One repository row fixture. */
 function repoFixture(overrides) {
@@ -391,10 +400,21 @@ function npmStatusValue(overrides) {
   }
 }
 
+/**
+ * The protocol this client demands, read from the source it was loaded from.
+ *
+ * A hard-coded copy here goes stale on every bump, and its failure looks exactly
+ * like a product bug ("a missing gh is explained" stops passing because the panel
+ * decided the Host was stale). Reading the constant makes the fixture follow the
+ * code, which is what a fixture is for.
+ */
+const CLIENT_PROTOCOL = Number(/const PROTOCOL = (\d+)/.exec(source)?.[1] ?? 0)
+check('the client declares a protocol this test can read', CLIENT_PROTOCOL > 0, String(CLIENT_PROTOCOL))
+
 const baseStatus = {
   ok: true,
   value: {
-    protocol: 5,
+    protocol: CLIENT_PROTOCOL,
     config: { buildWorkflow: 'ci.yml', releaseWorkflow: 'release.yml', defaultBranch: 'main', pollSeconds: 30 },
     helper: { configureScript: 'F:\\CodeProj\\dsh-plugin-cicd\\scripts\\configure.mjs' },
     gh: { path: 'gh', available: true, version: 'gh version 2.102.0', authenticated: true, account: 'SOH4C4759', scopes: ['repo', 'workflow'], missingScopes: [], message: null },
@@ -421,6 +441,24 @@ async function renderPanel(repos, statusValue = baseStatus.value, extra = {}, np
 /** Re-render the same mounted panel, keeping its state — after a click, say. */
 async function rerender() {
   return render(ConsolePage, { t: translate })
+}
+
+/** Render the npm settings page against one npm-status fixture. */
+async function renderNpmPage(npmValue = npmStatusValue(), extra = {}) {
+  const fixtures = { '/status': { ok: true, value: baseStatus.value }, ...extra }
+  /* Omitted rather than set to undefined: "the Host never answered" is a state this
+     page has to survive, and a fixture key of undefined would silently become one. */
+  if (npmValue !== null) fixtures['/npm-status'] = { ok: true, value: npmValue }
+  fixture = fixtures
+  values.clear()
+  effectSlots.clear()
+  calls.length = 0
+  return render(NpmCredentialsPage, { t: translate })
+}
+
+/** Re-render the settings page, keeping its state — after a click, say. */
+async function rerenderNpm() {
+  return render(NpmCredentialsPage, { t: translate })
 }
 
 /** Expand the first row and return the tree with its detail visible. */
@@ -487,7 +525,7 @@ async function expandFirstRow(tree) {
 
 /* -- 4. A stale Host is named as a version mismatch, not a bare error ------ */
 {
-  const tree = await renderPanel([repoFixture()], { ...baseStatus.value, protocol: 2 })
+  const tree = await renderPanel([repoFixture()], { ...baseStatus.value, protocol: CLIENT_PROTOCOL - 1 })
   check('a stale Host is named as such', textOf(tree).includes('页面与宿主半边版本不一致'), textOf(tree).replace(/\s+/g, ' ').slice(0, 140))
 }
 
@@ -695,23 +733,14 @@ async function expandFirstRow(tree) {
   }, notSignedIn)
   const text = textOf(panel)
   check('a missing npm credential is explained, not hidden', text.includes('还没有登录'), text.replace(/\s+/g, ' ').slice(0, 240))
-  check('the explanation names the file npm itself reads', text.includes('C:\\Users\\x\\.npmrc'))
-  /* Zero-basics means the four steps are on screen, not one sentence that assumes
-     the reader already knows how npm tokens work. */
-  check('the guide walks all four steps', ['① 还没有 npm 账号？', '② 生成一个 Access Token', '③ 粘贴到下面', '④ 账号开了 2FA？'].every((step) => text.includes(step)), text.replace(/\s+/g, ' ').slice(0, 300))
-  check('the guide links to the sign-up page', hasButton(panel, '打开 npmjs.com 注册'))
-  check('the guide links to the token page', hasButton(panel, '打开 token 页面'))
-  check('the guide links to the npm documentation', hasButton(panel, 'npm 官方文档'))
-  /* The facts that changed in November 2025 and that a stale guide would get wrong:
-     classic tokens are gone, and a write token has a 90-day ceiling. */
-  check('the guide says classic tokens are gone', text.includes('Classic token 已于 2025-11-19'), text.replace(/\s+/g, ' ').slice(0, 300))
-  check('the guide states the 90-day ceiling', text.includes('最长 90 天'))
-  check('the guide says not to bypass 2FA for a local push', text.includes('不要勾'))
-  check('the guide says the email must be verified before publishing', text.includes('不允许未验证邮箱的账号发布'))
   /* What the package manager actually said, verbatim: "not signed in" and "that
      token was revoked" are the same blank state and different problems. */
   check('the package manager\'s own message is shown', text.includes('ERR_PNPM_WHOAMI_UNAUTHORIZED'))
   check('the row offers no push while unauthenticated', hasButton(panel, '推送到 npm') === false)
+  /* The panel is the operational view: it carries the control, not the course. The
+     four steps moved to their own settings page, and the panel says where. */
+  check('the panel points at the settings guide', text.includes('设置 → npm 凭据'), text.replace(/\s+/g, ' ').slice(0, 240))
+  check('the panel no longer walks the four steps itself', text.includes('① 还没有 npm 账号？') === false)
 
   const typed = typeInto(panel, 'npm_', 'npm_abcdefghijklmnop')
   const ready = await rerender()
@@ -721,6 +750,71 @@ async function expandFirstRow(tree) {
   const after = await rerender()
   check('the token is really posted to the Host', calls.includes('/npm-login'), calls.join(','))
   check('writing a token is confirmed with the account', asked === true && textOf(after).includes('soh4c4759'), textOf(after).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* -- 13b. The npm credentials page: the guide, as configuration ------------- */
+{
+  const notSignedIn = npmStatusValue({
+    auth: { state: 'none', loggedIn: false, account: null, message: '[ERR_PNPM_WHOAMI_UNAUTHORIZED] You must be logged in to use whoami', npmrcPath: 'C:\\Users\\x\\.npmrc', npmrcReadable: false, npmrcHasToken: false },
+    repos: [npmFixture({ canPublish: false, blockers: ['not-logged-in'] })],
+  })
+  const page = await renderNpmPage(notSignedIn, {
+    '/npm-login': { ok: true, value: { account: 'soh4c4759', registry: 'https://registry.npmjs.org/', npmrcPath: 'C:\\Users\\x\\.npmrc', replaced: false } },
+  })
+  const text = textOf(page)
+  check('the settings page asks npm on its own', calls.includes('/npm-status'), calls.join(','))
+  check('the page names the file npm itself reads', text.includes('C:\\Users\\x\\.npmrc'))
+  /* Zero-basics means the four steps are written out, not one sentence that assumes
+     the reader already knows how npm tokens work. */
+  check('the guide walks all four steps', ['① 还没有 npm 账号？', '② 生成一个 Access Token', '③ 粘贴到下面', '④ 账号开了 2FA？'].every((step) => text.includes(step)), text.replace(/\s+/g, ' ').slice(0, 320))
+  check('the guide links to the sign-up page', hasButton(page, '打开 npmjs.com 注册'))
+  check('the guide links to the token page', hasButton(page, '打开 token 页面'))
+  check('the guide links to the npm documentation', hasButton(page, 'npm 官方文档'))
+  /* The facts that changed in November 2025, and that a stale guide gets wrong:
+     classic tokens are gone, a write token has a 90-day ceiling, 2FA is on by default. */
+  check('the guide says classic tokens are gone', text.includes('Classic token 已于 2025-11-19'), text.replace(/\s+/g, ' ').slice(0, 320))
+  check('the guide states the 90-day ceiling', text.includes('最长 90 天'))
+  check('the guide says not to bypass 2FA for a local push', text.includes('不要勾'))
+  check('the guide says the email must be verified before publishing', text.includes('不允许未验证邮箱的账号发布'))
+  /* A step is only ticked where the Host can actually know: it can see a missing
+     token line, and it cannot see whether an account was ever registered. */
+  check('step ③ is the one step with a live state', text.includes('待做'))
+  check('the steps that cannot be checked say so instead of ticking', text.includes('无法自动检测'))
+  check('an uncheckable step is never ticked as done', text.includes('✓ 已有账号') === false)
+  check('the page points at trusted publishing for CI', text.includes('trusted publishing'))
+  /* Every package's npm posture, which is the configuration payoff of this page. */
+  check('the page lists each package', text.includes('dsh-plugin-restart') && text.includes('本地 1.0.1'))
+  check('a package nobody can push yet says why', text.includes('还没有登录 npm'))
+
+  const typed = typeInto(page, 'npm_', 'npm_abcdefghijklmnop')
+  const ready = await rerenderNpm()
+  check('the settings page accepts a token too', typed === true)
+  const asked = clickButton(ready, '写入并验证')
+  await rerenderNpm()
+  const after = await rerenderNpm()
+  check('the settings page posts the token to the Host', calls.includes('/npm-login'), calls.join(','))
+  check('the settings page confirms with the account', asked === true && textOf(after).includes('soh4c4759'), textOf(after).replace(/\s+/g, ' ').slice(0, 260))
+}
+
+/* -- 13c. The page marks what it can verify, and only that ------------------ */
+{
+  const signedIn = npmStatusValue({
+    auth: { state: 'signed-in', loggedIn: true, account: 'soh4c4759', message: null, npmrcPath: 'C:\\Users\\x\\.npmrc', npmrcReadable: true, npmrcHasToken: true },
+    repos: [npmFixture({ state: 'published', canPublish: false, blockers: ['already-published'], version: '1.0.1', latest: '1.0.1' })],
+  })
+  const page = await renderNpmPage(signedIn)
+  const text = textOf(page)
+  check('a confirmed account ticks the steps it proves', text.includes('✓ 已有账号 soh4c4759') && text.includes('✓ 已有可用的 token'), text.replace(/\s+/g, ' ').slice(0, 320))
+  check('a token line in .npmrc ticks step 3', text.includes('✓ C:\\Users\\x\\.npmrc 里已有凭据'))
+  check('the registry is named with its source', text.includes('源 https://registry.npmjs.org/'))
+  check('no message template leaks onto the page', text.includes('{registry}') === false && text.includes('{npmrc}') === false, text.replace(/\s+/g, ' ').slice(0, 260))
+  check('a published package is listed as published', text.includes('已在 npm 上'))
+  check('the page still states the 2FA step as unverifiable', text.includes('无法自动检测'))
+
+  const noAnswer = await renderNpmPage(null)
+  const noAnswerText = textOf(noAnswer)
+  check('an unanswered status is named, not guessed at', noAnswerText.includes('还没读到 npm 的状态'), noAnswerText.replace(/\s+/g, ' ').slice(0, 240))
+  check('an unanswered status ticks nothing', noAnswerText.includes('✓') === false)
 }
 
 /* -- 14. No npm answer means no npm claim ----------------------------------- */
@@ -808,6 +902,143 @@ async function expandFirstRow(tree) {
   check('a refused token raises the checklist', text.includes('这个 token 没有被接受'), text.replace(/\s+/g, ' ').slice(0, 300))
   check('the checklist names the 90-day limit among its causes', text.includes('90 天有效期'))
   check('the refusal does not leak what was typed back into the page', text.includes('npm_bogus_token') === false)
+}
+
+/* -- 17. The Bilibili update note: bound, previewed, then posted ------------- */
+
+/** One `/bilibili-status` repository entry, as the Host sends it. */
+function biliFixture(overrides) {
+  return {
+    repo: 'dsh-plugin-restart',
+    label: 'dsh-plugin-restart',
+    binding: { bvid: 'BV1RopP6FEJp', auto: true },
+    announced: [],
+    failures: [],
+    baseline: { tag: 'v1.0.0', at: '2026-10-06T19:00:19Z' },
+    video: { ok: true, aid: 117396371216915, title: '一支视频', owner: 'UP' },
+    commentUrl: 'https://www.bilibili.com/video/BV1RopP6FEJp/',
+    ...overrides,
+  }
+}
+
+/** The whole payload, including the credential the settings page reads. */
+function biliValue(overrides) {
+  return {
+    enabled: true,
+    auto: true,
+    watchSeconds: 90,
+    template: '',
+    credential: {
+      state: 'ready',
+      message: '',
+      source: 'plugin',
+      path: 'C:\\Users\\x\\.dsh\\dsh-plugin-cicd\\bilibili-cookies.json',
+      ownPath: 'C:\\Users\\x\\.dsh\\dsh-plugin-cicd\\bilibili-cookies.json',
+      configuredPath: '',
+      platform: '',
+      expiresAt: null,
+      hasSession: true,
+      hasCsrf: true,
+      account: { mid: '42', uname: '白衣为卿曲' },
+    },
+    login: { state: 'idle', url: '', startedAt: null, expiresAt: null, scanned: false, message: '' },
+    ledger: { file: 'C:\\Users\\x\\.dsh\\dsh-plugin-cicd\\bilibili-announcements.json', problem: null, entries: 1 },
+    lastSweep: { at: '2026-10-07T01:00:00Z', reason: 'timer', results: [{ repo: 'dsh-plugin-restart', tag: 'v1.0.0', state: 'announced', message: '', url: null }] },
+    repos: [biliFixture()],
+    ...overrides,
+  }
+}
+
+check('Bilibili notes get a settings section of their own', typeof registered.get('bilibili-announce') === 'function')
+
+/**
+ * The value of the first input whose placeholder contains this text.
+ *
+ * A binding is edited in a text field, and a field's value is not part of the
+ * rendered text — so a test that only reads text cannot tell a prefilled field
+ * from an empty one.
+ */
+function inputValue(node, placeholderPart) {
+  if (node === null || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = inputValue(child, placeholderPart)
+      if (found !== null) return found
+    }
+    return null
+  }
+  if (node.type === 'input' && String(node.props?.placeholder ?? '').includes(placeholderPart)) return String(node.props?.value ?? '')
+  return inputValue(node.children, placeholderPart)
+}
+
+{
+  /* A published release the note has not gone out for: the row has to say so
+     before anything is clicked, because that is the state the sweep acts on. */
+  const panel = await renderPanel([repoFixture({ publishedTag: 'v1.0.1' })], baseStatus.value, {
+    '/bilibili-status': { ok: true, value: biliValue() },
+    '/bilibili-announce': { ok: true, value: previewFixture() },
+  })
+  check('a published release waiting on its note is flagged', textOf(panel).includes('待播报 v1.0.1'), textOf(panel).replace(/\s+/g, ' ').slice(0, 220))
+
+  const { tree } = await expandFirstRow(panel)
+  const rowText = textOf(tree)
+  check('the row names the video it is bound to', rowText.includes('绑定的视频') && rowText.includes('一支视频'), rowText.replace(/\s+/g, ' ').slice(-320))
+  check('the binding is prefilled, so editing it does not start from nothing', inputValue(tree, 'BV') === 'BV1RopP6FEJp', inputValue(tree, 'BV'))
+  check('the row offers the manual announcement', hasButton(tree, '发更新评论'))
+
+  /* The preview is the Host's own composition — the sentence shown is the sentence
+     that would be sent, which is why it is asked for rather than built here. */
+  clickButton(tree, '发更新评论')
+  const previewed = await rerender()
+  check('the preview shows the exact comment', textOf(previewed).includes('【更新 v1.0.1】新增 B 站更新播报'), textOf(previewed).replace(/\s+/g, ' ').slice(0, 260))
+  check('the preview asks before posting', hasButton(previewed, '确认发送'))
+
+  clickButton(previewed, '确认发送')
+  const after = await rerender()
+  check('the post is sent with the previewed text', calls.includes('/bilibili-announce'), calls.join(','))
+  check('posting reports where it went', textOf(after).includes('已发送到 BV1RopP6FEJp'), textOf(after).replace(/\s+/g, ' ').slice(0, 260))
+}
+
+/** What a dry run answers: the sentence, and the Host's verdict on it. */
+function previewFixture(overrides) {
+  return {
+    repo: 'dsh-plugin-restart',
+    bvid: 'BV1RopP6FEJp',
+    tag: 'v1.0.1',
+    state: 'ready',
+    message: '',
+    text: '【更新 v1.0.1】新增 B 站更新播报',
+    summary: '新增 B 站更新播报',
+    unknown: [],
+    release: { tag: 'v1.0.1', name: '新增 B 站更新播报', url: 'https://example.invalid/v1.0.1', createdAt: '2026-10-07T00:00:00Z' },
+    ledgerProblem: null,
+    attempts: 0,
+    ...overrides,
+  }
+}
+
+{
+  /* The failure this whole feature is shaped around: the credential biliup writes
+     by default is an APP login, and calling that "not signed in" sends the reader
+     to re-login in the wrong place. */
+  const panel = await renderPanel([repoFixture()], baseStatus.value, {
+    '/bilibili-status': {
+      ok: true,
+      value: biliValue({
+        credential: {
+          ...biliValue().credential,
+          state: 'not-logged-in',
+          account: null,
+          platform: 'BiliTV',
+          message: '这份凭据是 BiliTV 登录（APP/TV），B 站 Web 会员接口回 -101——发评论走的是 Web 接口，所以它发不了。',
+        },
+      }),
+    },
+  })
+  const text = textOf(panel)
+  check('a bound video with an unusable credential is raised in the panel', text.includes('更新评论发不出去'))
+  check('the panel explains the APP credential rather than saying "not signed in"', text.includes('BiliTV'))
+  check('the sign-in is offered right there', hasButton(panel, '登录 B 站'))
 }
 
 console.log(`\n${results.length - failed}/${results.length} checks passed`)

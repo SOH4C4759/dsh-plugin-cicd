@@ -36,6 +36,24 @@
 #   overviewTtlMs     default 15000   cache window; the panel polls through it
 #   logTailLines      default 120     how much of `--log-failed` the panel shows
 #   pollSeconds       default 30      how often the panel refreshes itself
+#   bilibiliEnabled   default true    the whole Bilibili update-note feature
+#   bilibiliAuto      default true    post automatically when a release goes public;
+#                                     false leaves only the panel's button
+#   bilibiliWatchSeconds
+#                     default 90      how often the Host looks for a newly published
+#                                     release; 0 stops the clock (the sweep after
+#                                     publishing a draft still runs)
+#   bilibiliTemplate  default ''      '' = 【更新 {tag}】{summary}. Placeholders:
+#                                     {tag} {version} {label} {repo} {title}
+#                                     {summary} {url} {date}
+#   bilibiliCookieFile
+#                     default ''      '' = the plugin's own file, which the panel's
+#                                     sign-in writes. Point it at biliup's
+#                                     cookies.json to read that instead — but note
+#                                     that biliup logs in as BiliTV, and a comment is
+#                                     a WEB API, so a TV credential answers -101.
+#   bilibiliVerifyTtlMs
+#                     default 300000  how long a credential/video answer is reused
 #   enabled           default true
 - insert:
     - id: dsh-plugin-cicd

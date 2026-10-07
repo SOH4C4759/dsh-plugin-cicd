@@ -50,6 +50,11 @@ jobs:
       # is blocked reaches the screen instead of staying in a log.
       - name: client render
         run: node tests/client-render.mjs
+      # The Bilibili update notes, with a fake transport and a `gh` that cannot
+      # exist: one comment per release is the property that matters, and a live
+      # account cannot test it (the second run of a live test is the bug).
+      - name: bilibili notes
+        run: node tests/bilibili-check.mjs
 
   # The bundle half of CI: continuous build. It checks the manifest contract and
   # then builds the exact archive the release workflow would publish, so a broken
@@ -119,6 +124,7 @@ jobs:
           node "$STAGE/package/scripts/verify-bundle.mjs" "$STAGE/package"
           node "$STAGE/package/tests/host-checks.mjs"
           node "$STAGE/package/tests/mount-check.mjs" "$STAGE/package"
+          node "$STAGE/package/tests/bilibili-check.mjs" "$STAGE/package"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-build

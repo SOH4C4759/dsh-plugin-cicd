@@ -41,9 +41,24 @@ window.__ModuleLoader__.load({
     const PANEL_ID = 'dsh-cicd'
     /** Settings page id. `account` is a shipped section, so this must not reuse it. */
     const SETTINGS_ID = 'github-account'
+    /** npm's own settings page; a second fresh id for the same reason. */
+    const NPM_SETTINGS_ID = 'npm-credentials'
+    /** And the third: the Bilibili update notes. Same rule, another fresh id. */
+    const BILIBILI_SETTINGS_ID = 'bilibili-announce'
     const STYLE_ID = 'dsh-plugin-cicd-styles'
 
     const BASE = '/api/dsh-cicd'
+    /**
+     * The pages a first npm credential needs.
+     *
+     * Two of these come from GitHub's own migration note for the November 2025 npm
+     * token change, which is also where the fact that classic tokens are gone was
+     * confirmed — a guide that guessed at either would send a first-time publisher
+     * somewhere that no longer exists.
+     */
+    const NPM_SIGNUP_URL = 'https://www.npmjs.com/signup'
+    const NPM_TOKENS_URL = 'https://www.npmjs.com/settings/~/tokens'
+    const NPM_TOKEN_DOCS_URL = 'https://docs.npmjs.com/creating-and-viewing-access-tokens'
     /**
      * The Host protocol this page needs.
      *
@@ -51,7 +66,7 @@ window.__ModuleLoader__.load({
      * be missing while the button that calls it is on screen. Comparing this
      * number turns that into one sentence instead of a bare HTTP status.
      */
-    const PROTOCOL = 5
+    const PROTOCOL = 6
     const STATUS_TIMEOUT_MS = 20_000
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
@@ -211,9 +226,35 @@ window.__ModuleLoader__.load({
       'npm.guide.step4': '④ 账号开了 2FA？',
       'npm.guide.step4Note': '推送的确认行里会出现一次性密码输入框，填 6 位数字再点一次【确认推送】即可。',
       'npm.guide.docs': 'npm 官方文档',
+      'npm.stepUnknown': '无法自动检测',
+      'npm.stepTodo': '待做',
+      'npm.stepAccountDone': '✓ 已有账号 {account}',
+      'npm.stepTokenDone': '✓ 已有可用的 token',
+      'npm.stepWrittenDone': '✓ {npmrc} 里已有凭据',
+      'npm.status.title': '凭据状态',
+      'npm.status.signedIn': '已登录 {account}',
+      'npm.status.credentialPresent': '已有凭据，whoami 未确认',
+      'npm.status.none': '还没有凭据',
+      'npm.status.unknown': '还没读到 npm 的状态',
+      'npm.status.unknownHint': 'Host 还没回答 /npm-status（可能是运行中的宿主半边还是旧版本，也可能面板刚打开）。点「重新检测」。在没有答案之前，这里不替你下结论。',
+      'npm.packages.title': '每个包在 npm 上的状态',
+      'npm.packages.empty': '还没有登记仓库，所以没有可检查的包。',
+      'npm.packages.recheck': '重新检测',
+      'npm.package.published': '已在 npm 上',
+      'npm.package.unpublished': '待推',
+      'npm.package.unregistered': '名字空闲',
+      'npm.package.unknown': '读不到',
+      'npm.package.local': '本地 {version}',
+      'npm.package.latest': 'npm 上是 {latest}',
+      'npm.credentialPresentShort': '.npmrc 里已经有 {registry} 的凭据，但 whoami 没有确认它——granular token 是包级范围的，whoami 是用户级端点，这很正常。直接推即可，真伪由推送来判。',
+      'npm.moreInSettings': '完整引导与每个包的状态在 设置 → npm 凭据。',
+      'npm.ciHint': '要给 CI 自动发布？那不该用这里的 token——npm 支持 trusted publishing（GitHub Actions OIDC），不需要任何长期凭据。',
+      'settings.npmLabel': 'npm 凭据',
+      'settings.npmTitle': 'npm 凭据',
+      'settings.npmSubtitle': '发布用 Host 自己的包管理器，凭据走 npm 自己读的 ~/.npmrc——插件不保存任何 token。',
+      'settings.npmGuideTitle': '从零开始的四步',
       'npm.credentialPresentTitle': '这个源上已经有一行 token',
       'npm.credentialPresent': '.npmrc 里已经有 {registry} 的凭据，但 whoami 没有确认它。granular token 是包级范围的，而 whoami 是用户级端点——它拒绝一个能正常发布的 token 是正常的。所以推送本身才是真正的验证：直接推，失败时下方会告诉你是要填一次性密码、还是重建 token。',
-      'npm.replaceToken': '换一个 token',
       'npm.rejectedTitle': '这个 token 没有被接受。按顺序排查：',
       'npm.rejectedCauses': '① 复制不全（前后带了空格或换行）；② 权限不是 Read and write；③ 已被撤销、或超过 90 天有效期；④ token 被限制到别的包或组织；⑤ 账号邮箱还没验证。',
       'npm.hint.otp-required': '这个账号要求一次性密码：在推送的确认行里填 6 位数字，再点一次【确认推送】。',
@@ -289,6 +330,85 @@ window.__ModuleLoader__.load({
       'picker.noLocal': '未找到本地检出',
       'picker.hint': '勾选即添加，取消勾选即移除；改动立刻生效，不需要重启。',
       'picker.reload': '重新载入',
+
+      /* -- Bilibili update notes ------------------------------------------- */
+      'bili.settings.label': 'B 站播报',
+      'bili.settings.title': 'B 站更新播报',
+      'bili.settings.subtitle': '插件发版后，在对应视频的评论区自动补一条更新说明；凭据只落在插件自己的目录里，插件不回显它。',
+      'bili.credential.title': '登录状态',
+      'bili.credential.ready': '已登录 {uname}',
+      'bili.credential.none': '还没有 B 站凭据',
+      'bili.credential.unreadable': '凭据读不出来',
+      'bili.credential.incomplete': '凭据不完整',
+      'bili.credential.not-logged-in': '这份凭据发不了评论',
+      'bili.credential.unverified': '还没有验证这份凭据',
+      'bili.credential.none.hint': '发评论走的是 B 站 Web 接口，所以凭据必须是网页登录。biliup 默认写下的 cookies.json 是 APP/TV 登录（platform=BiliTV），Web 会员接口一律回 -101「账号未登录」——它能投稿，但发不了评论。',
+      'bili.credential.source': '凭据文件 {path}',
+      'bili.credential.external': '这份凭据来自配置指定的外部文件（不是面板写入的）：{path}',
+      'bili.signIn': '登录 B 站',
+      'bili.signIn.hint': '点一下会生成一个登录链接：用手机 B 站扫码，或在你已经登录 B 站的浏览器里打开并确认。这里会自动继续，不需要终端。',
+      'bili.openLogin': '打开登录页面',
+      'bili.waiting': '等待扫码…',
+      'bili.waitingScanned': '已扫码，请在手机上确认…',
+      'bili.signIn.done': '已登录：{uname}',
+      'bili.signIn.doneNoName': '已登录，但没能读到账号名。',
+      'bili.signIn.expired': '二维码已过期，重新点一次【登录 B 站】。',
+      'bili.cancelSignIn': '取消登录',
+      'bili.paste.title': '或者粘贴一次',
+      'bili.paste.hint': '浏览器里 F12 → Application → Cookies → bilibili.com，复制 SESSDATA 与 bili_jct（后者就是 csrf）。只写进插件自己的文件，验证通过才保存。',
+      'bili.paste.sessdata': 'SESSDATA',
+      'bili.paste.csrf': 'bili_jct',
+      'bili.paste.save': '保存并验证',
+      'bili.paste.saved': '凭据已保存：{uname}',
+      'bili.signOut': '退出 B 站登录',
+      'bili.signOut.confirm': '确认退出？',
+      'bili.signOut.done': '已删除插件保存的 B 站凭据。',
+      'bili.signOut.fallback': '注意：还有一份外部凭据继续生效（{path}），它属于别的工具，这里没有动它。',
+      'bili.bind.title': '绑定的视频',
+      'bili.chip.announced': '已播报 {tag}',
+      'bili.chip.pending': '待播报 {tag}',
+      'bili.bind.placeholder': 'BV 号，如 BV1RopP6FEJp',
+      'bili.bind.save': '绑定',
+      'bili.bind.unbind': '解绑',
+      'bili.bind.done': '已绑定 {bvid}{baseline}',
+      'bili.bind.baseline': '（基线 {tag}：只有之后发布的新版本会自动播报）',
+      'bili.bind.baselineUnknown': '（读不到 Release 列表，绑定时刻之前的版本都按已公开处理）',
+      'bili.unbound.done': '已解绑 {repo} 的 B 站视频，播报记录保留。',
+      'bili.auto.on': '自动播报',
+      'bili.auto.off': '仅手动',
+      'bili.auto.toggle': '切换自动播报',
+      'bili.announce': '发更新评论',
+      'bili.announce.again': '已播报过，重新预览',
+      'bili.announce.preview': '将发送这条评论',
+      'bili.announce.confirm': '确认发送',
+      'bili.announce.force': '仍然发送',
+      'bili.announce.cancel': '取消',
+      'bili.announce.sent': '已发送到 {bvid} 的评论区（{tag}）。',
+      'bili.announce.previewFailed': '预览失败：{reason}',
+      'bili.repo.none': '这个仓库还没有绑定 B 站视频。',
+      'bili.state.already': '{tag} 已经播报过了。',
+      'bili.state.baseline': '{tag} 在绑定视频之前就已经发布了，不算这次更新。',
+      'bili.state.no-release': '还没有已公开的 Release（草稿不算）——先在发布台把草稿公开。',
+      'bili.state.gave-up': '这条已经失败 {count} 次，先看看原因再手动重试。',
+      'bili.state.unbound': '这个仓库还没有绑定 B 站视频。',
+      'bili.needCredential': '有仓库绑定了 B 站视频，但还没有可用的 B 站凭据，更新评论发不出去。',
+      'bili.openSettings': '在 设置 → B 站播报 里管理',
+      'bili.lastSweep': '自动巡检 {time}：{summary}',
+      'bili.sweep.none': '还没有需要播报的新版本',
+      'bili.sweep.announced': '已播报 {repo} {tag}',
+      'bili.sweep.failed': '{repo} {tag} 播报失败',
+      'bili.neverSwept': '自动巡检还没有跑过',
+      'bili.ledger.problem': '播报记录读不出来（{problem}）。在修好之前不会发送任何评论——否则会把已经发过的评论再发一遍。',
+      'bili.template': '模板',
+      'bili.template.hint': '可用占位符：{tag} {version} {label} {repo} {title} {summary} {url} {date}。默认不含链接，因为带链接的评论更容易被 B 站过滤。',
+      'bili.unknownPlaceholder': '模板里有不认识的占位符：{names}',
+      'bili.video.failed': '读不到视频：{reason}',
+      'bili.watch.off': '自动巡检已关（bilibiliWatchSeconds: 0），只剩手动按钮与公开草稿后的那一次。',
+      'bili.repos.title': '每个仓库',
+      'bili.repos.empty': '还没有登记仓库。',
+      'bili.announced.title': '已播报',
+      'bili.announced.none': '还没有播报过。',
+      'bili.failure.last': '上次失败：{message}',
     }
 
     /** English dictionary, same key set. */
@@ -425,9 +545,35 @@ window.__ModuleLoader__.load({
       'npm.guide.step4': '(4) Is 2FA on the account?',
       'npm.guide.step4Note': 'The push confirmation grows a one-time password field: enter the 6 digits and press Push again.',
       'npm.guide.docs': 'npm documentation',
+      'npm.stepUnknown': 'cannot be detected',
+      'npm.stepTodo': 'to do',
+      'npm.stepAccountDone': '✓ account {account} exists',
+      'npm.stepTokenDone': '✓ a working token exists',
+      'npm.stepWrittenDone': '✓ a credential is already in {npmrc}',
+      'npm.status.title': 'Credential',
+      'npm.status.signedIn': 'signed in as {account}',
+      'npm.status.credentialPresent': 'credential present, whoami unconfirmed',
+      'npm.status.none': 'no credential yet',
+      'npm.status.unknown': 'npm has not answered yet',
+      'npm.status.unknownHint': 'The Host has not answered /npm-status (the running Host half may be an older version, or the panel just opened). Press Re-check. Until there is an answer, this page will not draw a conclusion for you.',
+      'npm.packages.title': 'Every package on npm',
+      'npm.packages.empty': 'No repository is registered, so there is no package to check.',
+      'npm.packages.recheck': 'Re-check',
+      'npm.package.published': 'on npm',
+      'npm.package.unpublished': 'pending',
+      'npm.package.unregistered': 'name is free',
+      'npm.package.unknown': 'unreadable',
+      'npm.package.local': 'local {version}',
+      'npm.package.latest': 'npm has {latest}',
+      'npm.credentialPresentShort': '.npmrc already carries a credential for {registry}, but whoami would not confirm it — a granular token is scoped to packages while whoami is a user-level endpoint, so that is normal. Just push; the publish decides whether it is real.',
+      'npm.moreInSettings': 'The full guide and every package\'s state live in Settings → npm credentials.',
+      'npm.ciHint': 'Publishing from CI? This token is not the way — npm supports trusted publishing (GitHub Actions OIDC), which needs no long-lived credential at all.',
+      'settings.npmLabel': 'npm credentials',
+      'settings.npmTitle': 'npm credentials',
+      'settings.npmSubtitle': 'Publishing uses the Host\'s own package manager, and the credential comes from the ~/.npmrc npm itself reads — this plugin stores no token.',
+      'settings.npmGuideTitle': 'Four steps, from nothing',
       'npm.credentialPresentTitle': 'This registry already has a token line',
       'npm.credentialPresent': '.npmrc carries a credential for {registry}, but whoami would not confirm it. A granular token is scoped to PACKAGES while whoami is a user-level endpoint, so refusing a token that publishes perfectly well is normal. The publish itself is the real test: just push, and if it fails the panel says whether to enter a one-time password or make a new token.',
-      'npm.replaceToken': 'Replace the token',
       'npm.rejectedTitle': 'That token was not accepted. Check, in order:',
       'npm.rejectedCauses': '(1) it was copied incompletely (leading or trailing whitespace); (2) Permissions are not Read and write; (3) it was revoked, or passed its 90-day limit; (4) it is scoped to another package or organization; (5) the account email is still unverified.',
       'npm.hint.otp-required': 'This account requires a one-time password: enter the 6 digits in the push confirmation and press Push again.',
@@ -503,6 +649,85 @@ window.__ModuleLoader__.load({
       'picker.noLocal': 'no local checkout found',
       'picker.hint': 'Ticking adds, unticking removes; the change applies at once, with no restart.',
       'picker.reload': 'Reload',
+
+      /* -- Bilibili update notes ------------------------------------------- */
+      'bili.settings.label': 'Bilibili notes',
+      'bili.settings.title': 'Bilibili update notes',
+      'bili.settings.subtitle': 'When a plugin is released, one short note is added to the comment section of the video that introduces it. The credential lives only in this plugin\'s own directory, and is never echoed back.',
+      'bili.credential.title': 'Sign-in',
+      'bili.credential.ready': 'Signed in as {uname}',
+      'bili.credential.none': 'No Bilibili credential yet',
+      'bili.credential.unreadable': 'The credential cannot be read',
+      'bili.credential.incomplete': 'The credential is incomplete',
+      'bili.credential.not-logged-in': 'This credential cannot comment',
+      'bili.credential.unverified': 'Not verified yet',
+      'bili.credential.none.hint': 'Commenting is a WEB API, so the credential has to be a web session. The cookies.json biliup writes by default is an APP/TV login (platform=BiliTV): it can upload, and every web member endpoint answers it with -101 账号未登录 — so it cannot comment.',
+      'bili.credential.source': 'Credential file {path}',
+      'bili.credential.external': 'This credential comes from the external file named in the config, not from this panel: {path}',
+      'bili.signIn': 'Sign in to Bilibili',
+      'bili.signIn.hint': 'One click produces a sign-in link: scan it with the Bilibili app, or open it in a browser that is already signed in and confirm. This page continues by itself — no terminal needed.',
+      'bili.openLogin': 'Open the sign-in page',
+      'bili.waiting': 'Waiting to be scanned…',
+      'bili.waitingScanned': 'Scanned — confirm it on your phone…',
+      'bili.signIn.done': 'Signed in: {uname}',
+      'bili.signIn.doneNoName': 'Signed in, but the account name could not be read.',
+      'bili.signIn.expired': 'The code expired. Press 【Sign in to Bilibili】 again.',
+      'bili.cancelSignIn': 'Cancel sign-in',
+      'bili.paste.title': 'Or paste one',
+      'bili.paste.hint': 'In the browser: F12 → Application → Cookies → bilibili.com, and copy SESSDATA and bili_jct (the latter is the csrf). It is written to this plugin\'s own file, and only after Bilibili accepts it.',
+      'bili.paste.sessdata': 'SESSDATA',
+      'bili.paste.csrf': 'bili_jct',
+      'bili.paste.save': 'Save and verify',
+      'bili.paste.saved': 'Credential saved: {uname}',
+      'bili.signOut': 'Sign out of Bilibili',
+      'bili.signOut.confirm': 'Sign out?',
+      'bili.signOut.done': 'The credential this plugin stored has been deleted.',
+      'bili.signOut.fallback': 'Note: an external credential is still in use ({path}). It belongs to another tool and was left alone.',
+      'bili.bind.title': 'Bound video',
+      'bili.chip.announced': 'Announced {tag}',
+      'bili.chip.pending': 'Waiting to announce {tag}',
+      'bili.bind.placeholder': 'BV id, e.g. BV1RopP6FEJp',
+      'bili.bind.save': 'Bind',
+      'bili.bind.unbind': 'Unbind',
+      'bili.bind.done': 'Bound {bvid}{baseline}',
+      'bili.bind.baseline': ' (baseline {tag}: only releases published after this are announced automatically)',
+      'bili.bind.baselineUnknown': ' (the release list could not be read, so everything published before now counts as already public)',
+      'bili.unbound.done': 'Unbound the video for {repo}; the announcement history is kept.',
+      'bili.auto.on': 'Automatic',
+      'bili.auto.off': 'Manual only',
+      'bili.auto.toggle': 'Toggle automatic announcing',
+      'bili.announce': 'Post update note',
+      'bili.announce.again': 'Already announced — preview again',
+      'bili.announce.preview': 'This is the comment that would be posted',
+      'bili.announce.confirm': 'Post it',
+      'bili.announce.force': 'Post anyway',
+      'bili.announce.cancel': 'Cancel',
+      'bili.announce.sent': 'Posted to the comments under {bvid} ({tag}).',
+      'bili.announce.previewFailed': 'Preview failed: {reason}',
+      'bili.repo.none': 'This repository has no video bound.',
+      'bili.state.already': '{tag} has already been announced.',
+      'bili.state.baseline': '{tag} was published before the video was bound, so it is not this update.',
+      'bili.state.no-release': 'There is no published release yet (a draft does not count) — publish the draft from the panel first.',
+      'bili.state.gave-up': 'This one has failed {count} times; read why before retrying by hand.',
+      'bili.state.unbound': 'This repository has no video bound.',
+      'bili.needCredential': 'A repository is bound to a video, but there is no usable Bilibili credential, so update notes cannot be posted.',
+      'bili.openSettings': 'Manage under Settings → Bilibili notes',
+      'bili.lastSweep': 'Sweep {time}: {summary}',
+      'bili.sweep.none': 'nothing new to announce',
+      'bili.sweep.announced': 'announced {repo} {tag}',
+      'bili.sweep.failed': '{repo} {tag} failed to announce',
+      'bili.neverSwept': 'The sweep has not run yet',
+      'bili.ledger.problem': 'The announcement ledger cannot be read ({problem}). Nothing will be posted until it can — otherwise every comment already posted would be posted again.',
+      'bili.template': 'Template',
+      'bili.template.hint': 'Placeholders: {tag} {version} {label} {repo} {title} {summary} {url} {date}. The default carries no link, because a comment with a link is filtered more often.',
+      'bili.unknownPlaceholder': 'The template uses placeholders that do not exist: {names}',
+      'bili.video.failed': 'The video cannot be read: {reason}',
+      'bili.watch.off': 'The sweep is off (bilibiliWatchSeconds: 0); only the manual button and the sweep after publishing a draft remain.',
+      'bili.repos.title': 'Per repository',
+      'bili.repos.empty': 'No repository is registered yet.',
+      'bili.announced.title': 'Announced',
+      'bili.announced.none': 'Nothing has been announced yet.',
+      'bili.failure.last': 'Last failure: {message}',
     }
 
     /* ------------------------------------------------------------- styles -- */
@@ -580,6 +805,9 @@ window.__ModuleLoader__.load({
 .dsc-line { display: flex; align-items: center; gap: var(--dsc-gap); padding: 3px 0; border-top: 1px dashed var(--dsw-alias-border-l1); }
 .dsc-line:first-child { border-top: none; }
 .dsc-empty { padding: var(--dsc-gap) 2px; font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
+/* A line that only points somewhere else: quieter than a warning, and never a
+   control, so it cannot be mistaken for one. */
+.dsc-quiet { font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
 
 .dsc-notice, .dsc-warn, .dsc-error {
   padding: 6px 10px; border-radius: var(--dsc-ctl-r); font-size: var(--dsc-fs-md); line-height: 1.5;
@@ -1099,7 +1327,7 @@ window.__ModuleLoader__.load({
 
     /** One repository row, expandable into path, releases, runs and logs. */
     function RepoRow(props) {
-      const { t, data, busy, onAction, onBump, onPublish, onUpdate, npm, onNpmPublish, logs, onLogs } = props
+      const { t, data, busy, onAction, onBump, onPublish, onUpdate, npm, onNpmPublish, bili, onBiliBind, onBiliPreview, onBiliAnnounce, logs, onLogs } = props
       const [open, setOpen] = React.useState(false)
       /**
        * A draft release is the panel's one invisible outcome: it exists, it is not
@@ -1211,6 +1439,17 @@ window.__ModuleLoader__.load({
         chips.push(h(Chip, { key: 'n', state: 'success', title: String(npmInfo.pageUrl ?? '') }, t('npm.chipPublished', { version: String(npmInfo.version ?? '') })))
       } else if (npmCanPush) {
         chips.push(h(Chip, { key: 'n', state: 'warn', title: npmExplain ?? undefined }, t('npm.chipPending', { version: String(npmInfo.version ?? '') })))
+      }
+      /*
+       * A published release whose update note has not gone out yet. It is a chip
+       * rather than a sentence because the row is scanned: the answer to "why has
+       * this not been announced" belongs behind the expansion, next to the button.
+       */
+      if (bili?.binding != null && typeof data.publishedTag === 'string' && data.publishedTag !== '') {
+        const announced = Array.isArray(bili.announced) ? bili.announced : []
+        const baselineTag = bili.baseline === null || bili.baseline === undefined ? null : bili.baseline.tag
+        const covered = announced.some((entry) => entry.tag === data.publishedTag) || baselineTag === data.publishedTag || (bili.baseline !== null && baselineTag === null)
+        if (!covered) chips.push(h(Chip, { key: 'bl', state: 'warn' }, t('bili.chip.pending', { tag: data.publishedTag })))
       }
       if (local.available === true) {
         if (Number.isFinite(local.dirty) && local.dirty > 0) chips.push(h(Chip, { key: 'd', state: 'warn' }, t('chip.dirty', { count: String(local.dirty) })))
@@ -1444,6 +1683,12 @@ window.__ModuleLoader__.load({
                   )
                 : null,
 
+              /* The third channel, inside the row that owns it: which video carries
+                 this repository's update notes, and the button that posts one now. */
+              bili !== null && bili !== undefined
+                ? h(BiliBinding, { t, data, bili, busy, onBind: onBiliBind, onPreview: onBiliPreview, onAnnounce: onBiliAnnounce })
+                : null,
+
               h(
                 'div',
                 { className: 'dsc-sub' },
@@ -1516,6 +1761,7 @@ window.__ModuleLoader__.load({
       const [status, setStatus] = React.useState(null)
       const [overview, setOverview] = React.useState(null)
       const [npm, setNpm] = React.useState(null)
+      const [bili, setBili] = React.useState(null)
       const [error, setError] = React.useState(null)
 
       const loadStatus = React.useCallback(async () => {
@@ -1567,7 +1813,21 @@ window.__ModuleLoader__.load({
         setNpm(result.payload.value ?? null)
       }, [])
 
-      return { status, overview, npm, error, setError, loadStatus, loadOverview, loadNpm }
+      /**
+       * The Bilibili side: which credential, which video, and what was said.
+       *
+       * Also not polled, and for a second reason on top of npm's: the answer
+       * includes a video lookup and an account lookup, and the panel asks for it
+       * when it opens, after an action, and when a person asks. The Host caches
+       * both answers (`bilibiliVerifyTtlMs`), so even a refresh loop is bounded.
+       */
+      const loadBili = React.useCallback(async (options) => {
+        const result = await postJson('/bilibili-status', { force: options?.force === true }, OVERVIEW_TIMEOUT_MS)
+        if (!result.ok || !result.response.ok || result.payload?.ok !== true) return
+        setBili(result.payload.value ?? null)
+      }, [])
+
+      return { status, overview, npm, bili, error, setError, loadStatus, loadOverview, loadNpm, loadBili }
     }
 
     /** Human-readable text for the transport and version failures. */
@@ -1599,7 +1859,7 @@ window.__ModuleLoader__.load({
     /** The console panel: compact rows, and the picker behind one button. */
     function ConsolePage(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const { status, overview, npm, error, setError, loadStatus, loadOverview, loadNpm } = useConsoleState()
+      const { status, overview, npm, bili, error, setError, loadStatus, loadOverview, loadNpm, loadBili } = useConsoleState()
       const [busy, setBusy] = React.useState('')
       const [notice, setNotice] = React.useState(null)
       const [logs, setLogs] = React.useState(null)
@@ -1656,7 +1916,9 @@ window.__ModuleLoader__.load({
         void loadOverview({ force: true })
         // Once, not on the poll: the npm answer changes when someone publishes.
         void loadNpm({})
-      }, [loadStatus, loadOverview, loadNpm])
+        // And likewise: a Bilibili answer includes an account and a video lookup.
+        void loadBili({})
+      }, [loadStatus, loadOverview, loadNpm, loadBili])
 
       const pollSeconds = status?.config?.pollSeconds ?? 30
       React.useEffect(() => {
@@ -1948,6 +2210,103 @@ window.__ModuleLoader__.load({
       }, [logs, setError, t])
 
       /**
+       * Bind or unbind a repository's video.
+       *
+       * `auto` is carried through on every save so that toggling the switch does not
+       * silently re-enable a binding someone deliberately made manual — the Host
+       * takes the whole binding on each write, and the panel sends the whole binding.
+       */
+      const onBiliBind = React.useCallback(
+        async (data, bvid, auto) => {
+          const key = `bili-bind:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson('/bilibili-bind', { repo: data.repo, bvid: String(bvid ?? ''), auto: auto !== false }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            await loadBili({ force: true })
+            return
+          }
+          const value = result.payload.value ?? {}
+          if (String(value.bvid ?? '') === '') {
+            setNotice(t('bili.unbound.done', { repo: data.repo }))
+          } else {
+            const baseline = value.baseline
+              ? t('bili.bind.baseline', { tag: String(value.baseline) })
+              : (value.note ? t('bili.bind.baselineUnknown') : '')
+            setNotice(t('bili.bind.done', { bvid: String(value.bvid), baseline }))
+          }
+          await loadBili({ force: true })
+          await loadOverview({ force: true })
+        },
+        [loadBili, loadOverview, setError, t],
+      )
+
+      /**
+       * Ask the Host what the comment would say, without sending it.
+       *
+       * A dry run rather than a client-side composition: the template and the
+       * summary are the Host's, and a page that assembled its own preview could
+       * show one sentence and post another.
+       */
+      const onBiliPreview = React.useCallback(
+        async (data, tag) => {
+          const key = `bili-preview:${data.repo}`
+          setBusy(key)
+          setError(null)
+          const result = await postJson('/bilibili-announce', { repo: data.repo, tag: String(tag ?? ''), dryRun: true }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return null
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            return null
+          }
+          return result.payload.value ?? null
+        },
+        [setError, t],
+      )
+
+      /** Send the previewed comment, exactly as previewed unless it was edited. */
+      const onBiliAnnounce = React.useCallback(
+        async (data, preview, text, force) => {
+          const key = `bili-announce:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson('/bilibili-announce', {
+            repo: data.repo,
+            tag: String(preview?.tag ?? ''),
+            text: String(text ?? ''),
+            force: force === true,
+          }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return null
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            await loadBili({ force: true })
+            return null
+          }
+          const value = result.payload.value ?? {}
+          setNotice(t('bili.announce.sent', { bvid: String(value.bvid ?? ''), tag: String(value.tag ?? '') }))
+          await loadBili({ force: true })
+          return value
+        },
+        [loadBili, setError, t],
+      )
+
+      /**
        * The configured list comes from `/status`, the loaded detail from
        * `/overview`.
        *
@@ -1970,6 +2329,25 @@ window.__ModuleLoader__.load({
        */
       const npmByRepo = new Map((npm?.repos ?? []).map((entry) => [entry.repo, entry]))
       const npmAuth = npm?.auth ?? null
+      /**
+       * Bilibili's answers, keyed the same way and arriving independently.
+       *
+       * A row renders without its binding block until this lands, which is the
+       * honest state: the panel has not been told which video this repository
+       * speaks to yet.
+       */
+      const biliByRepo = new Map((bili?.repos ?? []).map((entry) => [entry.repo, entry]))
+      /**
+       * Whether the Bilibili side is blocked on a credential.
+       *
+       * Shown in the panel only when a video is actually bound and the credential
+       * cannot post: a repository nobody bound must not be nagged about a feature
+       * that is not in use, and a bound one that cannot post is exactly the state
+       * where a silent sweep would fail forever.
+       */
+      const biliBlocked = bili !== null
+        && (bili.repos ?? []).some((entry) => entry.binding !== null)
+        && bili.credential?.state !== 'ready'
       /**
        * Three states, not a boolean — the Host's `npmAuthState`.
        *
@@ -2067,92 +2445,36 @@ window.__ModuleLoader__.load({
             )
           : null,
         /*
-         * The zero-basics version of the same block, with the four steps spelled out.
+         * The npm credential, in the operational view.
          *
-         * A first npm publish is not like a first `gh auth login`: `gh` drives its own
-         * browser flow, while a token has to be made by hand on a website whose UI
-         * changed in November 2025 — classic tokens were revoked outright, what is
-         * left is a granular token with a 90-day ceiling and 2FA on by default. So
-         * this states the steps, the exact page, and the two settings that decide
-         * whether the paste works, instead of one sentence that assumes the reader
-         * already knows all of it.
+         * The four steps live on their own settings page, because that is where
+         * configuration belongs and where every package's npm state is listed. Here the
+         * panel says which of the two states this machine is in, offers the one control
+         * that resolves it, and points at the guide — so a first-time publisher who
+         * lands on the push button still has a way forward without a terminal, without
+         * four steps of onboarding sitting above a live repository list.
          */
-        npmCredential === 'credential-present'
+        npmCredential === 'none' || npmCredential === 'credential-present'
           ? h(
               'div',
               { className: 'dsc-setup', role: 'status' },
-              h('span', { className: 'dsc-setup-strong' }, t('npm.credentialPresentTitle')),
-              h('span', null, t('npm.credentialPresent', { registry: String(npm?.registry ?? ''), npmrc: String(npmAuth?.npmrcPath ?? '') })),
-              /* What `whoami` actually said, because "not signed in" and "this token
-                 was revoked" look identical and need different fixes. */
+              h('span', { className: 'dsc-setup-strong' }, npmCredential === 'none'
+                ? t('npm.notLoggedIn', {
+                    command: String(npm?.packageManager?.command ?? 'pnpm'),
+                    registry: String(npm?.registry ?? ''),
+                  })
+                : t('npm.credentialPresentTitle')),
+              npmCredential === 'none'
+                ? null
+                : h('span', null, t('npm.credentialPresentShort', { registry: String(npm?.registry ?? '') })),
+              /* What `whoami` actually said, because "not signed in" and "this token was
+                 revoked" look identical and need different fixes. */
               npmAuth?.message !== null && npmAuth?.message !== undefined
                 ? h('span', { className: 'dsc-mono' }, String(npmAuth.message))
                 : null,
               h(
                 'div',
                 { className: 'dsc-setup-line' },
-                h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void loadNpm({ force: true }) } }, t('npm.recheck')),
-                h(Btn, { kind: 'quiet', onClick: () => setNpmTokenRejected(false) }, t('npm.replaceToken')),
-              ),
-              npmTokenRejected
-                ? h(
-                    React.Fragment,
-                    null,
-                    h('span', { className: 'dsc-warn' }, t('npm.rejectedTitle')),
-                    h('span', null, t('npm.rejectedCauses')),
-                  )
-                : null,
-              h(
-                'div',
-                { className: 'dsc-setup-line' },
-                h('input', {
-                  className: 'dsc-input',
-                  type: 'password',
-                  autoComplete: 'off',
-                  spellCheck: 'false',
-                  placeholder: t('npm.tokenPlaceholder'),
-                  'aria-label': t('npm.tokenPlaceholder'),
-                  value: npmToken,
-                  onChange: (event) => setNpmToken(String(event?.target?.value ?? '')),
-                }),
-                h(Btn, {
-                  kind: 'primary',
-                  disabled: busy !== '' || npmToken.trim() === '',
-                  onClick: () => { void onNpmLogin() },
-                }, busy === 'npm-login' ? '…' : t('npm.writeToken')),
-              ),
-            )
-          : null,
-        npmCredential === 'none'
-          ? h(
-              'div',
-              { className: 'dsc-setup', role: 'status' },
-              h('span', { className: 'dsc-setup-strong' }, t('npm.notLoggedIn', {
-                command: String(npm?.packageManager?.command ?? 'pnpm'),
-                registry: String(npm?.registry ?? ''),
-              })),
-              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step1')),
-              h(
-                'div',
-                { className: 'dsc-setup-line' },
-                h(Btn, { onClick: () => globalThis.open('https://www.npmjs.com/signup', '_blank', 'noopener,noreferrer') }, t('npm.guide.signup')),
-                h('span', null, t('npm.guide.emailNote')),
-              ),
-              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step2')),
-              h(
-                'div',
-                { className: 'dsc-setup-line' },
-                h(Btn, { onClick: () => globalThis.open('https://www.npmjs.com/settings/~/tokens', '_blank', 'noopener,noreferrer') }, t('npm.guide.tokens')),
-                h(Btn, { kind: 'quiet', onClick: () => globalThis.open('https://docs.npmjs.com/creating-and-viewing-access-tokens', '_blank', 'noopener,noreferrer') }, t('npm.guide.docs')),
-              ),
-              h('span', null, t('npm.guide.tokenType')),
-              h('span', null, t('npm.guide.tokenScope')),
-              h('span', null, t('npm.guide.tokenExpiry')),
-              h('span', null, t('npm.guide.token2fa')),
-              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step3')),
-              h(
-                'div',
-                { className: 'dsc-setup-line' },
                 h('input', {
                   className: 'dsc-input',
                   type: 'password',
@@ -2170,9 +2492,6 @@ window.__ModuleLoader__.load({
                 }, busy === 'npm-login' ? '…' : t('npm.writeToken')),
                 h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void loadNpm({ force: true }) } }, t('npm.recheck')),
               ),
-              h('span', null, t('npm.guide.step3Note', { npmrc: String(npmAuth.npmrcPath ?? '') })),
-              /* A rejected token is the moment this block is actually read, so the
-                 checklist belongs here rather than in a document nobody opens. */
               npmTokenRejected
                 ? h(
                     React.Fragment,
@@ -2181,16 +2500,34 @@ window.__ModuleLoader__.load({
                     h('span', null, t('npm.rejectedCauses')),
                   )
                 : null,
-              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step4')),
-              h('span', null, t('npm.guide.step4Note')),
-              npmAuth.message !== null && npmAuth.message !== undefined
-                ? h('span', { className: 'dsc-mono' }, String(npmAuth.message))
-                : null,
-              h('span', { className: 'dsc-mono' }, `${t('npm.npmrcPath')} ${String(npmAuth.npmrcPath ?? '')}`),
+              h('span', { className: 'dsc-quiet' }, t('npm.moreInSettings')),
             )
           : null,
         stale
           ? h('div', { className: 'dsc-warn', role: 'alert' }, h('strong', null, t('stale.title')), ' — ', t('stale.how'))
+          : null,
+        /*
+         * A bound video with no usable credential is the one Bilibili state the
+         * panel has to raise on its own: every subsequent release would silently
+         * fail to announce, and a failure nobody sees is the shape this project
+         * keeps writing tests against.
+         */
+        biliBlocked && !stale
+          ? h(
+              'div',
+              { className: 'dsc-setup', role: 'status' },
+              h('span', { className: 'dsc-setup-strong' }, t('bili.needCredential')),
+              h('span', { className: 'dsc-quiet' }, t('bili.openSettings')),
+              h(BilibiliSignIn, {
+                t,
+                bili,
+                busy,
+                setBusy,
+                setNotice,
+                setError,
+                onChanged: () => loadBili({ force: true }),
+              }),
+            )
           : null,
         /* The one outcome the panel could report as "nothing happened". Say it, and
            say what to press, instead of leaving it inside a collapsed row. */
@@ -2249,6 +2586,10 @@ window.__ModuleLoader__.load({
                 onUpdate: () => { void onUpdate(data) },
                 npm: npmByRepo.get(data.repo) ?? null,
                 onNpmPublish,
+                bili: biliByRepo.get(data.repo) ?? null,
+                onBiliBind,
+                onBiliPreview,
+                onBiliAnnounce,
                 logs,
                 onLogs,
               })),
@@ -2267,6 +2608,728 @@ window.__ModuleLoader__.load({
               })),
             )
           : null,
+      )
+    }
+
+    /**
+     * The npm credential control, shared by the panel and the settings page.
+     *
+     * One implementation because the two surfaces must not drift: the panel shows the
+     * short state and the settings page shows the four steps, but both write the same
+     * file through the same route and have to report the same outcome. The token lives
+     * here only until the request that writes it answers, and is cleared then.
+     */
+    function useNpmCredential(t, loadNpm, setError, setNotice) {
+      const [token, setToken] = React.useState('')
+      const [busy, setBusy] = React.useState(false)
+      const [rejected, setRejected] = React.useState(false)
+      const login = React.useCallback(async () => {
+        setBusy(true)
+        setRejected(false)
+        setError(null)
+        const result = await postJson('/npm-login', { token }, ACTION_TIMEOUT_MS)
+        setBusy(false)
+        setToken('')
+        if (!result.ok) {
+          setError(result.aborted ? 'timeout' : 'host')
+          return
+        }
+        if (!result.response.ok || result.payload?.ok !== true) {
+          setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          setRejected(result.payload?.code === 'token-rejected')
+          await loadNpm({ force: true })
+          return
+        }
+        setRejected(false)
+        const value = result.payload.value ?? {}
+        setNotice(t('npm.tokenWritten', { npmrc: String(value.npmrcPath ?? ''), account: String(value.account ?? '') }))
+        await loadNpm({ force: true })
+      }, [loadNpm, setError, setNotice, t, token])
+      return { token, setToken, busy, rejected, login }
+    }
+
+    /** The token field and its two buttons — the control step ③ is about. */
+    function NpmTokenLine(props) {
+      const { t, credential, busy } = props
+      return h(
+        'div',
+        { className: 'dsc-setup-line' },
+        h('input', {
+          className: 'dsc-input',
+          type: 'password',
+          autoComplete: 'off',
+          spellCheck: 'false',
+          placeholder: t('npm.tokenPlaceholder'),
+          'aria-label': t('npm.tokenPlaceholder'),
+          value: credential.token,
+          onChange: (event) => credential.setToken(String(event?.target?.value ?? '')),
+        }),
+        h(Btn, {
+          kind: 'primary',
+          disabled: busy !== '' || credential.token.trim() === '',
+          onClick: () => { void credential.login() },
+        }, credential.busy ? '…' : t('npm.writeToken')),
+      )
+    }
+
+    /** The checklist a refused token needs, shown exactly when it is refused. */
+    function NpmRejectedNote(props) {
+      if (props.rejected !== true) return null
+      return h(
+        React.Fragment,
+        null,
+        h('span', { className: 'dsc-warn' }, props.t('npm.rejectedTitle')),
+        h('span', null, props.t('npm.rejectedCauses')),
+      )
+    }
+
+    /**
+     * The four steps, as a configuration guide rather than a paragraph.
+     *
+     * A step gets a status only where the Host can actually know one. It can see a
+     * token line in `.npmrc`, and it can see an account once `whoami` answers — it
+     * cannot see whether an account was registered or a token was generated, and a
+     * guide that ticked those off would be inventing progress. So ① and ② carry a
+     * tick only after a credential proves they happened, and say "cannot be detected"
+     * until then; ③ is the one step with a live state of its own.
+     */
+    function NpmCredentialGuide(props) {
+      const { t, npm, credential } = props
+      const account = npm?.auth?.account ?? null
+      const registry = String(npm?.registry ?? '')
+      const npmrcPath = String(npm?.auth?.npmrcPath ?? '')
+      const hasToken = npm?.auth?.npmrcHasToken === true
+      const proven = account !== null
+      const status = (kind, text) => h(Chip, { state: kind === 'done' ? 'success' : kind === 'todo' ? 'warn' : 'idle' }, text)
+      return h(
+        React.Fragment,
+        null,
+        h(
+          'div',
+          { className: 'dsc-setup-line' },
+          h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step1')),
+          proven
+            ? status('done', t('npm.stepAccountDone', { account: String(account) }))
+            : status('unknown', t('npm.stepUnknown')),
+        ),
+        h(
+          'div',
+          { className: 'dsc-setup-line' },
+          h(Btn, { onClick: () => globalThis.open(NPM_SIGNUP_URL, '_blank', 'noopener,noreferrer') }, t('npm.guide.signup')),
+        ),
+        h('span', null, t('npm.guide.emailNote')),
+
+        h(
+          'div',
+          { className: 'dsc-setup-line' },
+          h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step2')),
+          proven ? status('done', t('npm.stepTokenDone')) : status('unknown', t('npm.stepUnknown')),
+        ),
+        h(
+          'div',
+          { className: 'dsc-setup-line' },
+          h(Btn, { onClick: () => globalThis.open(NPM_TOKENS_URL, '_blank', 'noopener,noreferrer') }, t('npm.guide.tokens')),
+          h(Btn, { kind: 'quiet', onClick: () => globalThis.open(NPM_TOKEN_DOCS_URL, '_blank', 'noopener,noreferrer') }, t('npm.guide.docs')),
+        ),
+        h('span', null, t('npm.guide.tokenType')),
+        h('span', null, t('npm.guide.tokenScope')),
+        h('span', null, t('npm.guide.tokenExpiry')),
+        h('span', null, t('npm.guide.token2fa')),
+
+        h(
+          'div',
+          { className: 'dsc-setup-line' },
+          h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step3')),
+          hasToken ? status('done', t('npm.stepWrittenDone', { npmrc: npmrcPath })) : status('todo', t('npm.stepTodo')),
+        ),
+        h(NpmTokenLine, { t, credential, busy: props.busy }),
+        h('span', null, t('npm.guide.step3Note', { npmrc: npmrcPath })),
+        h(NpmRejectedNote, { t, rejected: credential.rejected }),
+
+        h(
+          'div',
+          { className: 'dsc-setup-line' },
+          h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step4')),
+          status('unknown', t('npm.stepUnknown')),
+        ),
+        h('span', null, t('npm.guide.step4Note')),
+
+        /* What the package manager said, verbatim: "not signed in" and "that token was
+           revoked" are the same blank state and different problems. */
+        npm?.auth?.message !== null && npm?.auth?.message !== undefined
+          ? h('span', { className: 'dsc-mono' }, String(npm.auth.message))
+          : null,
+        h('span', { className: 'dsc-quiet' }, t('npm.ciHint')),
+      )
+    }
+
+    /**
+     * The Settings page for npm credentials: the guide, and every package's state.
+     *
+     * The panel answers "which repository needs attention"; this page answers "can
+     * this machine publish at all, and which of my packages are already up there" —
+     * which is configuration, not operation, and belongs where the GitHub account
+     * page already lives.
+     */
+    function NpmCredentialsPage(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const { npm, error, setError, loadNpm } = useConsoleState()
+      const [busy, setBusy] = React.useState('')
+      const [notice, setNotice] = React.useState(null)
+      const credential = useNpmCredential(t, loadNpm, setError, setNotice)
+
+      React.useEffect(() => {
+        void loadNpm({ force: true })
+      }, [loadNpm])
+
+      const auth = npm?.auth ?? null
+      const state = auth === null ? 'unknown' : String(auth.state ?? (auth.loggedIn === true ? 'signed-in' : 'none'))
+
+      const recheck = React.useCallback(async () => {
+        setBusy('recheck')
+        await loadNpm({ force: true })
+        setBusy('')
+      }, [loadNpm])
+
+      const packageState = (entry) => {
+        if (entry.state === 'published') return { kind: 'success', text: t('npm.package.published') }
+        if (entry.state === 'unregistered') return { kind: 'warn', text: t('npm.package.unregistered') }
+        if (entry.state === 'unpublished') return { kind: 'warn', text: t('npm.package.unpublished') }
+        return { kind: 'idle', text: t('npm.package.unknown') }
+      }
+      const blockerText = (entry) => {
+        const first = Array.isArray(entry.blockers) ? entry.blockers[0] : null
+        if (first === null) return null
+        const key = `npm.blocked.${first}`
+        const text = t(key)
+        return text === key ? null : text
+      }
+
+      return h(
+        'div',
+        { className: 'dsc-root' },
+        h(
+          'div',
+          { className: 'dsc-bar' },
+          h(
+            'div',
+            { className: 'dsc-heading' },
+            h('span', { className: 'dsc-title' }, t('settings.npmTitle')),
+            h('span', { className: 'dsc-subtitle' }, t('settings.npmSubtitle')),
+          ),
+          h(Btn, { disabled: busy !== '', onClick: () => { void recheck() } }, busy === 'recheck' ? '…' : t('npm.packages.recheck')),
+        ),
+
+        error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
+        notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
+
+        npm === null
+          ? h('div', { className: 'dsc-setup' }, h('span', { className: 'dsc-setup-strong' }, t('npm.status.unknown')), h('span', null, t('npm.status.unknownHint')))
+          : h(
+              React.Fragment,
+              null,
+              h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h('span', { className: 'dsc-setup-strong' }, t('npm.status.title')),
+                state === 'signed-in'
+                  ? h(Chip, { state: 'success' }, t('npm.status.signedIn', { account: String(auth.account ?? '?') }))
+                  : state === 'credential-present'
+                    ? h(Chip, { state: 'idle' }, t('npm.status.credentialPresent'))
+                    : h(Chip, { state: 'warn' }, t('npm.status.none')),
+                h('span', { className: 'dsc-mono' }, t('npm.registry', { registry: String(npm.registry ?? '') })),
+              ),
+              /* "Signed in" and "a credential that whoami will not confirm" are the same
+                 blank state on screen and different situations, so this page spells the
+                 second one out instead of collapsing it into the first. */
+              state === 'credential-present'
+                ? h('span', null, t('npm.credentialPresent', { registry: String(npm.registry ?? ''), npmrc: String(auth.npmrcPath ?? '') }))
+                : null,
+              /* The guide is the page's reason to exist, so it is always here — the
+                 panel is where it would be in the way. */
+              h(
+                'div',
+                { className: 'dsc-setup' },
+                h('span', { className: 'dsc-setup-strong' }, t('settings.npmGuideTitle')),
+                h(NpmCredentialGuide, { t, npm, credential, busy }),
+              ),
+              h(
+                'div',
+                { className: 'dsc-sub' },
+                h('span', { className: 'dsc-setup-strong' }, t('npm.packages.title')),
+                (npm.repos ?? []).length === 0
+                  ? h('span', null, t('npm.packages.empty'))
+                  : (npm.repos ?? []).map((entry) =>
+                      h(
+                        'div',
+                        { className: 'dsc-line', key: entry.repo },
+                        h('span', { className: 'dsc-name', style: { minWidth: '0', fontWeight: '500' } }, String(entry.packageName ?? entry.repo)),
+                        h(Chip, { state: packageState(entry).kind }, packageState(entry).text),
+                        h('span', { className: 'dsc-grow' }, `${t('npm.package.local', { version: String(entry.version ?? '?') })}${entry.latest === null || entry.latest === undefined ? '' : ` · ${t('npm.package.latest', { latest: String(entry.latest) })}`}`),
+                        blockerText(entry) === null ? null : h('span', { className: 'dsc-quiet' }, blockerText(entry)),
+                        entry.pageUrl ? h(Btn, { kind: 'quiet', onClick: () => globalThis.open(String(entry.pageUrl), '_blank', 'noopener,noreferrer') }, t('action.open')) : null,
+                      ),
+                    ),
+              ),
+            ),
+      )
+    }
+
+    /**
+     * The Bilibili credential, in one component used in two places.
+     *
+     * The panel shows it only when it is the obstacle (a video is bound and the
+     * credential cannot post); the settings page shows it always, because that is
+     * where a credential is configured. One component, so the two cannot drift
+     * into two different explanations of the same `-101`.
+     */
+    function BilibiliSignIn(props) {
+      const { t, bili, busy, setBusy, setNotice, setError, onChanged } = props
+      const credential = bili?.credential ?? null
+      const login = bili?.login ?? { state: 'idle' }
+      const [sessdata, setSessdata] = React.useState('')
+      const [csrf, setCsrf] = React.useState('')
+      const [confirmingSignOut, setConfirmingSignOut] = React.useState(false)
+
+      /** One request, with the two failures this page has to tell apart. */
+      const post = React.useCallback(async (key, path, body) => {
+        setBusy(key)
+        setError(null)
+        const result = await postJson(path, body, ACTION_TIMEOUT_MS)
+        setBusy('')
+        if (!result.ok) {
+          setError(result.aborted ? 'timeout' : 'host')
+          return null
+        }
+        if (!result.response.ok || result.payload?.ok !== true) {
+          setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          await onChanged()
+          return null
+        }
+        return result.payload.value ?? {}
+      }, [onChanged, setBusy, setError, t])
+
+      const start = React.useCallback(async () => {
+        const value = await post('bili-login', '/bilibili-login-start', {})
+        if (value !== null) await onChanged()
+      }, [onChanged, post])
+
+      const cancel = React.useCallback(async () => {
+        await post('bili-cancel', '/bilibili-login-cancel', {})
+        await onChanged()
+      }, [onChanged, post])
+
+      const save = React.useCallback(async () => {
+        const value = await post('bili-paste', '/bilibili-credential', { sessdata, bili_jct: csrf })
+        setSessdata('')
+        setCsrf('')
+        if (value === null) return
+        setNotice(t('bili.paste.saved', { uname: String(value.account?.uname ?? '') }))
+        await onChanged()
+      }, [csrf, onChanged, post, sessdata, setNotice, t])
+
+      const signOut = React.useCallback(async () => {
+        if (confirmingSignOut !== true) {
+          setConfirmingSignOut(true)
+          return
+        }
+        setConfirmingSignOut(false)
+        const value = await post('bili-signout', '/bilibili-logout', {})
+        if (value === null) return
+        /* An external credential keeps working after this one is deleted, and
+           reporting a sign-out that did not happen would be a lie the next sweep
+           exposes anyway. */
+        setNotice(value.stillAvailable ? t('bili.signOut.fallback', { path: String(value.stillAvailable.path ?? '') }) : t('bili.signOut.done'))
+        await onChanged()
+      }, [confirmingSignOut, onChanged, post, setNotice, t])
+
+      const running = login.state === 'waiting' || login.state === 'scanned'
+      React.useEffect(() => {
+        if (!running) return undefined
+        let cancelled = false
+        const tick = async () => {
+          const result = await postJson('/bilibili-login-poll', {}, STATUS_TIMEOUT_MS)
+          if (cancelled) return
+          const value = result.payload?.value ?? {}
+          if (result.ok && result.response.ok && result.payload?.ok === true) {
+            if (value.state === 'succeeded') {
+              setNotice(value.account?.uname
+                ? t('bili.signIn.done', { uname: String(value.account.uname) })
+                : t('bili.signIn.doneNoName'))
+            }
+            if (value.state === 'expired') setError(t('bili.signIn.expired'))
+          } else if (result.ok && !result.aborted) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          }
+          await onChanged()
+        }
+        const timer = globalThis.setInterval(() => { void tick() }, AUTH_POLL_MS)
+        return () => {
+          cancelled = true
+          globalThis.clearInterval(timer)
+        }
+      }, [onChanged, running, setError, setNotice, t])
+
+      if (credential === null) return null
+      const state = String(credential.state ?? 'none')
+      const stateText = (() => {
+        if (state === 'ready') {
+          return credential.account?.uname
+            ? t('bili.credential.ready', { uname: String(credential.account.uname) })
+            : t('bili.credential.ready', { uname: '?' })
+        }
+        const key = `bili.credential.${state}`
+        const text = t(key)
+        return text === key ? t('bili.credential.unverified') : text
+      })()
+
+      return h(
+        React.Fragment,
+        null,
+        h(
+          'div',
+          { className: 'dsc-setup', role: 'status' },
+          h(
+            'div',
+            { className: 'dsc-setup-line' },
+            h('span', { className: 'dsc-setup-strong' }, t('bili.credential.title')),
+            h(Chip, { state: state === 'ready' ? 'success' : state === 'none' ? 'warn' : 'idle' }, stateText),
+            credential.path
+              ? h('span', { className: 'dsc-mono', title: String(credential.path) }, t('bili.credential.source', { path: String(credential.path) }))
+              : null,
+          ),
+          /* Why it cannot be used, in Bilibili's own terms. A bare "-101" sends the
+             reader to re-login in the wrong place when the credential is an APP one. */
+          state !== 'ready' && credential.message ? h('span', { className: 'dsc-warn' }, String(credential.message)) : null,
+          state !== 'ready' ? h('span', null, t('bili.credential.none.hint')) : null,
+          credential.source === 'configured'
+            ? h('span', { className: 'dsc-quiet' }, t('bili.credential.external', { path: String(credential.configuredPath ?? '') }))
+            : null,
+
+          running
+            ? h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h('span', { className: 'dsc-grow' }, login.state === 'scanned' ? t('bili.waitingScanned') : t('bili.waiting')),
+                login.url
+                  ? h(Btn, { disabled: busy !== '', onClick: () => globalThis.open(String(login.url), '_blank', 'noopener,noreferrer') }, t('bili.openLogin'))
+                  : null,
+                h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void cancel() } }, t('bili.cancelSignIn')),
+              )
+            : h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h(Btn, { kind: 'primary', disabled: busy !== '', onClick: () => { void start() } }, busy === 'bili-login' ? '…' : t('bili.signIn')),
+                h('span', { className: 'dsc-quiet' }, t('bili.signIn.hint')),
+              ),
+          state === 'ready'
+            ? h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void signOut() } }, confirmingSignOut ? t('bili.signOut.confirm') : t('bili.signOut')),
+              )
+            : null,
+
+          h('span', { className: 'dsc-setup-strong' }, t('bili.paste.title')),
+          h('span', { className: 'dsc-quiet' }, t('bili.paste.hint')),
+          h(
+            'div',
+            { className: 'dsc-setup-line' },
+            h('input', {
+              className: 'dsc-input',
+              type: 'password',
+              autoComplete: 'off',
+              spellCheck: 'false',
+              placeholder: t('bili.paste.sessdata'),
+              'aria-label': t('bili.paste.sessdata'),
+              value: sessdata,
+              onChange: (event) => setSessdata(String(event?.target?.value ?? '')),
+            }),
+            h('input', {
+              className: 'dsc-input',
+              type: 'password',
+              autoComplete: 'off',
+              spellCheck: 'false',
+              placeholder: t('bili.paste.csrf'),
+              'aria-label': t('bili.paste.csrf'),
+              value: csrf,
+              onChange: (event) => setCsrf(String(event?.target?.value ?? '')),
+            }),
+            h(Btn, {
+              kind: 'primary',
+              disabled: busy !== '' || sessdata.trim() === '' || csrf.trim() === '',
+              onClick: () => { void save() },
+            }, busy === 'bili-paste' ? '…' : t('bili.paste.save')),
+          ),
+        ),
+      )
+    }
+
+    /**
+     * One repository's video binding, inside its row.
+     *
+     * The binding is edited here because this is where the question is asked: the
+     * row already knows what was released and whether the profile has it, and "who
+     * reads about it" is the same repository's business. The announcement itself is
+     * always previewed first — the comment is public, and the sentence shown is the
+     * sentence the Host would send, composed on the Host.
+     */
+    function BiliBinding(props) {
+      const { t, data, bili, busy, onBind, onPreview, onAnnounce } = props
+      const binding = bili?.binding ?? null
+      const [draft, setDraft] = React.useState(binding === null ? '' : String(binding.bvid))
+      const [preview, setPreview] = React.useState(null)
+
+      /* The Host is the source of truth for the binding: after a save the field
+         shows what was actually stored, not what was typed. */
+      React.useEffect(() => {
+        setDraft(binding === null ? '' : String(binding.bvid))
+      }, [binding === null ? '' : String(binding.bvid)])
+
+      const announced = Array.isArray(bili?.announced) ? bili.announced : []
+      const last = announced.length > 0 ? announced[announced.length - 1] : null
+      const failures = Array.isArray(bili?.failures) ? bili.failures : []
+      const failure = failures.length > 0 ? failures[failures.length - 1] : null
+      /**
+       * Why the Host would not post this one, in the reader's language where the
+       * dictionary knows the state, and in the Host's own words otherwise. The Host
+       * composes its refusals in one language; a known state deserves the other.
+       */
+      const previewReason = (value) => {
+        const key = `bili.state.${String(value?.state ?? '')}`
+        const text = t(key, { count: String(value?.attempts ?? '') })
+        return text === key ? String(value?.message ?? '') : text
+      }
+      /**
+       * What would be announced if the sweep ran now, as far as the panel can tell.
+       * The decision itself is the Host's; this is a chip, and it stays silent when
+       * the baseline is unknown rather than guessing at the one case that matters.
+       */
+      const pendingTag = (() => {
+        if (binding === null) return null
+        const tag = typeof data.publishedTag === 'string' && data.publishedTag !== '' ? data.publishedTag : null
+        if (tag === null) return null
+        if (announced.some((entry) => entry.tag === tag)) return null
+        if (bili?.baseline === null || bili?.baseline === undefined) return null
+        if (bili.baseline.tag === null) return null
+        if (bili.baseline.tag === tag) return null
+        return tag
+      })()
+
+      return h(
+        'div',
+        { className: 'dsc-sub' },
+        h('span', null, t('bili.bind.title')),
+        h(
+          'div',
+          { className: 'dsc-line' },
+          h('input', {
+            className: 'dsc-input',
+            type: 'text',
+            spellCheck: 'false',
+            placeholder: t('bili.bind.placeholder'),
+            'aria-label': t('bili.bind.placeholder'),
+            value: draft,
+            onChange: (event) => setDraft(String(event?.target?.value ?? '').trim()),
+          }),
+          h(Btn, {
+            kind: binding === null ? 'primary' : undefined,
+            disabled: busy !== '' || draft.trim() === '',
+            onClick: () => { void onBind(data, draft.trim(), binding === null ? true : binding.auto !== false) },
+          }, busy === `bili-bind:${data.repo}` ? '…' : t('bili.bind.save')),
+          binding === null
+            ? null
+            : h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void onBind(data, '', true) } }, t('bili.bind.unbind')),
+          h('span', { className: 'dsc-grow' }, binding === null
+            ? t('bili.repo.none')
+            : bili?.video?.ok === true
+              ? `${String(bili.video.title ?? '')}${bili.video.owner ? ` · ${String(bili.video.owner)}` : ''}`
+              : t('bili.video.failed', { reason: String(bili?.video?.message ?? '?') })),
+        ),
+        binding !== null
+          ? h(
+              'div',
+              { className: 'dsc-line' },
+              h(Chip, { state: binding.auto === false ? 'idle' : 'success' }, binding.auto === false ? t('bili.auto.off') : t('bili.auto.on')),
+              h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void onBind(data, binding.bvid, binding.auto === false) } }, t('bili.auto.toggle')),
+              h('span', { className: 'dsc-grow' }, last === null
+                ? t('bili.announced.none')
+                : `${t('bili.chip.announced', { tag: String(last.tag) })}${last.url ? '' : ''}`),
+              pendingTag !== null ? h(Chip, { state: 'warn' }, t('bili.chip.pending', { tag: pendingTag })) : null,
+              last !== null && typeof last.url === 'string' && last.url !== ''
+                ? h(Btn, { kind: 'quiet', onClick: () => globalThis.open(String(last.url), '_blank', 'noopener,noreferrer') }, t('action.open'))
+                : null,
+            )
+          : null,
+        failure !== null
+          ? h('span', { className: 'dsc-warn' }, t('bili.failure.last', { message: String(failure.message ?? failure.failure ?? '') }))
+          : null,
+        binding !== null
+          ? h(
+              'div',
+              { className: 'dsc-line' },
+              h(Btn, {
+                kind: 'primary',
+                disabled: busy !== '',
+                onClick: () => {
+                  void (async () => {
+                    const value = await onPreview(data)
+                    if (value !== null) setPreview(value)
+                  })()
+                },
+              }, busy === `bili-preview:${data.repo}` ? '…' : (announced.length > 0 ? t('bili.announce.again') : t('bili.announce'))),
+            )
+          : null,
+        preview !== null
+          ? h(
+              React.Fragment,
+              null,
+              h('span', { className: 'dsc-setup-strong' }, t('bili.announce.preview')),
+              preview.state !== 'ready'
+                ? h('span', { className: 'dsc-warn' }, previewReason(preview))
+                : null,
+              h('pre', { className: 'dsc-logs' }, String(preview.text ?? '')),
+              Array.isArray(preview.unknown) && preview.unknown.length > 0
+                ? h('span', { className: 'dsc-warn' }, t('bili.unknownPlaceholder', { names: preview.unknown.join(', ') }))
+                : null,
+              h(
+                'div',
+                { className: 'dsc-line' },
+                preview.state === 'ready'
+                  ? h(Btn, {
+                      kind: 'danger',
+                      disabled: busy !== '',
+                      onClick: () => {
+                        setPreview(null)
+                        void onAnnounce(data, preview, String(preview.text ?? ''), false)
+                      },
+                    }, t('bili.announce.confirm'))
+                  : h(Btn, {
+                      kind: 'danger',
+                      disabled: busy !== '',
+                      onClick: () => {
+                        setPreview(null)
+                        void onAnnounce(data, preview, String(preview.text ?? ''), true)
+                      },
+                    }, t('bili.announce.force')),
+                h(Btn, { kind: 'quiet', onClick: () => setPreview(null) }, t('bili.announce.cancel')),
+              ),
+            )
+          : null,
+      )
+    }
+
+    /**
+     * The Settings page for Bilibili update notes.
+     *
+     * The panel answers "what would be posted, and to which video"; this page
+     * answers "can this machine post at all, and what has it already said" — which
+     * is configuration plus a public record, and belongs beside the two credential
+     * pages that already live here.
+     */
+    function BilibiliPage(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const { bili, error, setError, loadBili } = useConsoleState()
+      const [busy, setBusy] = React.useState('')
+      const [notice, setNotice] = React.useState(null)
+
+      React.useEffect(() => {
+        void loadBili({ force: true })
+      }, [loadBili])
+
+      const reload = React.useCallback(() => loadBili({ force: true }), [loadBili])
+      const repositories = Array.isArray(bili?.repos) ? bili.repos : []
+      const lastSweep = bili?.lastSweep ?? null
+      const sweepText = (() => {
+        if (bili === null) return null
+        if (lastSweep === null || lastSweep === undefined) return t('bili.neverSwept')
+        const results = Array.isArray(lastSweep.results) ? lastSweep.results : []
+        const announced = results.filter((entry) => entry.state === 'announced')
+        const failed = results.filter((entry) => entry.state === 'failed')
+        const summary = announced.length > 0
+          ? announced.map((entry) => t('bili.sweep.announced', { repo: String(entry.repo ?? ''), tag: String(entry.tag ?? '') })).join('，')
+          : failed.length > 0
+            ? failed.map((entry) => t('bili.sweep.failed', { repo: String(entry.repo ?? ''), tag: String(entry.tag ?? '') })).join('，')
+            : t('bili.sweep.none')
+        return t('bili.lastSweep', { time: stamp(String(lastSweep.at ?? '')), summary })
+      })()
+
+      return h(
+        'div',
+        { className: 'dsc-root' },
+        h(
+          'div',
+          { className: 'dsc-bar' },
+          h(
+            'div',
+            { className: 'dsc-heading' },
+            h('span', { className: 'dsc-title' }, t('bili.settings.title')),
+            h('span', { className: 'dsc-subtitle' }, t('bili.settings.subtitle')),
+          ),
+          h(Btn, { disabled: busy !== '', onClick: () => { void reload() } }, t('action.recheck')),
+        ),
+
+        error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
+        notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
+
+        bili === null
+          ? h('div', { className: 'dsc-empty' }, t('state.loading'))
+          : h(
+              React.Fragment,
+              null,
+              bili.enabled === false
+                ? h('div', { className: 'dsc-warn' }, 'bilibiliEnabled: false')
+                : null,
+              bili.watchSeconds === 0 ? h('div', { className: 'dsc-warn' }, t('bili.watch.off')) : null,
+              bili.ledger?.problem
+                ? h('div', { className: 'dsc-error', role: 'alert' }, t('bili.ledger.problem', { problem: String(bili.ledger.problem) }))
+                : null,
+              h(BilibiliSignIn, {
+                t,
+                bili,
+                busy,
+                setBusy,
+                setNotice,
+                setError,
+                onChanged: () => loadBili({ force: true }),
+              }),
+              h(
+                'div',
+                { className: 'dsc-setup' },
+                h('span', { className: 'dsc-setup-strong' }, t('bili.template')),
+                h('span', { className: 'dsc-mono' }, String(bili.template === '' ? '【更新 {tag}】{summary}' : bili.template)),
+                h('span', { className: 'dsc-quiet' }, t('bili.template.hint')),
+                sweepText === null ? null : h('span', { className: 'dsc-quiet' }, sweepText),
+              ),
+              h(
+                'div',
+                { className: 'dsc-sub' },
+                h('span', { className: 'dsc-setup-strong' }, t('bili.repos.title')),
+                repositories.length === 0
+                  ? h('span', null, t('bili.repos.empty'))
+                  : repositories.map((entry) =>
+                      h(
+                        'div',
+                        { className: 'dsc-line', key: entry.repo },
+                        h('span', { className: 'dsc-name', style: { minWidth: '0', fontWeight: '500' } }, String(entry.label ?? entry.repo)),
+                        entry.binding === null
+                          ? h(Chip, { state: 'idle' }, t('bili.repo.none'))
+                          : h(Chip, { state: 'success' }, String(entry.binding.bvid)),
+                        h('span', { className: 'dsc-grow' }, entry.video?.ok === true
+                          ? String(entry.video.title ?? '')
+                          : (Array.isArray(entry.announced) && entry.announced.length > 0
+                              ? t('bili.chip.announced', { tag: String(entry.announced[entry.announced.length - 1].tag) })
+                              : t('bili.announced.none'))),
+                        Array.isArray(entry.failures) && entry.failures.length > 0
+                          ? h('span', { className: 'dsc-warn' }, t('bili.failure.last', { message: String(entry.failures[entry.failures.length - 1].message ?? '') }))
+                          : null,
+                        entry.commentUrl
+                          ? h(Btn, { kind: 'quiet', onClick: () => globalThis.open(String(entry.commentUrl), '_blank', 'noopener,noreferrer') }, t('action.open'))
+                          : null,
+                      ),
+                    ),
+              ),
+            ),
       )
     }
 
@@ -2443,6 +3506,24 @@ window.__ModuleLoader__.load({
             ctx.slots.register(
               { name: 'settings.section', id: SETTINGS_ID, order: -9, label: () => t('settings.label'), locale: NS },
               AccountPage,
+            ),
+          ),
+          // The npm credential is its own section rather than a block on the GitHub
+          // page: they are two credential systems with two failures and two fixes, and
+          // `-8` sits it directly under the one above. A fresh id is required — reusing
+          // a shipped id would replace that page instead of adding one.
+          ctx.slots.inject('settings.section', () =>
+            ctx.slots.register(
+              { name: 'settings.section', id: NPM_SETTINGS_ID, order: -8, label: () => t('settings.npmLabel'), locale: NS },
+              NpmCredentialsPage,
+            ),
+          ),
+          // And the third credential system: Bilibili's. `-7` continues the stack,
+          // and the id is fresh for the same reason both of the others are.
+          ctx.slots.inject('settings.section', () =>
+            ctx.slots.register(
+              { name: 'settings.section', id: BILIBILI_SETTINGS_ID, order: -7, label: () => t('bili.settings.label'), locale: NS },
+              BilibiliPage,
             ),
           ),
         ]

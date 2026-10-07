@@ -161,6 +161,42 @@ token 不回显、不落插件、不进日志；页面在请求返回的那一�
 
 面板**不做**这件事：它是在**这台机器上推一次**的路径，不是 CI 的替代品。CI 发布需要 token 时，token 应放在仓库 secret 里（`NPM_TOKEN`），而不是这台机器上。
 
+## B 站更新播报（第三条渠道）
+
+插件更新了，除了 Release 和 npm，还有一件观众真的会看的事：在**介绍这个插件的视频**下面留一句"更新了什么"。这一条也做进面板里——每个仓库绑一个 BV 号，Release 公开之后自动在评论区补一条更新说明。
+
+**触发条件只有一个：Release 已公开。** 草稿不算——草稿只有作者能看见，为它发"上线了"是对着空气说话。所以：
+
+- 面板每 `bilibiliWatchSeconds`（默认 90 秒）巡检一次每个**已绑定**的仓库；
+- 点【公开草稿】成功后立刻巡检一次（这一下就是"发布成功"的那一刻）；
+- DSH 启动约 15 秒后巡检一次——关机期间发布的那些版本，只有这一次能补上；
+- 幂等键是 `(仓库, tag)`，落在 `<DSH_HOME>\dsh-plugin-cicd\bilibili-announcements.json` 里。**同一个版本永远只发一条**；这份记录读不出来时**什么也不发**（否则会把已经发过的评论再刷一遍），面板会把原因写在最上面。
+
+绑定视频时会写一条**基线**：绑定那一刻已经公开的版本不算"这次更新"。所以把视频接上来不会追发历史版本，只有之后的新版本会播报。
+
+### 凭据：为什么必须是"网页登录"
+
+发评论走的是 B 站 **Web** 接口，所以凭据必须是网页会话。这里踩过一回，记在文档里免得再踩：`biliup login` 写下的 `cookies.json` 是 **BiliTV 登录**（`platform: BiliTV`）——它能投稿（APP 接口），但所有 Web 会员接口一律回 `-101 账号未登录`。所以本插件**不假设"文件里有 SESSDATA 就能用"**，而是拿凭据去问一次账号接口，并把答案写在面板上；认不出来时给出的原话是"这份凭据是 BiliTV 登录（APP/TV）……"，不是"你没登录"。
+
+凭据有两种给法，面板里都能做，不需要终端：
+
+1. **【登录 B 站】**：走 passport 的网页二维码接口，生成一个链接——用手机 B 站扫，或者在你已经登录 B 站的浏览器里打开确认。面板轮询到确认后把 Cookie 存进插件自己的文件。
+2. **粘贴一次**：浏览器 F12 → Application → Cookies → `bilibili.com`，把 `SESSDATA` 与 `bili_jct`（即 csrf）复制进来。B 站**当场接受才写入**——存一份已经回 `-101` 的凭据，只会让面板显示一个假的"已登录"。
+
+两者都落在 `<DSH_HOME>\dsh-plugin-cicd\bilibili-cookies.json`（`bilibiliCookieFile` 可以指向别处，比如 biliup 那份，作为**兜底**读取；面板自己写的永远优先）。插件不回显这个文件的内容，【退出 B 站登录】也只删自己写的这一份——外部那份属于别的工具，不动。
+
+### 评论内容
+
+默认模板是 `【更新 {tag}】{summary}`：`{summary}` 取 Release 标题；标题就是版本号时改取 Release 正文第一段（去掉 Markdown、去掉 GitHub 自动生成的 "What's Changed / Full Changelog" 和 `by @someone in https://…` 尾巴）。可用占位符：`{tag}` `{version}` `{label}` `{repo}` `{title}` `{summary}` `{url}` `{date}`；不认识的占位符**留在原地并报出来**，不会被悄悄删掉。
+
+默认模板**不带链接**：带外链的评论更容易被 B 站过滤，而被过滤和发成功在这边看起来一模一样。想要链接就把 `{url}` 写进 `bilibiliTemplate`。
+
+发之前**一定先预览**：面板上点【发更新评论】会先问 Host "这条会写成什么"（`dryRun`），把即将发送的原文和 Host 的判决一起显示出来，确认后才真的发。预览由 Host 组装，不是浏览器——否则会出现"看到的是一句、发出去的是另一句"。
+
+### 失败怎么处理
+
+B 站的拒绝会被归类，而不是原样抛给用户：`-101` 未登录、`-400` 被拒、`-403` 无权限、`-412` 风控拦截、`-509` 频率限制、`12061` 内容被过滤……每一类给的是下一步做法。失败会记进播报记录；同一个版本失败 3 次后就停下等人工判断——风控拦下来的东西，连续重试只会更糟。
+
 ## 配置：用脚本，不要手改 YAML
 
 包本身**不带仓库列表**——哪些仓库被监视是部署状态，不是包状态；把某个人的私有仓库名打进公开包，每个安装者都得先去拆它。
@@ -265,6 +301,14 @@ npm 这一侧是同一条原则的两个面：**包管理器**复用 Host 自己
 | `POST /api/dsh-cicd/npm-status` | 无参数（`{force:true}` 绕缓存）：`whoami` 的结果 + 每个包在源上的状态。**按需拉取，不参与 30 秒轮询**——每个仓库一次 HTTPS 加一次 `whoami` |
 | `POST /api/dsh-cicd/npm-login` | `{token}`：把 token 合并进用户级 `.npmrc` 再用 `whoami` 验证。token 不回显 |
 | `POST /api/dsh-cicd/npm-publish` | `{repo, otp?}`：用 Host 自己的 pnpm 发布当前版本。`otp` 是 2FA 一次性密码（6–8 位） |
+| `POST /api/dsh-cicd/bilibili-status` | 无参数（`{force:true}` 绕缓存）：凭据状态 + 每个仓库的绑定/已播报/失败 + 播报记录文件。**不碰 GitHub** |
+| `POST /api/dsh-cicd/bilibili-login-start` | 无参数：生成 B 站网页登录二维码，返回 `{ url, key, expiresAt }` |
+| `POST /api/dsh-cicd/bilibili-login-poll` | 无参数：问一次是否已确认。`state` ∈ `waiting` / `scanned` / `succeeded` / `expired`；成功后 Cookie 落盘 |
+| `POST /api/dsh-cicd/bilibili-login-cancel` | 无参数：放弃这次登录 |
+| `POST /api/dsh-cicd/bilibili-credential` | `{cookie}` 或 `{sessdata, bili_jct}`：验证通过才写入插件自己的凭据文件 |
+| `POST /api/dsh-cicd/bilibili-logout` | 无参数：删掉插件自己写的那份凭据（不动 `bilibiliCookieFile` 指定的外部文件） |
+| `POST /api/dsh-cicd/bilibili-bind` | `{repo, bvid, auto?}`：绑定/解绑视频；绑定会写一条基线，`bvid: ''` 即解绑（播报记录保留） |
+| `POST /api/dsh-cicd/bilibili-announce` | `{repo, tag?, text?, force?, dryRun?}`：组装（`dryRun`）或发送这一条更新评论。`tag` 缺省 = 最新的**已公开** Release |
 
 一律返回 `{ ok: true, value }` 或 `{ ok: false, code, message }`。
 

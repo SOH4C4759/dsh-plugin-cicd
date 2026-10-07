@@ -25,6 +25,18 @@
  *   /api/dsh-cicd/update           install this profile's copy from the release's tgz
  *   /api/dsh-cicd/restart          hand a restart to dsh-plugin-restart, if it is mounted
  *
+ * And the third channel, which is not a package at all: the update note under the
+ * video that introduces the plugin.
+ *
+ *   /api/dsh-cicd/bilibili-status       credential, bindings, and what is pending
+ *   /api/dsh-cicd/bilibili-login-start  begin the Bilibili web sign-in (QR / browser)
+ *   /api/dsh-cicd/bilibili-login-poll   ask once whether it was confirmed
+ *   /api/dsh-cicd/bilibili-login-cancel give up on the sign-in
+ *   /api/dsh-cicd/bilibili-credential   store a pasted SESSDATA + bili_jct
+ *   /api/dsh-cicd/bilibili-logout       forget the credential this plugin stored
+ *   /api/dsh-cicd/bilibili-bind         bind a repository to a video's comments
+ *   /api/dsh-cicd/bilibili-announce     post (or compose) one update comment
+ *
  * The release dispatch carries a preflight, and that is not a convenience. Every
  * repository in this set releases from `package.json`'s version, and its release
  * workflow refuses to reuse a version that already belongs to another commit
@@ -41,7 +53,7 @@
  */
 
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { lookup } from 'node:dns/promises'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -49,11 +61,26 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import {
   isValidRepoName,
+  normalizeBinding,
   normalizeEntry,
   parseConfig,
   readConfig,
   writeConfig,
 } from './lib/config-store.mjs'
+import {
+  announcementVerdict,
+  composeComment,
+  cookieHeader,
+  createBilibiliClient,
+  credentialVerdict,
+  emptyLedger,
+  findLedgerEntry,
+  latestBaseline,
+  newestPublishedRelease,
+  parseCookieJar,
+  parseLedger,
+  recordLedgerEntry,
+} from './lib/bilibili.mjs'
 
 /** Plugin name shown in loader logs. */
 export const name = 'dsh-plugin-cicd'
@@ -89,6 +116,34 @@ const RESTART_FORWARD_TIMEOUT_MS = 15_000
 
 /** Where a release tarball is downloaded to, beside the managed config file. */
 const DOWNLOAD_DIR_NAME = 'downloads'
+
+/**
+ * The two files the Bilibili feature owns, both beside `repos.json`.
+ *
+ * The credential is stored here rather than in the row config because it is a
+ * live session, not a setting: it expires, it gets replaced, and it must never
+ * be echoed back to the panel. The ledger is the opposite — it is the record of
+ * what has already been said in public, and losing it re-posts every comment.
+ */
+const BILIBILI_CREDENTIAL_FILE_NAME = 'bilibili-cookies.json'
+const BILIBILI_LEDGER_FILE_NAME = 'bilibili-announcements.json'
+
+/** How often the Host looks for a newly published release, and the ceiling on that. */
+const DEFAULT_BILIBILI_WATCH_SECONDS = 90
+const MAX_BILIBILI_WATCH_SECONDS = 3600
+
+/** How long a credential/video answer is reused before Bilibili is asked again. */
+const DEFAULT_BILIBILI_VERIFY_TTL_MS = 300_000
+const MAX_BILIBILI_VERIFY_TTL_MS = 3_600_000
+
+/** A Bilibili sign-in QR code is valid for about three minutes. */
+const BILIBILI_LOGIN_TTL_MS = 180_000
+
+/** How many failed attempts at one release before the sweep stops retrying. */
+const BILIBILI_MAX_ATTEMPTS = 3
+
+/** How many ledger entries are kept; older ones are the ones nobody reads. */
+const BILIBILI_MAX_LEDGER_ENTRIES = 500
 
 /** The registry this console publishes to, unless the row config names another. */
 const DEFAULT_NPM_REGISTRY = 'https://registry.npmjs.org/'
@@ -127,12 +182,18 @@ const NPM_STATUS_TTL_MS = 60_000
  * 5: `npm-status`, `npm-login` and `npm-publish`. A 4.x host has no `npm-*` route at
  * all, so a 5.x client's npm button would read a 401 as "the registry rejected me".
  *
+ * 6: the `bilibili-*` family. Same trap, more of it: a 5.x host mounts none of
+ * those routes, and this feature's failures are the kind that get misread — a 401
+ * from `bilibili-credential` looks like "Bilibili refused the cookie" and a 401
+ * from `bilibili-announce` looks like "not signed in", while both really mean the
+ * running Host is older than the page.
+ *
  * 4: `update` and `restart`, and the `install` block on every overview row. A 3.x
  * client renders rows without it, so the two halves would still agree on the old
  * surface — but the new buttons post to routes a 3.x host does not mount, which is
  * exactly the 401-reads-as-a-credential-problem this number exists to prevent.
  */
-const PROTOCOL = 5
+const PROTOCOL = 6
 
 /** The managed repository list, written by `scripts/configure.mjs`. */
 const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
@@ -387,6 +448,31 @@ export function resolveConfig(raw) {
      * hard-coded the first would be wrong on the second without saying so.
      */
     npmRegistry: normalizeRegistry(raw?.npmRegistry),
+    /**
+     * Bilibili update notes: when a repository's release goes public, say so under
+     * the video that introduces it.
+     *
+     * `bilibiliEnabled` and `bilibiliAuto` are separate switches on purpose. Turning
+     * the feature off must silence the sweep; turning `auto` off must keep the panel's
+     * manual button working. One boolean could not express both.
+     */
+    bilibiliEnabled: raw?.bilibiliEnabled !== false,
+    bilibiliAuto: raw?.bilibiliAuto !== false,
+    bilibiliWatchSeconds: clampNumber(raw?.bilibiliWatchSeconds, 0, MAX_BILIBILI_WATCH_SECONDS, DEFAULT_BILIBILI_WATCH_SECONDS),
+    bilibiliTemplate: typeof raw?.bilibiliTemplate === 'string' ? raw.bilibiliTemplate : '',
+    /**
+     * An external credential file — biliup's `cookies.json` is the one this machine
+     * has. Read as a FALLBACK: what the panel's own sign-in wrote always wins, so a
+     * configured path can never shadow a credential the user just created.
+     */
+    bilibiliCookieFile: text(raw?.bilibiliCookieFile),
+    bilibiliVerifyTtlMs: clampNumber(raw?.bilibiliVerifyTtlMs, 0, MAX_BILIBILI_VERIFY_TTL_MS, DEFAULT_BILIBILI_VERIFY_TTL_MS),
+    /**
+     * A `fetch` the Bilibili transport should use. Not a setting: it exists so the
+     * route tests can drive the whole announce path — compose, post, ledger — against
+     * a fake instead of against a real account.
+     */
+    bilibiliFetch: typeof raw?.bilibiliFetch === 'function' ? raw.bilibiliFetch : null,
   }
 }
 
@@ -2086,6 +2172,13 @@ export function apply(ctx, rawConfig) {
           pollSeconds: current.pollSeconds,
           overviewTtlMs: current.overviewTtlMs,
           projectsRoot: current.projectsRoot,
+          bilibili: {
+            enabled: current.bilibiliEnabled,
+            auto: current.bilibiliAuto,
+            watchSeconds: current.bilibiliWatchSeconds,
+            template: current.bilibiliTemplate,
+            cookieFile: current.bilibiliCookieFile,
+          },
         },
         auth: authSnapshot(),
         /**
@@ -2342,6 +2435,10 @@ export function apply(ctx, rawConfig) {
       writeJson(res, 502, { ok: false, code: 'gh-failed', message: result.message })
       return
     }
+    /* A published release is exactly the moment an update note becomes true, so
+       the sweep is asked now rather than at the next tick. It is not awaited: the
+       comment is Bilibili's business, and this answer is GitHub's. */
+    if (action === 'publish') void sweepBilibili('release-published')
     writeJson(res, 200, { ok: true, value: { repo: target.entry.repo, tag, action, note: firstLine(result.stdout) || null } })
   }
 
@@ -3367,6 +3464,834 @@ export function apply(ctx, rawConfig) {
     writeJson(res, 200, { ok: true, value: { repo, registered: outcome.count, file: current.configFile } })
   }
 
+  /* ------------------------------------------- Bilibili update notes -- */
+
+  /*
+   * The third channel, and the only one that is not a package: the comment under
+   * the video that introduces the plugin.
+   *
+   * The shape of the feature follows from two facts that were measured, not
+   * assumed, and both of them are the reason this is not simply "POST a comment
+   * when the release workflow succeeds":
+   *
+   *   - A comment is a WEB API, so the credential has to be a web session. The
+   *     `cookies.json` biliup writes here is a `BiliTV` login: alive, and refused
+   *     by every web member endpoint with `-101`. So the credential is never
+   *     trusted because a file exists — it is asked, and the answer is shown.
+   *   - A release workflow creates a DRAFT. A draft is invisible to everybody but
+   *     the author, so announcing it would post "this is out" about something
+   *     nobody can download. Only a published release counts, and the console's own
+   *     【公开草稿】 button is what makes one.
+   *
+   * Everything here is idempotent by `(repo, tag)`: the ledger is written before
+   * the panel is told anything, a ledger that cannot be read blocks the post
+   * instead of duplicating it, and binding a video seeds a baseline so the version
+   * that was already public when it was bound is never announced.
+   */
+
+  /** The directory the plugin owns: wherever the managed repository list lives. */
+  const stateDirectory = () => dirname(resolveConfigFilePath(config))
+
+  const credentialPath = () => join(stateDirectory(), BILIBILI_CREDENTIAL_FILE_NAME)
+  const ledgerPath = () => join(stateDirectory(), BILIBILI_LEDGER_FILE_NAME)
+
+  /** Write JSON through a temporary file, keeping the previous revision beside it. */
+  const writeJsonAtomic = (file, value) => {
+    mkdirSync(dirname(file), { recursive: true })
+    if (existsSync(file)) {
+      try {
+        writeFileSync(`${file}.bak`, readFileSync(file))
+      } catch {
+        /* a missing backup must not block the write */
+      }
+    }
+    const temporary = `${file}.tmp`
+    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    renameSync(temporary, file)
+  }
+
+  /**
+   * The credential this request would use, and where it came from.
+   *
+   * The file the panel's sign-in wrote always wins over a configured external
+   * path: someone who just completed a sign-in in this panel means it, and a
+   * path left in the patch from an earlier experiment must not shadow it.
+   */
+  const readCredential = () => {
+    const current = live()
+    const ownPath = credentialPath()
+    const configuredPath = current.bilibiliCookieFile
+    const ownExists = existsSync(ownPath)
+    const path = ownExists ? ownPath : (configuredPath !== '' && existsSync(configuredPath) ? configuredPath : '')
+    const source = ownExists ? 'plugin' : 'configured'
+    if (path === '') {
+      return {
+        jar: {
+          ok: false,
+          /* Not "unreadable": there is simply nothing configured yet, which is where
+             every install starts and is a setup step rather than a fault. */
+          absent: true,
+          cookies: {},
+          sessdata: '',
+          csrf: '',
+          uid: '',
+          platform: '',
+          expiresAt: null,
+          message: '还没有 B 站凭据：用面板里的【登录 B 站】，或粘贴浏览器里的 SESSDATA + bili_jct。',
+        },
+        source: 'none',
+        path: '',
+        ownPath,
+        configuredPath,
+      }
+    }
+    let raw = ''
+    try {
+      raw = readFileSync(path, 'utf8')
+    } catch (error) {
+      return {
+        jar: {
+          ok: false,
+          cookies: {},
+          sessdata: '',
+          csrf: '',
+          uid: '',
+          platform: '',
+          expiresAt: null,
+          message: `读不到 ${path}：${String(error?.message ?? error)}`,
+        },
+        source,
+        path,
+        ownPath,
+        configuredPath,
+      }
+    }
+    return { jar: parseCookieJar(raw), source, path, ownPath, configuredPath }
+  }
+
+  /** The Bilibili transport, with the test seam the route tests drive. */
+  const bilibiliClient = () => createBilibiliClient({
+    fetchImpl: typeof config.bilibiliFetch === 'function' ? config.bilibiliFetch : globalThis.fetch,
+    timeoutMs: Math.min(live().requestTimeoutMs, 20_000),
+  })
+
+  /** The last account answer, so a panel that polls does not poll Bilibili. */
+  let credentialCache = null
+
+  /** BV id to resolved video, reused for the same reason. */
+  const videoCache = new Map()
+
+  /**
+   * Ask Bilibili who this credential belongs to, reusing a recent answer.
+   *
+   * The account endpoint is the whole point: it is the one call that separates
+   * "there is a SESSDATA line in a file" from "this is a web session that may
+   * comment". A `-101` is an answer, not an error, and it is reported with the
+   * platform it came from.
+   */
+  const verifyCredential = async ({ force = false } = {}) => {
+    const current = live()
+    const found = readCredential()
+    if (found.jar.ok !== true) return { account: null, credential: found }
+    const fresh = credentialCache !== null
+      && credentialCache.path === found.path
+      && Date.now() - credentialCache.at < current.bilibiliVerifyTtlMs
+    if (fresh && force !== true) return { account: credentialCache.account, credential: found }
+    const account = await bilibiliClient().readAccount(cookieHeader(found.jar.cookies))
+    credentialCache = { at: Date.now(), path: found.path, account }
+    return { account, credential: found }
+  }
+
+  /** Resolve one bound video to its `aid`, reusing a recent answer. */
+  const resolveVideoCached = async (bvid, { force = false } = {}) => {
+    const current = live()
+    const found = readCredential()
+    const key = `${bvid}|${found.path}`
+    const cached = videoCache.get(key)
+    if (force !== true && cached !== undefined && Date.now() - cached.at < current.bilibiliVerifyTtlMs) return cached.value
+    const value = await bilibiliClient().resolveVideo(cookieHeader(found.jar.cookies), bvid)
+    videoCache.set(key, { at: Date.now(), value })
+    return value
+  }
+
+  /**
+   * The announcement ledger.
+   *
+   * An unreadable file is reported, never replaced. Treating it as empty is the
+   * one failure that would be worse than not posting at all: every comment this
+   * plugin has ever written would be written again on the next sweep.
+   */
+  const readLedgerFile = () => {
+    const file = ledgerPath()
+    if (!existsSync(file)) return { ledger: emptyLedger(), problem: null, file }
+    let raw = ''
+    try {
+      raw = readFileSync(file, 'utf8')
+    } catch (error) {
+      return { ledger: emptyLedger(), problem: `读不到 ${file}：${String(error?.message ?? error)}`, file }
+    }
+    const parsed = parseLedger(raw)
+    return parsed.ok === true
+      ? { ledger: parsed.ledger, problem: null, file }
+      : { ledger: emptyLedger(), problem: `${file}：${parsed.message}`, file }
+  }
+
+  /** Append one ledger entry, bounded in size. */
+  const appendLedger = (entry) => {
+    const read = readLedgerFile()
+    const next = recordLedgerEntry(read.ledger, entry, { maxEntries: BILIBILI_MAX_LEDGER_ENTRIES })
+    try {
+      writeJsonAtomic(read.file, next)
+      return { ok: true, file: read.file }
+    } catch (error) {
+      return { ok: false, message: `写不进 ${read.file}：${String(error?.message ?? error)}` }
+    }
+  }
+
+  /** The comment one release would produce, in the configured template. */
+  const composeForEntry = (current, entry, release) => composeComment({
+    label: entry.label !== '' ? entry.label : entry.repo,
+    repo: entry.repo,
+    tag: typeof release?.tag === 'string' ? release.tag : '',
+    release,
+    template: current.bilibiliTemplate,
+    date: new Date().toISOString().slice(0, 10),
+  })
+
+  /**
+   * Post one release's update note, and record what happened either way.
+   *
+   * The order is deliberate: credential, then the video, then the ledger write,
+   * then — and only then — the answer the panel shows. A comment that exists on
+   * Bilibili but not in the ledger is the one state this feature cannot recover
+   * from, so the ledger is the record, not a cache of one.
+   */
+  const announceEntry = async ({ current, entry, release, text = '', trigger = 'auto' }) => {
+    const binding = entry.bilibili
+    if (binding === null || binding === undefined) {
+      return { ok: false, code: 'unbound', message: '这个仓库还没有绑定 B 站视频。', value: { repo: entry.repo } }
+    }
+    const read = readLedgerFile()
+    if (read.problem !== null) {
+      return {
+        ok: false,
+        code: 'ledger-unreadable',
+        message: `播报记录读不出来，为避免重复刷评论，这次没有发送：${read.problem}`,
+        value: { repo: entry.repo, ledger: read.file },
+      }
+    }
+    const { account, credential } = await verifyCredential()
+    const verdict = credentialVerdict({ jar: credential.jar, account })
+    if (verdict.state !== 'ready') {
+      return { ok: false, code: `credential-${verdict.state}`, message: verdict.message, value: { repo: entry.repo, path: credential.path } }
+    }
+    const video = await resolveVideoCached(binding.bvid, { force: true })
+    if (video.ok !== true || video.aid === null) {
+      return {
+        ok: false,
+        code: 'video-unreadable',
+        message: `读不到视频 ${binding.bvid}：${video.message === '' ? 'B 站没有回答' : video.message}`,
+        value: { repo: entry.repo, bvid: binding.bvid },
+      }
+    }
+    const composed = composeForEntry(current, entry, release)
+    const message = (text !== '' ? text : composed.text).trim()
+    if (message === '') {
+      return { ok: false, code: 'empty-comment', message: '评论内容是空的，没有发送。', value: { repo: entry.repo, tag: release.tag } }
+    }
+
+    const client = bilibiliClient()
+    /*
+     * A device id is what a browser sends, and its absence is one of the things
+     * that earns a `-412`. Best effort on purpose: a failed fingerprint call is
+     * not a reason to hold back a comment that is otherwise ready.
+     */
+    const fingerprint = await client.fingerPrint().catch(() => ({ buvid3: '', buvid4: '' }))
+    const cookies = { ...credential.jar.cookies }
+    if (fingerprint.buvid3 !== '' && cookies.buvid3 === undefined) cookies.buvid3 = fingerprint.buvid3
+
+    const posted = await client.postComment({
+      cookie: cookieHeader(cookies),
+      csrf: credential.jar.csrf,
+      aid: video.aid,
+      bvid: binding.bvid,
+      message,
+    })
+    const previous = findLedgerEntry(read.ledger, entry.repo, release.tag)
+    const attempts = (Number.isFinite(previous?.attempts) ? Number(previous.attempts) : 0) + (posted.ok === true ? 0 : 1)
+    const record = {
+      repo: entry.repo,
+      tag: release.tag,
+      bvid: binding.bvid,
+      at: new Date().toISOString(),
+      state: posted.ok === true ? 'announced' : 'failed',
+      trigger,
+      attempts,
+      text: message,
+      rpid: posted.ok === true ? posted.rpid : null,
+      code: posted.code,
+      message: posted.message,
+      failure: posted.ok === true ? null : posted.failure.kind,
+      url: posted.ok === true && posted.rpid !== null ? `https://www.bilibili.com/video/${binding.bvid}/#reply${posted.rpid}` : null,
+    }
+    const stored = appendLedger(record)
+    if (posted.ok !== true) {
+      return {
+        ok: false,
+        code: `reply-${posted.failure.kind}`,
+        message: `${posted.failure.advice}（B 站原话：${posted.message === '' ? String(posted.code) : posted.message}）`,
+        value: { repo: entry.repo, tag: release.tag, bvid: binding.bvid, attempts, ledgerWritten: stored.ok === true },
+      }
+    }
+    return {
+      ok: true,
+      value: {
+        repo: entry.repo,
+        tag: release.tag,
+        bvid: binding.bvid,
+        rpid: posted.rpid,
+        url: record.url,
+        text: message,
+        account: account?.uname ?? '',
+        video: video.title,
+        trigger,
+      },
+    }
+  }
+
+  /**
+   * Look for a release that has not been announced yet, and announce it.
+   *
+   * This is the half that makes the feature "automatic": a release published from
+   * the console, from another machine, or by hand on GitHub's website all arrive
+   * here, because what is watched is the release list and not the button that was
+   * pressed. The credential is checked once for the whole sweep — a broken
+   * credential is not a per-repository failure, and burning the retry budget of
+   * every repository on it would hide the real reason.
+   */
+  let sweepRunning = false
+  let lastSweep = null
+
+  const sweepBilibili = async (reason) => {
+    const current = live()
+    if (!current.enabled || !current.bilibiliEnabled || !current.bilibiliAuto) return
+    if (sweepRunning) return
+    const bound = current.repos.filter((entry) => entry.bilibili !== null && entry.bilibili.bvid !== '' && entry.bilibili.auto !== false)
+    if (bound.length === 0) return
+    sweepRunning = true
+    const results = []
+    try {
+      const { account, credential } = await verifyCredential()
+      const state = credentialVerdict({ jar: credential.jar, account })
+      if (state.state !== 'ready') {
+        results.push({ repo: '', tag: null, state: `credential-${state.state}`, message: state.message })
+        return
+      }
+      for (const entry of bound) {
+        const slug = resolveSlug(current.owner, entry.repo)
+        if (slug === null) {
+          results.push({ repo: entry.repo, tag: null, state: 'no-slug', message: 'set `owner` or write the entry as "owner/repo"' })
+          continue
+        }
+        const releasesResult = await ghJson(ghPath, ['api', `repos/${slug}/releases?per_page=10`], current.requestTimeoutMs)
+        if (!releasesResult.ok) {
+          results.push({ repo: entry.repo, tag: null, state: 'gh-failed', message: releasesResult.message })
+          continue
+        }
+        const releases = (Array.isArray(releasesResult.value) ? releasesResult.value : [])
+          .map(normalizeRelease)
+          .filter((release) => release !== null)
+        const release = newestPublishedRelease(releases)
+        const read = readLedgerFile()
+        const verdict = announcementVerdict({
+          binding: { repo: entry.repo, bvid: entry.bilibili.bvid },
+          release,
+          ledger: read.ledger,
+        })
+        if (verdict.state !== 'ready') {
+          results.push({ repo: entry.repo, tag: release?.tag ?? null, state: verdict.state, message: verdict.message })
+          continue
+        }
+        const outcome = await announceEntry({ current, entry, release, trigger: 'auto' })
+        results.push({
+          repo: entry.repo,
+          tag: release.tag,
+          state: outcome.ok === true ? 'announced' : 'failed',
+          message: outcome.ok === true ? '' : outcome.message,
+          url: outcome.ok === true ? outcome.value.url : null,
+        })
+      }
+    } catch (error) {
+      results.push({ repo: '', tag: null, state: 'sweep-failed', message: String(error?.message ?? error) })
+    } finally {
+      sweepRunning = false
+      lastSweep = { at: new Date().toISOString(), reason, results }
+    }
+  }
+
+  /* ------------------------------------------------------ sign-in, panel -- */
+
+  /** The one in-flight Bilibili sign-in, if any. */
+  let biliLogin = null
+
+  const loginSnapshot = () => biliLogin === null
+    ? { state: 'idle', url: '', startedAt: null, expiresAt: null, scanned: false, message: '' }
+    : {
+        state: biliLogin.state,
+        url: biliLogin.url,
+        startedAt: biliLogin.startedAt,
+        expiresAt: biliLogin.expiresAt,
+        scanned: biliLogin.scanned === true,
+        message: biliLogin.message,
+      }
+
+  /** Store a credential this plugin owns, in its own file. */
+  const storeCredential = (cookies, source, account) => {
+    writeJsonAtomic(credentialPath(), {
+      version: 1,
+      source,
+      savedAt: new Date().toISOString(),
+      account: account ?? null,
+      cookies,
+    })
+    credentialCache = null
+  }
+
+  /* --------------------------------------------------------------- routes -- */
+
+  /**
+   * The credential, the bindings, and what has already been said.
+   *
+   * Deliberately free of GitHub calls: the panel asks for this on open and on
+   * refresh, and "which version is next" is answered by the overview it already
+   * has. The two Bilibili calls it may make are cached (`bilibiliVerifyTtlMs`),
+   * so a panel left open is not a poll of Bilibili.
+   */
+  const bilibiliStatusHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const force = body?.force === true
+    const found = readCredential()
+    const account = found.jar.ok === true ? (await verifyCredential({ force })).account : null
+    const verdict = credentialVerdict({ jar: found.jar, account })
+    const read = readLedgerFile()
+
+    const repos = []
+    for (const entry of current.repos) {
+      const binding = entry.bilibili
+      const mine = read.ledger.entries.filter((candidate) => candidate.repo === entry.repo)
+      const baseline = latestBaseline(read.ledger, entry.repo)
+      const base = {
+        repo: entry.repo,
+        label: entry.label !== '' ? entry.label : entry.repo,
+        binding: binding === null ? null : { bvid: binding.bvid, auto: binding.auto !== false },
+        announced: mine
+          .filter((candidate) => candidate.state === 'announced')
+          .map((candidate) => ({ tag: candidate.tag, at: candidate.at, url: candidate.url ?? null, rpid: candidate.rpid ?? null, text: candidate.text ?? '', trigger: candidate.trigger ?? '' })),
+        failures: mine
+          .filter((candidate) => candidate.state === 'failed')
+          .map((candidate) => ({ tag: candidate.tag, at: candidate.at, attempts: candidate.attempts ?? 0, failure: candidate.failure ?? null, message: candidate.message ?? '' })),
+        baseline: baseline === null ? null : { tag: baseline.tag ?? null, at: baseline.at ?? null },
+        video: null,
+        commentUrl: binding === null ? null : `https://www.bilibili.com/video/${binding.bvid}/`,
+      }
+      if (binding !== null) {
+        const video = await resolveVideoCached(binding.bvid, { force })
+        base.video = video.ok === true
+          ? { ok: true, aid: video.aid, title: video.title, owner: video.owner }
+          : { ok: false, code: video.code, message: video.message }
+      }
+      repos.push(base)
+    }
+
+    writeJson(res, 200, {
+      ok: true,
+      value: {
+        enabled: current.bilibiliEnabled,
+        auto: current.bilibiliAuto,
+        watchSeconds: current.bilibiliWatchSeconds,
+        template: current.bilibiliTemplate,
+        credential: {
+          ...verdict,
+          source: found.source,
+          path: found.path,
+          ownPath: found.ownPath,
+          configuredPath: found.configuredPath,
+          platform: found.jar.platform,
+          expiresAt: found.jar.expiresAt,
+          hasSession: found.jar.sessdata !== '',
+          hasCsrf: found.jar.csrf !== '',
+        },
+        login: loginSnapshot(),
+        ledger: { file: read.file, problem: read.problem, entries: read.ledger.entries.length },
+        lastSweep,
+        repos,
+      },
+    })
+  }
+
+  const bilibiliLoginStartHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    const started = await bilibiliClient().startQrLogin()
+    if (started.ok !== true) {
+      writeJson(res, 502, { ok: false, code: 'login-start-failed', message: `B 站没有给出登录二维码：${started.message}` })
+      return
+    }
+    biliLogin = {
+      key: started.key,
+      url: started.url,
+      state: 'waiting',
+      message: '',
+      scanned: false,
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + BILIBILI_LOGIN_TTL_MS).toISOString(),
+    }
+    writeJson(res, 202, { ok: true, value: loginSnapshot() })
+  }
+
+  const bilibiliLoginPollHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    if (biliLogin === null) {
+      writeJson(res, 409, { ok: false, code: 'no-login', message: '没有正在进行的 B 站登录。' })
+      return
+    }
+    if (Date.now() > Date.parse(biliLogin.expiresAt)) {
+      biliLogin = null
+      writeJson(res, 200, { ok: true, value: { ...loginSnapshot(), state: 'expired', message: '二维码已过期，请重新开始。' } })
+      return
+    }
+    const polled = await bilibiliClient().pollQrLogin(biliLogin.key)
+    if (polled.ok === true && polled.state === 'waiting') {
+      writeJson(res, 200, { ok: true, value: loginSnapshot() })
+      return
+    }
+    if (polled.ok === true && polled.state === 'scanned') {
+      biliLogin.state = 'scanned'
+      biliLogin.scanned = true
+      writeJson(res, 200, { ok: true, value: loginSnapshot() })
+      return
+    }
+    if (polled.ok !== true || polled.state !== 'succeeded') {
+      biliLogin.state = 'failed'
+      biliLogin.message = polled.message
+      const value = loginSnapshot()
+      biliLogin = null
+      writeJson(res, 502, { ok: false, code: 'login-failed', message: polled.message === '' ? 'B 站登录没有完成。' : polled.message, value })
+      return
+    }
+    const jar = parseCookieJar({ cookies: polled.cookies })
+    if (jar.ok !== true || jar.sessdata === '' || jar.csrf === '') {
+      biliLogin = null
+      writeJson(res, 502, {
+        ok: false,
+        code: 'login-incomplete',
+        message: `B 站回了成功，但下发的 Cookie 里缺 ${jar.sessdata === '' ? 'SESSDATA' : 'bili_jct'}，请重新登录。`,
+        value: loginSnapshot(),
+      })
+      return
+    }
+    /*
+     * The QR flow is authoritative — Bilibili itself handed these cookies over —
+     * so the credential is stored even when the account read fails, and the
+     * failure is reported rather than turned into a refused sign-in.
+     */
+    const account = await bilibiliClient().readAccount(cookieHeader(jar.cookies))
+    let stored = { ok: true }
+    try {
+      storeCredential(jar.cookies, 'qr-login', account.ok === true ? { mid: account.mid, uname: account.uname } : null)
+    } catch (error) {
+      stored = { ok: false, message: String(error?.message ?? error) }
+    }
+    biliLogin = null
+    if (stored.ok !== true) {
+      writeJson(res, 502, { ok: false, code: 'write-failed', message: `登录成功但凭据没有落盘：${stored.message}` })
+      return
+    }
+    writeJson(res, 200, {
+      ok: true,
+      value: {
+        state: 'succeeded',
+        scanned: true,
+        url: '',
+        startedAt: null,
+        expiresAt: null,
+        message: '',
+        account: account.ok === true ? { mid: account.mid, uname: account.uname } : null,
+        accountProblem: account.ok === true ? null : account.message,
+        path: credentialPath(),
+      },
+    })
+  }
+
+  const bilibiliLoginCancelHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    biliLogin = null
+    writeJson(res, 200, { ok: true, value: loginSnapshot() })
+  }
+
+  /**
+   * Store a pasted credential.
+   *
+   * Refused unless Bilibili accepts it right now. Writing a jar that has already
+   * been answered with `-101` would leave the panel saying "已登录" about a
+   * credential that cannot post, which is worse than saying nothing.
+   */
+  const bilibiliCredentialHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const sessdata = text(body?.sessdata)
+    const csrf = text(body?.bili_jct)
+    const raw = sessdata !== '' || csrf !== ''
+      ? { SESSDATA: sessdata, bili_jct: csrf, DedeUserID: text(body?.dedeUserId) }
+      : text(body?.cookie)
+    const jar = parseCookieJar(raw)
+    if (jar.ok !== true || jar.sessdata === '' || jar.csrf === '') {
+      writeJson(res, 400, { ok: false, code: 'incomplete-credential', message: credentialVerdict({ jar }).message })
+      return
+    }
+    const account = await bilibiliClient().readAccount(cookieHeader(jar.cookies))
+    const verdict = credentialVerdict({ jar, account })
+    if (verdict.state !== 'ready') {
+      writeJson(res, 401, {
+        ok: false,
+        code: `credential-${verdict.state}`,
+        message: verdict.message,
+        value: { bilibiliCode: account.code, bilibiliMessage: account.message, platform: jar.platform },
+      })
+      return
+    }
+    try {
+      storeCredential(jar.cookies, 'paste', verdict.account)
+    } catch (error) {
+      writeJson(res, 502, { ok: false, code: 'write-failed', message: `凭据没有落盘：${String(error?.message ?? error)}` })
+      return
+    }
+    writeJson(res, 200, { ok: true, value: { account: verdict.account, path: credentialPath(), platform: jar.platform } })
+  }
+
+  /**
+   * Forget the credential this plugin stored.
+   *
+   * Only its own file is deleted. A configured external file belongs to whatever
+   * wrote it — biliup, in the case this machine has — and deleting it would break
+   * an unrelated tool. When a fallback takes over, the answer says so instead of
+   * reporting a sign-out that did not happen.
+   */
+  const bilibiliLogoutHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    const own = credentialPath()
+    let removed = false
+    if (existsSync(own)) {
+      try {
+        unlinkSync(own)
+        removed = true
+      } catch (error) {
+        writeJson(res, 502, { ok: false, code: 'delete-failed', message: `删不掉 ${own}：${String(error?.message ?? error)}` })
+        return
+      }
+    }
+    credentialCache = null
+    videoCache.clear()
+    const after = readCredential()
+    writeJson(res, 200, {
+      ok: true,
+      value: {
+        removed,
+        path: own,
+        stillAvailable: after.path === '' ? null : { source: after.source, path: after.path },
+      },
+    })
+  }
+
+  /**
+   * Bind a repository to the comment section of one video.
+   *
+   * Binding seeds a baseline: the version already public at that moment is
+   * marked as "not this update", so wiring a video up can never fire a comment
+   * about a release that went out months ago. Unbinding keeps the history —
+   * what was said in public is not erased by a configuration change.
+   */
+  const bilibiliBindHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const requested = typeof body?.bvid === 'string' ? body.bvid.trim() : ''
+    const normalized = requested === '' ? null : normalizeBinding({ bvid: requested, auto: body?.auto !== false })
+    if (requested !== '' && normalized === null) {
+      writeJson(res, 400, { ok: false, code: 'bad-bvid', message: `不像是 BV 号：${JSON.stringify(requested)}（形如 BV1RopP6FEJp）` })
+      return
+    }
+    const bvid = normalized?.bvid ?? ''
+    const auto = normalized?.auto !== false
+    const outcome = mutateConfig(current, (draft) => {
+      const index = draft.repos.findIndex((candidate) => candidate.repo === target.entry.repo)
+      if (index === -1) return { ok: false, message: `not registered: ${target.entry.repo}` }
+      const previous = draft.repos[index]
+      draft.repos[index] = {
+        repo: previous.repo,
+        ...(previous.localPath !== '' ? { localPath: previous.localPath } : {}),
+        ...(previous.label !== '' ? { label: previous.label } : {}),
+        ...(bvid === '' ? {} : { bilibili: { bvid, auto } }),
+      }
+      return { ok: true, owner: draft.owner, repos: draft.repos }
+    })
+    if (outcome.ok !== true) {
+      writeJson(res, 502, { ok: false, code: 'config-failed', message: outcome.message })
+      return
+    }
+    if (bvid === '') {
+      writeJson(res, 200, { ok: true, value: { repo: target.entry.repo, bvid: '', video: null, baseline: null, file: current.configFile } })
+      return
+    }
+
+    const video = await resolveVideoCached(bvid, { force: true })
+    const slug = resolveSlug(current.owner, target.entry.repo)
+    let baselineTag = null
+    let note = ''
+    if (slug === null) {
+      note = '这个仓库没有 owner，读不到 Release 列表，所以把绑定时刻之前发布的版本都视为已公开。'
+    } else {
+      const releasesResult = await ghJson(ghPath, ['api', `repos/${slug}/releases?per_page=10`], current.requestTimeoutMs)
+      if (releasesResult.ok) {
+        const releases = (Array.isArray(releasesResult.value) ? releasesResult.value : [])
+          .map(normalizeRelease)
+          .filter((release) => release !== null)
+        baselineTag = newestPublishedRelease(releases)?.tag ?? null
+      } else {
+        note = `读不到 Release 列表（${releasesResult.message}），所以把绑定时刻之前发布的版本都视为已公开。`
+      }
+    }
+    appendLedger({
+      repo: target.entry.repo,
+      tag: baselineTag,
+      bvid,
+      at: new Date().toISOString(),
+      state: 'baseline',
+      trigger: 'bind',
+      attempts: 0,
+      text: '',
+      rpid: null,
+      code: null,
+      message: '',
+      failure: null,
+      url: null,
+    })
+    cache = null
+    writeJson(res, 200, {
+      ok: true,
+      value: {
+        repo: target.entry.repo,
+        bvid,
+        auto,
+        video: video.ok === true ? { ok: true, title: video.title, owner: video.owner, aid: video.aid } : { ok: false, code: video.code, message: video.message },
+        baseline: baselineTag,
+        note,
+        file: current.configFile,
+      },
+    })
+  }
+
+  /**
+   * Compose (and, unless asked not to, post) one repository's update note.
+   *
+   * `dryRun` exists because posting is public and irreversible in the way that
+   * matters: the panel shows the exact sentence, and the sentence it shows is the
+   * sentence the Host would send — composed here, not by the browser, so a
+   * template change cannot be previewed one way and posted another.
+   */
+  const bilibiliAnnounceHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const binding = target.entry.bilibili
+    if (binding === null) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'unbound',
+        message: `${target.entry.repo} 还没有绑定 B 站视频。`,
+        value: { repo: target.entry.repo },
+      })
+      return
+    }
+    const slug = resolveSlug(current.owner, target.entry.repo)
+    if (slug === null) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: 'set `owner` in the config, or write the entry as "owner/repo"' })
+      return
+    }
+    const releasesResult = await ghJson(ghPath, ['api', `repos/${slug}/releases?per_page=10`], current.requestTimeoutMs)
+    if (!releasesResult.ok) {
+      writeJson(res, 502, { ok: false, code: 'gh-failed', message: releasesResult.message })
+      return
+    }
+    const releases = (Array.isArray(releasesResult.value) ? releasesResult.value : [])
+      .map(normalizeRelease)
+      .filter((release) => release !== null)
+    const wantedTag = text(body?.tag)
+    const release = wantedTag === ''
+      ? newestPublishedRelease(releases)
+      : releases.find((candidate) => candidate.tag === wantedTag) ?? null
+    const force = body?.force === true
+    const read = readLedgerFile()
+    const verdict = announcementVerdict({
+      binding: { repo: target.entry.repo, bvid: binding.bvid },
+      release,
+      ledger: read.ledger,
+      force,
+    })
+    const composed = release === null ? null : composeForEntry(current, target.entry, release)
+
+    if (body?.dryRun === true) {
+      writeJson(res, 200, {
+        ok: true,
+        value: {
+          repo: target.entry.repo,
+          bvid: binding.bvid,
+          tag: release?.tag ?? null,
+          state: verdict.state,
+          message: verdict.message,
+          text: composed?.text ?? '',
+          summary: composed?.summary ?? '',
+          unknown: composed?.unknown ?? [],
+          release: release === null ? null : { tag: release.tag, name: release.name, url: release.url, createdAt: release.createdAt },
+          ledgerProblem: read.problem,
+          attempts: verdict.attempts,
+        },
+      })
+      return
+    }
+    if (verdict.state !== 'ready') {
+      writeJson(res, 409, {
+        ok: false,
+        code: `announce-${verdict.state}`,
+        message: verdict.message,
+        value: { repo: target.entry.repo, tag: release?.tag ?? null, text: composed?.text ?? '', state: verdict.state },
+      })
+      return
+    }
+    const outcome = await announceEntry({ current, entry: target.entry, release, text: text(body?.text), trigger: 'manual' })
+    if (outcome.ok !== true) {
+      const status = outcome.code.startsWith('credential-') ? 401 : outcome.code === 'unbound' ? 409 : outcome.code === 'ledger-unreadable' ? 500 : 502
+      writeJson(res, status, { ok: false, code: outcome.code, message: outcome.message, value: outcome.value ?? null })
+      return
+    }
+    writeJson(res, 200, { ok: true, value: outcome.value })
+  }
+
   const routes = [
     [`${ROUTE_PREFIX}/status`, statusHandler],
     [`${ROUTE_PREFIX}/overview`, overviewHandler],
@@ -3394,6 +4319,18 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/repos-available`, reposAvailableHandler],
     [`${ROUTE_PREFIX}/config-add`, configAddHandler],
     [`${ROUTE_PREFIX}/config-remove`, configRemoveHandler],
+    // The third channel: an update note under the video that introduces the
+    // plugin. Credential first (the panel can sign in without a terminal), then
+    // the binding, then the comment — and the ledger behind all of it, so the
+    // same release is never announced twice.
+    [`${ROUTE_PREFIX}/bilibili-status`, bilibiliStatusHandler],
+    [`${ROUTE_PREFIX}/bilibili-login-start`, bilibiliLoginStartHandler],
+    [`${ROUTE_PREFIX}/bilibili-login-poll`, bilibiliLoginPollHandler],
+    [`${ROUTE_PREFIX}/bilibili-login-cancel`, bilibiliLoginCancelHandler],
+    [`${ROUTE_PREFIX}/bilibili-credential`, bilibiliCredentialHandler],
+    [`${ROUTE_PREFIX}/bilibili-logout`, bilibiliLogoutHandler],
+    [`${ROUTE_PREFIX}/bilibili-bind`, bilibiliBindHandler],
+    [`${ROUTE_PREFIX}/bilibili-announce`, bilibiliAnnounceHandler],
   ]
   // A sign-in child polls GitHub for up to ten minutes; it must not outlive the
   // plugin that owns it.
@@ -3403,6 +4340,42 @@ export function apply(ctx, rawConfig) {
     if (typeof ctx.effect === 'function') ctx.effect(() => dispose, `dsh-plugin-cicd: ${path}`)
   }
   const startup = live()
+  /*
+   * The sweep's triggers.
+   *
+   * The timer is what makes the feature work while nobody is looking, and it is
+   * configurable because it is not free: one `gh api` call per bound repository
+   * per tick, which is the same shape the panel already produces when it is open.
+   * Setting `bilibiliWatchSeconds: 0` leaves the manual button and the sweep that
+   * a publish triggers, and stops the clock.
+   */
+  if (startup.bilibiliWatchSeconds > 0) {
+    const timer = setInterval(() => {
+      void sweepBilibili('timer')
+    }, startup.bilibiliWatchSeconds * 1000)
+    if (typeof timer.unref === 'function') timer.unref()
+    if (typeof ctx.effect === 'function') ctx.effect(() => () => clearInterval(timer), 'dsh-plugin-cicd: bilibili sweep')
+    /*
+     * One sweep shortly after startup. The releases that matter most are the ones
+     * published while DSH was closed — a timer that only looks forward from the
+     * moment it starts would never see them.
+     */
+    const boot = setTimeout(() => {
+      void sweepBilibili('startup')
+    }, 15_000)
+    if (typeof boot.unref === 'function') boot.unref()
+    if (typeof ctx.effect === 'function') ctx.effect(() => () => clearTimeout(boot), 'dsh-plugin-cicd: bilibili startup sweep')
+  }
+  if (startup.bilibiliEnabled) {
+    const bound = startup.repos.filter((entry) => entry.bilibili !== null).length
+    ctx.logger?.info?.(
+      'dsh-plugin-cicd: bilibili notes %s (bound=%d, auto=%s, watch=%ds)',
+      bound === 0 ? 'configured but no video is bound' : 'armed',
+      bound,
+      startup.bilibiliAuto ? 'on' : 'off',
+      startup.bilibiliWatchSeconds,
+    )
+  }
   ctx.logger?.info?.(
     'dsh-plugin-cicd: routes mounted at %s (gh=%s, repos=%d from %s, owner=%s)',
     ROUTE_PREFIX,

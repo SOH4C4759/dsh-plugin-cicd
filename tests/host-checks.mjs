@@ -85,6 +85,24 @@ check('non-array repos yields an empty list', resolveConfig({ repos: 'nope' }).r
 check('null config survives', resolveConfig(null).repos.length === 0)
 check('repo cap enforced', resolveConfig({ repos: Array.from({ length: 100 }, (_, index) => `r${index}`) }).repos.length === 40)
 
+/* -- 2b. The Bilibili binding ----------------------------------------------
+   The binding decides which video's comment section a repository speaks to. A
+   malformed one has to become "no binding" rather than travel onward: the failure
+   mode of the other choice is a comment posted under somebody else's video. */
+check('a binding is kept', normalizeRepoEntry({ repo: 'x', bilibili: { bvid: 'BV1RopP6FEJp' } })?.bilibili?.bvid === 'BV1RopP6FEJp')
+check('a binding is automatic unless it says otherwise', normalizeRepoEntry({ repo: 'x', bilibili: { bvid: 'BV1RopP6FEJp' } })?.bilibili?.auto === true)
+check('a binding can be manual', normalizeRepoEntry({ repo: 'x', bilibili: { bvid: 'BV1RopP6FEJp', auto: false } })?.bilibili?.auto === false)
+check('a malformed BV id becomes no binding', normalizeRepoEntry({ repo: 'x', bilibili: { bvid: 'BV-nope' } })?.bilibili === null)
+check('a binding with no id becomes no binding', normalizeRepoEntry({ repo: 'x', bilibili: {} })?.bilibili === null)
+check('a repository with no binding says so', normalizeRepoEntry({ repo: 'x' })?.bilibili === null)
+check('the BV shorthand is accepted', normalizeRepoEntry({ repo: 'x', bilibili: { bv: 'BV1RopP6FEJp' } })?.bilibili?.bvid === 'BV1RopP6FEJp')
+check('bilibili notes are on by default', resolveConfig(undefined).bilibiliEnabled === true)
+check('the sweep interval is clamped', resolveConfig({ bilibiliWatchSeconds: 999_999 }).bilibiliWatchSeconds === 3600)
+check('the sweep can be switched off', resolveConfig({ bilibiliWatchSeconds: 0 }).bilibiliWatchSeconds === 0)
+check('an external credential file is remembered', resolveConfig({ bilibiliCookieFile: 'C:\\Users\\x\\cookies.json' }).bilibiliCookieFile === 'C:\\Users\\x\\cookies.json')
+check('no external credential file is the default', resolveConfig(undefined).bilibiliCookieFile === '')
+check('the template is kept verbatim', resolveConfig({ bilibiliTemplate: '【更新 {tag}】{summary}' }).bilibiliTemplate === '【更新 {tag}】{summary}')
+
 /* -- 3. Slug resolution ----------------------------------------------------- */
 check('owner prefixes a bare name', resolveSlug('SOH4C4759', 'dsh-plugin-restart') === 'SOH4C4759/dsh-plugin-restart')
 check('owner is ignored for owner/name', resolveSlug('someone', 'a/b') === 'a/b')

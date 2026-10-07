@@ -98,7 +98,8 @@ switch (command) {
   case 'list': {
     const lines = [`config file: ${file}`, `owner:       ${config.owner === '' ? '(unset)' : config.owner}`, `repositories (${config.repos.length}):`]
     for (const entry of config.repos) {
-      lines.push(`  - ${entry.repo}${entry.localPath === undefined ? '' : `  →  ${entry.localPath}`}${entry.label === undefined ? '' : `  [${entry.label}]`}`)
+      const bound = entry.bilibili?.bvid ? `  B站 ${entry.bilibili.bvid}${entry.bilibili.auto === false ? '（仅手动）' : ''}` : ''
+      lines.push(`  - ${entry.repo}${entry.localPath === undefined ? '' : `  →  ${entry.localPath}`}${entry.label === undefined ? '' : `  [${entry.label}]`}${bound}`)
     }
     if (config.repos.length === 0) lines.push('  (none — add one with: configure.mjs add <repo> --path <dir>)')
     lines.push('', 'The panel re-reads this file on every poll, so changes apply without a restart.')
@@ -129,7 +130,16 @@ switch (command) {
     const repo = checkRepoSlug(positional[1])
     const localPath = checkLocalPath(options.path)
     const existing = config.repos.findIndex((entry) => entry.repo === repo)
-    const entry = { repo, ...(localPath !== '' ? { localPath } : {}), ...(options.label !== '' ? { label: options.label } : {}) }
+    /* The Bilibili binding is not something this command knows about, so an
+       `add` that overwrote it would silently unbind a video — the failure being
+       invisible until a release note never appears. It is carried over. */
+    const binding = existing === -1 ? null : config.repos[existing].bilibili ?? null
+    const entry = {
+      repo,
+      ...(localPath !== '' ? { localPath } : {}),
+      ...(options.label !== '' ? { label: options.label } : {}),
+      ...(binding === null ? {} : { bilibili: binding }),
+    }
     if (existing === -1) config.repos.push(entry)
     else config.repos[existing] = entry
     writeConfig(file, config)
