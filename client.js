@@ -51,10 +51,17 @@ window.__ModuleLoader__.load({
      * be missing while the button that calls it is on screen. Comparing this
      * number turns that into one sentence instead of a bare HTTP status.
      */
-    const PROTOCOL = 3
+    const PROTOCOL = 4
     const STATUS_TIMEOUT_MS = 20_000
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
+    /**
+     * An update downloads a release tarball and then runs pnpm against the profile.
+     * Both are seconds of real work on a machine that is doing nothing else, and the
+     * first pnpm run after a store change is the slow one — so this action gets its
+     * own, longer bound instead of borrowing the 45 s the dispatch actions use.
+     */
+    const UPDATE_TIMEOUT_MS = 180_000
     const NOTICE_TTL_MS = 5_000
     /**
      * While an attempt is pending this polls `/auth-state` — and it is the only
@@ -80,6 +87,11 @@ window.__ModuleLoader__.load({
       'action.bumpRelease': '升版本并发布',
       'action.publishDraft': '公开草稿',
       'action.confirmPublish': '确认公开？',
+      'action.update': '更新到 {tag}',
+      'action.installRelease': '装 Release {tag}',
+      'action.confirmUpdate': '确认更新',
+      'action.restartNow': '立即重启 DSH',
+      'action.restartLater': '稍后',
       'action.open': '打开',
       'action.logs': '日志',
       'action.hideLogs': '收起日志',
@@ -104,6 +116,8 @@ window.__ModuleLoader__.load({
       'chip.unpublished': '未发布',
       'chip.draft': '草稿',
       'chip.versionTaken': '版本被占用',
+      'chip.update': '可更新 {tag}',
+      'chip.checkout': '本地检出',
       'chip.dirty': '未提交 {count}',
       'chip.ahead': '领先 {count}',
       'chip.behind': '落后 {count}',
@@ -159,6 +173,21 @@ window.__ModuleLoader__.load({
       'confirm.bumpRelease': '把 package.json 从 {from} 升到 {to}、提交并推送到 {branch}，然后触发发布？这会创建一个提交。',
       'confirm.publish': '公开发布 {tag}？发布后任何人可见，无法收回。',
       'confirm.cancel': '再想想',
+      'confirm.update': '把 {profile} profile 里的 {package}（现在指向 {spec}）换成 Release {tag} 的 tgz 并重装？这会改写该 profile 的依赖条目。',
+      'install.title': '安装',
+      'install.installed': '{package} · 已装 {version}',
+      'install.notInstalled': '{package} 不在 {profile} profile 的依赖里，所以没有"已装的那份"可以更新。',
+      'install.noRelease': '这个仓库还没有已发布的 Release（草稿不算），所以没有可以装的东西。',
+      'install.current': 'profile 里就是 Release {tag} 的包，已经是最新的。',
+      'install.checkout': 'profile 里这份指向本地检出（{spec}），跑的不是发布出去的那份。装 Release 会用发布包替换它；要回到开发状态再用 dsh plugin add link:<检出路径> 换回来。',
+      'install.ahead': 'profile 里是 v{installed}，比这个 Release（{tag}）新——装它等于用发布包退回到旧版本。',
+      'install.differs': 'profile 里是 {installed}，与 Release {tag} 不是同一号版本，无法比较先后。',
+      'state.updated': '{package} 已从 {from} 换成 {tag} 的发布包。新版本要重启 DSH 才会真正生效。',
+      'state.updatedSame': '{package} 已经指向 {tag} 这份发布包了：没有改动，也不需要重启。',
+      'state.updatedBuilds': '（注意：这次安装有 {count} 个构建脚本被拦住，没有执行。）',
+      'restart.ask': '{package} 已经更新到 {tag}，但要重启 DSH 才会用上它——现在重启？',
+      'restart.scheduled': '已安排重启：DSH 会在一两秒后关闭并自动重新打开。刷新页面不够，模块已经加载在运行中的进程里。',
+      'restart.unavailable': '重启不了：{reason}',
       'setup.needGh': '没有找到 gh CLI，发布台无法访问 GitHub。',
       'setup.needSignIn': '还没有登录 GitHub。登录后这里会列出你的仓库。',
       'setup.needScopes': '当前凭据缺少权限：{scopes}。',
@@ -209,6 +238,11 @@ window.__ModuleLoader__.load({
       'action.bumpRelease': 'Bump and release',
       'action.publishDraft': 'Publish',
       'action.confirmPublish': 'Publish?',
+      'action.update': 'Update to {tag}',
+      'action.installRelease': 'Install release {tag}',
+      'action.confirmUpdate': 'Update',
+      'action.restartNow': 'Restart DSH now',
+      'action.restartLater': 'Later',
       'action.open': 'Open',
       'action.logs': 'Logs',
       'action.hideLogs': 'Hide logs',
@@ -233,6 +267,8 @@ window.__ModuleLoader__.load({
       'chip.unpublished': 'Unreleased',
       'chip.draft': 'Draft',
       'chip.versionTaken': 'version taken',
+      'chip.update': 'update {tag}',
+      'chip.checkout': 'local checkout',
       'chip.dirty': '{count} uncommitted',
       'chip.ahead': '{count} ahead',
       'chip.behind': '{count} behind',
@@ -288,6 +324,21 @@ window.__ModuleLoader__.load({
       'confirm.bumpRelease': 'Bump package.json from {from} to {to}, commit it, push {branch}, then trigger the release? This creates a commit.',
       'confirm.publish': 'Publish {tag} publicly? Once published, anyone can see it.',
       'confirm.cancel': 'Not yet',
+      'confirm.update': 'Replace {package} in the {profile} profile (currently {spec}) with the tgz from release {tag} and reinstall? This rewrites that profile dependency.',
+      'install.title': 'Install',
+      'install.installed': '{package} · installed {version}',
+      'install.notInstalled': '{package} is not a dependency of the {profile} profile, so there is no installed copy to update.',
+      'install.noRelease': 'This repository has no published release yet (a draft does not count), so there is nothing to install from.',
+      'install.current': 'The profile already holds the package from release {tag}; it is current.',
+      'install.checkout': 'This copy points at a local checkout ({spec}), so it is not the code anyone downloaded. Installing the release replaces it; switch back with dsh plugin add link:<checkout path>.',
+      'install.ahead': 'The profile holds v{installed}, which is newer than this release ({tag}) — installing it would move backwards to the published copy.',
+      'install.differs': 'The profile holds {installed}, which is not the same version number as release {tag}, so the two cannot be ordered.',
+      'state.updated': '{package} was replaced with the release package {tag}. The new version takes effect only after DSH restarts.',
+      'state.updatedSame': '{package} already points at the {tag} release package: nothing changed, and no restart is needed.',
+      'state.updatedBuilds': '(Note: {count} build script(s) were blocked and did not run.)',
+      'restart.ask': '{package} is updated to {tag}, but DSH has to restart to use it — restart now?',
+      'restart.scheduled': 'Restart scheduled: DSH closes in a second or two and reopens by itself. Refreshing the page is not enough; the module is already loaded in the running process.',
+      'restart.unavailable': 'Cannot restart: {reason}',
       'setup.needGh': 'The gh CLI was not found, so the console cannot reach GitHub.',
       'setup.needSignIn': 'Not signed in to GitHub yet. Once you are, your repositories appear here.',
       'setup.needScopes': 'The current credential is missing: {scopes}.',
@@ -913,7 +964,7 @@ window.__ModuleLoader__.load({
 
     /** One repository row, expandable into path, releases, runs and logs. */
     function RepoRow(props) {
-      const { t, data, busy, onAction, onBump, onPublish, logs, onLogs } = props
+      const { t, data, busy, onAction, onBump, onPublish, onUpdate, logs, onLogs } = props
       const [open, setOpen] = React.useState(false)
       /**
        * A draft release is the panel's one invisible outcome: it exists, it is not
@@ -929,8 +980,40 @@ window.__ModuleLoader__.load({
       const [confirming, setConfirming] = React.useState(null)
       /** The bump confirmation is inline, like publishing a draft: it creates a commit. */
       const [bumping, setBumping] = React.useState(false)
+      /** Installing a release rewrites a profile dependency, so it asks first too. */
+      const [updating, setUpdating] = React.useState(false)
       const run = data.latestRun
       const local = data.local ?? { available: false }
+      /**
+       * What this profile has installed for this repository's package.
+       *
+       * The Host decides, not the page: the answer depends on the profile this Host
+       * is running from, and a panel that guessed it from the row's version number
+       * would offer "update" where the two copies are the same code and hide it where
+       * they are not (a `link:` checkout and a released tarball can carry the same
+       * version).
+       */
+      const install = data.install ?? null
+      const installState = install === null ? '' : String(install.state ?? '')
+      /** States where the release artifact can genuinely replace what is installed. */
+      const installable = installState === 'update' || installState === 'checkout' || installState === 'ahead' || installState === 'differs'
+      const installLabel = installState === 'update' ? 'action.update' : 'action.installRelease'
+      const installExplain = (() => {
+        if (install === null) return null
+        const params = {
+          package: String(install.packageName ?? ''),
+          profile: String(install.profile ?? ''),
+          tag: String(install.latestTag ?? ''),
+          spec: String(install.spec ?? ''),
+          installed: String(install.installedVersion ?? '?'),
+        }
+        if (installState === 'checkout') return t('install.checkout', params)
+        if (installState === 'ahead') return t('install.ahead', params)
+        if (installState === 'differs') return t('install.differs', params)
+        if (installState === 'current') return t('install.current', params)
+        if (installState === 'no-release') return t('install.noRelease', params)
+        return t('install.notInstalled', params)
+      })()
       /**
        * Whether releasing the local version is possible, decided by the Host so this
        * panel and the dispatch route cannot disagree. `blocked` is only ever proven
@@ -946,6 +1029,12 @@ window.__ModuleLoader__.load({
       /* A version that is already taken makes 发布 impossible, so the row says so
          before the button is pressed rather than after a run has failed. */
       if (blocked) chips.push(h(Chip, { key: 'v', state: 'warn', title: t('release.takenTitle') }, t('chip.versionTaken')))
+      /* An installed copy that is genuinely behind the release is the one update
+         worth a chip; a `link:` checkout is the normal state here and saying so on
+         every row would be a column of noise. */
+      if (installState === 'update' && typeof install?.latestTag === 'string') {
+        chips.push(h(Chip, { key: 'u', state: 'warn', title: installExplain ?? undefined }, t('chip.update', { tag: install.latestTag })))
+      }
       if (local.available === true) {
         if (Number.isFinite(local.dirty) && local.dirty > 0) chips.push(h(Chip, { key: 'd', state: 'warn' }, t('chip.dirty', { count: String(local.dirty) })))
         if (Number.isFinite(local.ahead) && local.ahead > 0) chips.push(h(Chip, { key: 'a', state: 'warn' }, `↑${local.ahead}`))
@@ -996,6 +1085,18 @@ window.__ModuleLoader__.load({
                   }, busy === `bump:${data.repo}` ? '…' : t('action.bumpRelease'))
                 : h(Btn, { kind: 'primary', disabled: busy !== '', title: t('action.release'), onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? '…' : t('action.release'))
               : null,
+            /* The other half of the loop the console exists for: 发布 cuts the
+               release, this one installs it into the profile that is running. */
+            installable && install?.latestTag
+              ? h(Btn, {
+                  disabled: busy !== '',
+                  title: installExplain ?? undefined,
+                  onClick: () => {
+                    setOpen(true)
+                    setUpdating(true)
+                  },
+                }, busy === `update:${data.repo}` ? '…' : t(installLabel, { tag: String(install.latestTag) }))
+              : null,
             h(Btn, { kind: 'quiet', square: true, onClick: () => setOpen((value) => !value), title: open ? t('action.collapse') : t('action.expand') }, open ? '▴' : '▾'),
           ),
         ),
@@ -1040,6 +1141,61 @@ window.__ModuleLoader__.load({
                       },
                     }, t('action.bumpRelease')),
                     h(Btn, { kind: 'quiet', onClick: () => setBumping(false) }, t('confirm.cancel')),
+                  )
+                : null,
+
+              /* What this profile has installed, and the one action that changes it.
+                 Without this the panel could cut a release and never take it: the
+                 installed copy is the half of "is it published?" that GitHub cannot
+                 answer. */
+              install !== null
+                ? h(
+                    'div',
+                    { className: 'dsc-sub' },
+                    h('span', null, t('install.title')),
+                    h(
+                      'div',
+                      { className: 'dsc-line' },
+                      h('span', { className: 'dsc-name', style: { minWidth: '0', fontWeight: '500' } }, String(install.packageName ?? '')),
+                      /* No version chip when none could be read: the explanation
+                         below says which copy this is, and an invented "v?" would
+                         be a claim the Host did not make. */
+                      install.installedVersion === null
+                        ? null
+                        : h(Chip, { state: installState === 'current' ? 'success' : installState === 'update' ? 'warn' : 'idle' }, `v${String(install.installedVersion)}`),
+                      installState === 'checkout' ? h(Chip, { state: 'warn' }, t('chip.checkout')) : null,
+                      h('span', { className: 'dsc-grow', title: String(install.spec ?? '') }, install.present === true ? String(install.spec ?? '') : `— ${String(install.profile ?? '')}`),
+                      installable && install.latestTag
+                        ? h(Btn, {
+                            kind: installState === 'update' ? 'primary' : undefined,
+                            disabled: busy !== '',
+                            title: installExplain ?? undefined,
+                            onClick: () => setUpdating(true),
+                          }, busy === `update:${data.repo}` ? '…' : t(installLabel, { tag: String(install.latestTag) }))
+                        : null,
+                    ),
+                    h('span', null, installExplain),
+                  )
+                : null,
+              updating && installable && install?.latestTag
+                ? h(
+                    'div',
+                    { className: 'dsc-line' },
+                    h('span', { className: 'dsc-grow' }, t('confirm.update', {
+                      package: String(install.packageName ?? ''),
+                      profile: String(install.profile ?? ''),
+                      spec: install.present === true ? String(install.spec ?? '') : '—',
+                      tag: String(install.latestTag),
+                    })),
+                    h(Btn, {
+                      kind: 'danger',
+                      disabled: busy !== '',
+                      onClick: () => {
+                        setUpdating(false)
+                        onUpdate(data)
+                      },
+                    }, t('action.confirmUpdate')),
+                    h(Btn, { kind: 'quiet', onClick: () => setUpdating(false) }, t('confirm.cancel')),
                   )
                 : null,
 
@@ -1183,6 +1339,16 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = React.useState('')
       const [notice, setNotice] = React.useState(null)
       const [logs, setLogs] = React.useState(null)
+      /**
+       * The update that just landed and the restart it needs.
+       *
+       * Held as state rather than folded into the notice, because a notice is a
+       * sentence that expires and this is a question with two buttons. It is also
+       * the one thing here that cannot be discovered later: an updated plugin looks
+       * identical until the app restarts, so "you are not running the new code yet"
+       * has to be on screen while the user is still looking.
+       */
+      const [restartPrompt, setRestartPrompt] = React.useState(null)
       /**
        * Which view this panel opens in.
        *
@@ -1347,6 +1513,79 @@ window.__ModuleLoader__.load({
         [loadOverview, setError, status, t],
       )
 
+      /**
+       * Install the release into this profile, then ask about the restart.
+       *
+       * Deliberately not routed through `run`: that helper reports success with one
+       * sentence and refreshes, and this action's result is a question. The Host is
+       * the one that says whether a restart is needed (`restartRequired`), so the
+       * prompt follows the answer instead of assuming it.
+       */
+      const onUpdate = React.useCallback(
+        async (data) => {
+          const key = `update:${data.repo}`
+          const tag = String(data?.install?.latestTag ?? '')
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          setRestartPrompt(null)
+          const result = await postJson('/update', { repo: data.repo }, UPDATE_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            await loadOverview({ force: true })
+            return
+          }
+          const value = result.payload.value ?? {}
+          const builds = Array.isArray(value.pendingBuilds) ? value.pendingBuilds.length : 0
+          /*
+           * `changed: false` is the honest answer when the profile already pointed at
+           * exactly this tarball: nothing was written, so nothing needs restarting,
+           * and saying "已从 X 换成 Y" would describe a write that did not happen.
+           */
+          setNotice(value.changed === false
+            ? t('state.updatedSame', { package: String(value.packageName ?? data.repo), tag: String(value.tag ?? tag) })
+            : t('state.updated', {
+                package: String(value.packageName ?? data.repo),
+                from: value.from === null || value.from === undefined ? '—' : `v${String(value.from)}`,
+                tag: String(value.tag ?? tag),
+              }) + (builds > 0 ? ` ${t('state.updatedBuilds', { count: String(builds) })}` : ''))
+          if (value.restartRequired === true) {
+            setRestartPrompt({ package: String(value.packageName ?? data.repo), tag: String(value.tag ?? tag) })
+          }
+          await loadOverview({ force: true })
+        },
+        [loadOverview, setError, t],
+      )
+
+      /**
+       * Ask the one-click restart plugin to restart DSH.
+       *
+       * The Host forwards this to `/api/dsh-restart/restart` on its own authority, so
+       * a missing restart plugin comes back as a named 501 rather than a bare
+       * failure — and this page never talks to another plugin directly.
+       */
+      const onRestart = React.useCallback(async () => {
+        setBusy('restart')
+        setError(null)
+        const result = await postJson('/restart', {}, ACTION_TIMEOUT_MS)
+        setBusy('')
+        if (!result.ok) {
+          setError(result.aborted ? 'timeout' : 'host')
+          return
+        }
+        if (!result.response.ok || result.payload?.ok !== true) {
+          setError(t('restart.unavailable', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          return
+        }
+        setRestartPrompt(null)
+        setNotice(t('restart.scheduled'))
+      }, [setError, t])
+
       const onLogs = React.useCallback(async (data, entry) => {
         if (logs !== null && logs.repo === data.repo && logs.runId === entry.id) {
           setLogs(null)
@@ -1431,6 +1670,22 @@ window.__ModuleLoader__.load({
 
         error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
         notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
+        /* The question an update leaves behind. It sits above the list rather than
+           inside the row, because the row is about a repository and this is about
+           the application the user is looking at. */
+        restartPrompt !== null
+          ? h(
+              'div',
+              { className: 'dsc-setup', role: 'status' },
+              h('span', { className: 'dsc-setup-strong' }, t('restart.ask', { package: restartPrompt.package, tag: restartPrompt.tag })),
+              h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h(Btn, { kind: 'primary', disabled: busy !== '', onClick: () => { void onRestart() } }, busy === 'restart' ? '…' : t('action.restartNow')),
+                h(Btn, { kind: 'quiet', onClick: () => setRestartPrompt(null) }, t('action.restartLater')),
+              ),
+            )
+          : null,
         stale
           ? h('div', { className: 'dsc-warn', role: 'alert' }, h('strong', null, t('stale.title')), ' — ', t('stale.how'))
           : null,
@@ -1488,6 +1743,7 @@ window.__ModuleLoader__.load({
                 onAction,
                 onBump: () => onBump(data),
                 onPublish: (tag) => onPublish(data.repo, tag),
+                onUpdate: () => { void onUpdate(data) },
                 logs,
                 onLogs,
               })),

@@ -17,10 +17,10 @@
  * everyone to ignore the suite.
  */
 
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { collectRepo, effectiveConfig, fullSha, ghJson, nextVersion, normalizeRepoEntry, parseAuthStatus, parseReposFile, readLocalState, readLocalVersion, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveSlug, rewriteVersion, runTool } from '../index.js'
+import { classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, nextVersion, normalizeRepoEntry, parseAuthStatus, parseReposFile, pickInstallableRelease, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -219,7 +219,99 @@ check('two version keys are refused, not guessed at', rewriteVersion('{\n  "vers
 check('a non-version target is refused', rewriteVersion(manifest, '1.0').ok === false)
 check('an empty manifest is refused', rewriteVersion('', '1.0.1').ok === false)
 
-/* -- 9. Live checks (opt-in) ------------------------------------------------ */
+/* -- 9. The installed copy vs the release -----------------------------------
+   The update button's whole judgement lives here, and none of it needs GitHub: the
+   profile's manifest and the checkout's manifest are two files on disk, and the
+   release list is the normalized shape `collectRepo` already produces. A fixture
+   profile is built in the temp directory so the assertions are about the rules
+   rather than about whatever this machine happens to have installed. */
+const profileDir = mkdtempSync(join(tmpdir(), 'dsh-cicd-profile-'))
+const checkoutDir = mkdtempSync(join(tmpdir(), 'dsh-cicd-checkout-'))
+const otherCheckout = mkdtempSync(join(tmpdir(), 'dsh-cicd-other-'))
+const writeManifest = (dir, manifest) => writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2), 'utf8')
+writeManifest(checkoutDir, { name: 'dsh-demo', version: '1.2.0' })
+
+check('a link spec is classified as a checkout', classifySpec('link:F:\\CodeProj\\x').kind === 'link')
+check('a file tarball is classified as a tarball', classifySpec('file:F:\\dl\\x-1.0.0.tgz').kind === 'tarball')
+check('a file directory is classified as a path', classifySpec('file:F:\\CodeProj\\x').kind === 'path')
+check('a registry range is classified as registry', classifySpec('^1.2.3').kind === 'registry')
+check('a git spec is not mistaken for a registry name', classifySpec('github:me/repo').kind === 'other')
+check('an empty spec is not a kind', classifySpec('').kind === 'other')
+
+check('equal versions compare equal', compareVersions('1.2.3', '1.2.3') === 0)
+check('the v prefix is ignored', compareVersions('v1.2.3', '1.2.3') === 0 || compareVersions('1.2.3', 'v1.2.3') === 0)
+check('a lower minor is older', compareVersions('1.2.3', '1.3.0') === -1)
+check('a higher patch is newer', compareVersions('1.2.4', '1.2.3') === 1)
+check('a prerelease is not comparable, not equal', compareVersions('1.2.3-rc.1', '1.2.3') === null)
+check('a missing version is not comparable', compareVersions(null, '1.2.3') === null)
+check('a tag yields its version', versionFromTag('v1.2.3') === '1.2.3' && versionFromTag('1.2.3') === '1.2.3')
+check('a non-version tag yields null', versionFromTag('release') === null)
+
+const releaseOf = (tag, asset, draft = false) => ({ tag, draft, name: '', prerelease: false, targetCommitish: '', createdAt: '', url: '', assets: asset === null ? [] : [{ name: asset, size: 1 }] })
+const tgzOf = (tag) => releaseOf(tag, `dsh-demo-${tag.replace(/^v/, '')}.tgz`)
+
+check('the newest release with a tarball is chosen', pickInstallableRelease([tgzOf('v1.3.0'), tgzOf('v1.2.0')])?.tag === 'v1.3.0')
+check('a draft is skipped', pickInstallableRelease([releaseOf('v1.3.0', 'dsh-demo-1.3.0.tgz', true), tgzOf('v1.2.0')])?.tag === 'v1.2.0')
+check('a release without a tarball is skipped', pickInstallableRelease([releaseOf('v1.3.0', 'dsh-demo-1.3.0.zip'), tgzOf('v1.2.0')])?.tag === 'v1.2.0')
+check('an explicit tag narrows the choice', pickInstallableRelease([tgzOf('v1.3.0'), tgzOf('v1.2.0')], 'v1.2.0')?.tag === 'v1.2.0')
+check('an explicit draft tag is refused', pickInstallableRelease([releaseOf('v1.3.0', 'x.tgz', true)], 'v1.3.0') === null)
+check('nothing installable yields null', pickInstallableRelease([]) === null)
+check('the tarball name is carried, not guessed', pickInstallableRelease([tgzOf('v1.3.0')])?.asset === 'dsh-demo-1.3.0.tgz')
+
+/* A `link:` dependency by name. It points at a fixture checkout, so nothing here
+   depends on what this machine has installed. */
+writeManifest(profileDir, { name: 'dsh-profile-x', dependencies: { 'dsh-demo': `link:${checkoutDir}` } })
+const linkInstall = readProfileInstall(profileDir, 'dsh-demo')
+check('a linked dependency is found by name', linkInstall.present === true && linkInstall.kind === 'link', JSON.stringify(linkInstall))
+
+/* The name alone is not enough: a checkout can publish under a name that is not its
+   dependency key, which is the real shape of
+   dsh-plugin-knowledge-console → dsh-knowledge-console. */
+writeManifest(profileDir, { name: 'dsh-profile-x', dependencies: { 'dsh-renamed': `link:${otherCheckout}` } })
+const byPath = readProfileInstall(profileDir, 'dsh-absent-from-the-manifest', otherCheckout)
+check('a checkout found by path keeps its dependency name', byPath.present === true && byPath.packageName === 'dsh-renamed', JSON.stringify(byPath))
+
+writeManifest(profileDir, { name: 'dsh-profile-x', dependencies: {} })
+const absent = readProfileInstall(profileDir, 'dsh-demo')
+check('an uninstalled package is reported absent', absent.present === false)
+check('an uninstalled package still reports the profile is readable', absent.profileReadable === true)
+
+/* A tarball install is the case where the version decides, and the unpacked copy
+   under node_modules is what pnpm actually loaded — not the spec string. */
+const installedDir = join(profileDir, 'node_modules', 'dsh-demo')
+mkdirSync(installedDir, { recursive: true })
+writeManifest(profileDir, { name: 'dsh-profile-x', dependencies: { 'dsh-demo': 'file:F:\\dl\\dsh-demo-1.2.0.tgz' } })
+writeManifest(installedDir, { name: 'dsh-demo', version: '1.2.0' })
+check('an installed tarball reports the version from node_modules', readProfileInstall(profileDir, 'dsh-demo').installedVersion === '1.2.0', JSON.stringify(readProfileInstall(profileDir, 'dsh-demo')))
+
+const entry = { repo: 'dsh-plugin-demo', localPath: checkoutDir, label: '' }
+/**
+ * Describe one state: the profile's dependency, the version pnpm unpacked, and the
+ * releases GitHub would report. All three decide the verdict together.
+ */
+const describeOf = (deps, releases, installedVersion = '1.2.0') => {
+  writeManifest(profileDir, { name: 'dsh-profile-x', dependencies: deps })
+  mkdirSync(installedDir, { recursive: true })
+  writeManifest(installedDir, { name: 'dsh-demo', version: installedVersion })
+  return describeInstall({ profileDir, profileName: 'desktop', entry, releases })
+}
+
+check('an installed copy behind the release offers an update', describeOf({ 'dsh-demo': 'file:F:\\dl\\dsh-demo-1.2.0.tgz' }, [tgzOf('v1.3.0')], '1.2.0').state === 'update')
+check('an installed copy at the release version is current', describeOf({ 'dsh-demo': 'file:F:\\dl\\dsh-demo-1.3.0.tgz' }, [tgzOf('v1.3.0')], '1.3.0').state === 'current')
+check('an installed copy past the release says so instead of offering a downgrade silently', describeOf({ 'dsh-demo': 'file:F:\\dl\\dsh-demo-2.0.0.tgz' }, [tgzOf('v1.3.0')], '2.0.0').state === 'ahead')
+check('an unorderable version is not claimed to be behind', describeOf({ 'dsh-demo': 'file:F:\\dl\\dsh-demo-1.2.0-rc.1.tgz' }, [tgzOf('v1.3.0')], '1.2.0-rc.1').state === 'differs')
+/* The state the version comparison cannot see: same version string, different code. */
+check('a linked checkout is its own state, never "current"', describeOf({ 'dsh-demo': `link:${checkoutDir}` }, [tgzOf('v1.2.0')], '1.2.0').state === 'checkout')
+check('a package that is not installed is not-installed', describeOf({}, [tgzOf('v1.3.0')]).state === 'not-installed')
+check('a package with no release is no-release', describeOf({ 'dsh-demo': `link:${checkoutDir}` }, []).state === 'no-release')
+check('the state rules answer without throwing on nulls', updateState(null, null) === 'not-installed' && updateState({ present: true, kind: 'registry' }, null) === 'no-release')
+check('the checkout name wins over the repository name', describeOf({ 'dsh-demo': `link:${checkoutDir}` }, [tgzOf('v1.3.0')]).packageName === 'dsh-demo')
+check('the release tag and asset reach the panel', describeOf({}, [tgzOf('v1.3.0')]).latestTag === 'v1.3.0' && describeOf({}, [tgzOf('v1.3.0')]).latestAsset === 'dsh-demo-1.3.0.tgz')
+check('a profile path falls back to the environment', resolveProfileDir({ DSH_PROFILE_DIR: 'C:\\p' }) === 'C:\\p')
+check('a missing environment still yields a path', /profiles[\\/]desktop$/.test(resolveProfileDir({ DSH_HOME: 'C:\\h', DSH_PROFILE: 'desktop' })), resolveProfileDir({ DSH_HOME: 'C:\\h', DSH_PROFILE: 'desktop' }))
+check('an unreadable profile is reported, not thrown', readManifest(join(tmpdir(), '__dsh-cicd-nope__')) === null)
+
+/* -- 10. Live checks (opt-in) ----------------------------------------------- */
 if (process.env.DSH_CICD_LIVE === '1') {
   console.log('\n-- live checks (DSH_CICD_LIVE=1) --')
   const version = await runTool(ghPath, ['--version'], 10_000)

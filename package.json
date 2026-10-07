@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-cicd",
-  "version": "0.3.0",
-  "description": "发布台（Release Console）for DeepSeek Harness: a sidebar entry and a full main-panel page that show what each repository has built, what it has released, and whether the local checkout is ahead of the release — with buttons to trigger a build, cut a release, and publish a draft. Reuses the machine's authenticated gh CLI, so the plugin stores no credential of its own.",
+  "version": "0.4.0",
+  "description": "发布台（Release Console）for DeepSeek Harness: a sidebar entry and a full main-panel page that show what each repository has built, what it has released, whether the local checkout is ahead of the release, and whether the copy installed in this profile is the published artifact — with buttons to trigger a build, cut a release, publish a draft, install that release into the profile, and hand a restart to dsh-plugin-restart. Reuses the machine's authenticated gh CLI, so the plugin stores no credential of its own.",
   "type": "module",
   "icon": "./icon.svg",
   "main": "index.js",
@@ -24,7 +24,7 @@
   ],
   "meta": {
     "title": "DSH 插件发布台",
-    "description": "面向 DSH 插件仓库的持续构建与发布（CI/CD）：侧边栏图标 + 独立主面板，显示每个仓库的最近一次运行、已发布的 Release、以及本地是否领先于发布。浏览器登录、勾选仓库即可，复用本机已登录的 gh，不另存凭据。门禁与产包形状按 DSH bundle 设计（契约检查 + 整树 zip + 可安装 tgz），任何带 ci.yml / release.yml 的仓库都能接。"
+    "description": "面向 DSH 插件仓库的持续构建与发布（CI/CD）：侧边栏图标 + 独立主面板，显示每个仓库的最近一次运行、已发布的 Release、本地是否领先于发布，以及本 profile 装的到底是不是发布出去的那份（link: 本地检出 / Release 的 tgz）。浏览器登录、勾选仓库即可，复用本机已登录的 gh，不另存凭据。发布、装 Release、升版本并发布为一个循环；装完面板接着问要不要重启（转发给 dsh-plugin-restart）。门禁与产包形状按 DSH bundle 设计（契约检查 + 整树 zip + 可安装 tgz），任何带 ci.yml / release.yml 的仓库都能接。"
   },
   "dsh": {
     "bundle": {

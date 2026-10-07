@@ -74,6 +74,11 @@ const EXPECTED = [
   // version forward itself.
   '/api/dsh-cicd/version-bump',
   '/api/dsh-cicd/logs',
+  // Taking the release, not only cutting it: the artifact is installed into the
+  // profile through the Host's own plugin manager, and the restart is forwarded to
+  // the plugin that owns restarting.
+  '/api/dsh-cicd/update',
+  '/api/dsh-cicd/restart',
   // Setup without a terminal: the browser sign-in and the repository list are
   // routes, not instructions to go and run something elsewhere.
   '/api/dsh-cicd/auth-start',
@@ -149,6 +154,24 @@ try {
 
   const badTag = await call('/api/dsh-cicd/release-action', { repo: 'octocat/Hello-World', tag: '$(rm -rf /)', action: 'publish' })
   check('an unusable tag is refused before gh runs', badTag.status === 400, badTag.payload?.message ?? '')
+
+  /* --- taking a release ---------------------------------------------------
+     The two refusals below are the ones that must happen BEFORE any network call,
+     because that is the ordering claim the update route makes: an unconfigured
+     repository and a Host without a plugin manager are both local facts. `ctx` here
+     carries only `webServer` on purpose — that IS the "no pluginManager"
+     composition — so this asserts the 501 rather than mocking an install, which
+     would either need a real profile or prove nothing about one. */
+  const updateUnknown = await call('/api/dsh-cicd/update', { repo: 'someone/else' })
+  check('an update of an unconfigured repository is refused', updateUnknown.status === 400 && /not configured/.test(updateUnknown.payload?.message ?? ''), updateUnknown.payload?.message ?? '')
+
+  const updateNoManager = await call('/api/dsh-cicd/update', { repo: 'octocat/Hello-World' })
+  check('an update without a plugin manager is refused before GitHub', updateNoManager.status === 501 && updateNoManager.payload?.code === 'plugin-manager-missing', updateNoManager.payload?.message ?? '')
+
+  /* No restart plugin is mounted on this test server, so the forward meets a 404 —
+     which is the real shape of "dsh-plugin-restart is not installed". */
+  const restartMissing = await call('/api/dsh-cicd/restart', {})
+  check('a restart without the restart plugin is named, not a bare failure', restartMissing.status === 501 && restartMissing.payload?.code === 'restart-unavailable', restartMissing.payload?.message ?? '')
 
   /* --- setup routes -------------------------------------------------------
      Only the refusal paths of `auth-start` are exercised: its success path spawns

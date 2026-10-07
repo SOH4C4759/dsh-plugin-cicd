@@ -312,6 +312,28 @@ function repoFixture(overrides) {
     hasBuildWorkflow: true,
     hasReleaseWorkflow: true,
     local: { available: true, branch: 'main', head: 'b'.repeat(40), dirty: 0, ahead: 0, behind: 0, upstreamKnown: true },
+    /* The normal state on this machine: the profile points at a checkout, while the
+       release is a separate artifact that may well carry the same version. */
+    install: installFixture(),
+    ...overrides,
+  }
+}
+
+/** One `install` block, exactly as the Host sends it. */
+function installFixture(overrides) {
+  return {
+    profile: 'desktop',
+    profileDir: 'C:\\Users\\x\\.dsh\\profiles\\desktop',
+    profileReadable: true,
+    packageName: 'dsh-plugin-restart',
+    present: true,
+    spec: 'link:F:\\CodeProj\\dsh-plugin-restart',
+    kind: 'link',
+    installedVersion: '1.0.0',
+    latestTag: 'v1.0.0',
+    latestVersion: '1.0.0',
+    latestAsset: 'dsh-plugin-restart-1.0.0.tgz',
+    state: 'checkout',
     ...overrides,
   }
 }
@@ -319,7 +341,7 @@ function repoFixture(overrides) {
 const baseStatus = {
   ok: true,
   value: {
-    protocol: 3,
+    protocol: 4,
     config: { buildWorkflow: 'ci.yml', releaseWorkflow: 'release.yml', defaultBranch: 'main', pollSeconds: 30 },
     helper: { configureScript: 'F:\\CodeProj\\dsh-plugin-cicd\\scripts\\configure.mjs' },
     gh: { path: 'gh', available: true, version: 'gh version 2.102.0', authenticated: true, account: 'SOH4C4759', scopes: ['repo', 'workflow'], missingScopes: [], message: null },
@@ -328,10 +350,11 @@ const baseStatus = {
 }
 
 /** Render the panel against one fixture, from a clean hook state. */
-async function renderPanel(repos, statusValue = baseStatus.value) {
+async function renderPanel(repos, statusValue = baseStatus.value, extra = {}) {
   fixture = {
     '/status': { ok: true, value: statusValue },
     '/overview': { ok: true, value: { repos } },
+    ...extra,
   }
   values.clear()
   effectSlots.clear()
@@ -419,6 +442,123 @@ async function expandFirstRow(tree) {
     gh: { ...baseStatus.value.gh, available: false, message: 'gh not found' },
   })
   check('a missing gh is explained', textOf(tree).includes('没有找到 gh CLI'), textOf(tree).replace(/\s+/g, ' ').slice(0, 140))
+}
+
+/* -- 6. A linked checkout is offered the published artifact ------------------
+   The state the version comparison cannot reach: the checkout and the release both
+   say 1.0.0, yet only one of them is what someone who downloaded the release runs.
+   So the row must offer the install even though the versions agree. */
+{
+  const collapsed = await renderPanel([repoFixture({ install: installFixture({ state: 'checkout' }) })])
+  check('a linked checkout is offered in the row', hasButton(collapsed, '装 Release v1.0.0'))
+  check('a linked checkout is not marked as behind on the row', textOf(collapsed).includes('可更新') === false)
+
+  const { tree } = await expandFirstRow(collapsed)
+  const detail = textOf(tree)
+  check('the row says the installed copy is a checkout, not the release', detail.includes('不是发布出去的那份'), detail.replace(/\s+/g, ' ').slice(0, 220))
+  check('the explanation names the link spec', detail.includes('link:F:\\CodeProj\\dsh-plugin-restart'))
+
+  /* Installing rewrites a profile dependency, so it asks first — the same shape as
+     the bump, which is the other action here that changes something on disk. */
+  const asked = clickButton(tree, '装 Release v1.0.0')
+  const confirm = await rerender()
+  check('installing asks before it rewrites the profile', asked === true && textOf(confirm).includes('这会改写该 profile 的依赖条目'), textOf(confirm).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* -- 7. An update, then the restart question -------------------------------- */
+{
+  const answers = {
+    '/update': { ok: true, value: { repo: 'dsh-plugin-restart', packageName: 'dsh-plugin-restart', tag: 'v1.0.1', version: '1.0.1', from: '1.0.0', restartRequired: true, pendingBuilds: [] } },
+    '/restart': { ok: true, value: { scheduled: true, armDelayMs: 1200 } },
+  }
+  const collapsed = await renderPanel(
+    [repoFixture({ install: installFixture({ state: 'update', installedVersion: '1.0.0', latestTag: 'v1.0.1', latestVersion: '1.0.1' }) })],
+    baseStatus.value,
+    answers,
+  )
+  check('an installed copy behind the release is marked on the row', textOf(collapsed).includes('可更新 v1.0.1'), textOf(collapsed).replace(/\s+/g, ' ').slice(0, 160))
+  check('the row offers the update by its target version', hasButton(collapsed, '更新到 v1.0.1'))
+
+  const { tree } = await expandFirstRow(collapsed)
+  clickButton(tree, '更新到 v1.0.1')
+  const confirmation = await rerender()
+  check('the update asks before it writes', textOf(confirmation).includes('换成 Release v1.0.1 的 tgz'), textOf(confirmation).replace(/\s+/g, ' ').slice(0, 240))
+
+  clickButton(confirmation, '确认更新')
+  await rerender()
+  const settled = await rerender()
+  const text = textOf(settled)
+  check('the update really posted to the Host', calls.includes('/update'), calls.join(','))
+  check('the panel says the new version needs a restart', text.includes('the new version') || text.includes('重启 DSH 才会真正生效'), text.replace(/\s+/g, ' ').slice(0, 240))
+  check('and it asks the restart question instead of assuming an answer', text.includes('现在重启'), text.replace(/\s+/g, ' ').slice(0, 240))
+  check('the restart is offered as a button', hasButton(settled, '立即重启 DSH'))
+
+  clickButton(settled, '立即重启 DSH')
+  await rerender()
+  const restarted = await rerender()
+  check('the restart really reached the restart route', calls.includes('/restart'), calls.join(','))
+  check('a scheduled restart is reported, not implied', textOf(restarted).includes('已安排重启'), textOf(restarted).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* -- 8. States with nothing to do offer no button --------------------------- */
+{
+  const current = await renderPanel([repoFixture({ install: installFixture({ state: 'current' }) })])
+  const { tree: currentDetail } = await expandFirstRow(current)
+  check('a current install offers no update button', hasButton(currentDetail, '装 Release') === false && hasButton(currentDetail, '更新到') === false)
+  check('a current install says so', textOf(currentDetail).includes('已经是最新的'))
+
+  const missing = await renderPanel([repoFixture({ install: installFixture({ state: 'not-installed', present: false, spec: '', installedVersion: null }) })])
+  const { tree: missingDetail } = await expandFirstRow(missing)
+  check('an uninstalled package offers no update button', hasButton(missingDetail, '装 Release') === false && hasButton(missingDetail, '更新到') === false)
+  check('an uninstalled package names the profile that was searched', textOf(missingDetail).includes('desktop profile 的依赖里'), textOf(missingDetail).replace(/\s+/g, ' ').slice(0, 220))
+}
+
+/* -- 8b. Nothing written means nothing to restart --------------------------- */
+{
+  const panel = await renderPanel(
+    [repoFixture({ install: installFixture({ state: 'update', latestTag: 'v1.0.1', latestVersion: '1.0.1' }) })],
+    baseStatus.value,
+    {
+      /* The profile already pointed at exactly this tarball, so the Host answers
+         success with `changed: false` — the outcome that was asked for, reached
+         without writing anything. */
+      '/update': { ok: true, value: { repo: 'dsh-plugin-restart', packageName: 'dsh-plugin-restart', tag: 'v1.0.1', from: '1.0.1', changed: false, restartRequired: false, pendingBuilds: [] } },
+    },
+  )
+  const { tree } = await expandFirstRow(panel)
+  clickButton(tree, '更新到 v1.0.1')
+  const confirmation = await rerender()
+  clickButton(confirmation, '确认更新')
+  await rerender()
+  const settled = await rerender()
+  const text = textOf(settled)
+  check('a no-op update says nothing changed', text.includes('没有改动，也不需要重启'), text.replace(/\s+/g, ' ').slice(0, 240))
+  check('a no-op update does not claim a write that never happened', text.includes('已从') === false)
+  check('a no-op update asks for no restart', hasButton(settled, '立即重启 DSH') === false)
+}
+
+/* -- 9. A missing restart plugin is named, not swallowed -------------------- */
+{
+  const refused = { error: 'host' }
+  const panel = await renderPanel(
+    [repoFixture({ install: installFixture({ state: 'update', latestTag: 'v1.0.1', latestVersion: '1.0.1' }) })],
+    baseStatus.value,
+    {
+      '/update': { ok: true, value: { repo: 'dsh-plugin-restart', packageName: 'dsh-plugin-restart', tag: 'v1.0.1', from: '1.0.0', restartRequired: true, pendingBuilds: [] } },
+      '/restart': { ok: false, code: 'restart-unavailable', message: 'dsh-plugin-restart is not mounted on this Host, so nothing here can restart DSH', __status: 501 },
+    },
+  )
+  const { tree } = await expandFirstRow(panel)
+  clickButton(tree, '更新到 v1.0.1')
+  const confirmation = await rerender()
+  clickButton(confirmation, '确认更新')
+  await rerender()
+  const settled = await rerender()
+  clickButton(settled, '立即重启 DSH')
+  await rerender()
+  const after = await rerender()
+  check('a refused restart is reported as a failure, not as success', textOf(after).includes('重启不了'), textOf(after).replace(/\s+/g, ' ').slice(0, 240))
+  check('the refusal names the plugin that is missing', textOf(after).includes('dsh-plugin-restart'), refused.error)
 }
 
 console.log(`\n${results.length - failed}/${results.length} checks passed`)

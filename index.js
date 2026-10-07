@@ -22,6 +22,8 @@
  *   /api/dsh-cicd/release-action   publish a draft, or delete a release
  *   /api/dsh-cicd/version-bump     bump package.json, commit it, push the branch
  *   /api/dsh-cicd/logs             the tail of the failed steps of one run
+ *   /api/dsh-cicd/update           install this profile's copy from the release's tgz
+ *   /api/dsh-cicd/restart          hand a restart to dsh-plugin-restart, if it is mounted
  *
  * The release dispatch carries a preflight, and that is not a convenience. Every
  * repository in this set releases from `package.json`'s version, and its release
@@ -39,7 +41,7 @@
  */
 
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { connect } from 'node:net'
 import { lookup } from 'node:dns/promises'
 import { dirname, isAbsolute, join } from 'node:path'
@@ -79,6 +81,16 @@ const MAX_LOG_TAIL_LINES = 400
 const MAX_BODY_BYTES = 32 * 1024
 
 /**
+ * How long a forwarded restart request may take before it is reported as
+ * unreachable. The restart plugin answers before it arms the supervisor, so this
+ * is a bound on talking to a sibling route on loopback, not on restarting.
+ */
+const RESTART_FORWARD_TIMEOUT_MS = 15_000
+
+/** Where a release tarball is downloaded to, beside the managed config file. */
+const DOWNLOAD_DIR_NAME = 'downloads'
+
+/**
  * Wire protocol of the browser half this Host half can serve.
  *
  * The two halves do not reload together: the browser bundle is read from disk on
@@ -91,8 +103,13 @@ const MAX_BODY_BYTES = 32 * 1024
  * 3: `version-bump`, the `releaseCheck` verdict on every overview row, and the
  * release dispatch's preflight. A 2.x client asking a 2.x host to publish a
  * version that is already taken is the bug this protocol bump retires.
+ *
+ * 4: `update` and `restart`, and the `install` block on every overview row. A 3.x
+ * client renders rows without it, so the two halves would still agree on the old
+ * surface — but the new buttons post to routes a 3.x host does not mount, which is
+ * exactly the 401-reads-as-a-credential-problem this number exists to prevent.
  */
-const PROTOCOL = 3
+const PROTOCOL = 4
 
 /** The managed repository list, written by `scripts/configure.mjs`. */
 const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
@@ -886,6 +903,252 @@ export async function readLocalState(localPath, timeoutMs) {
   }
 }
 
+/* --------------------------------------------------- installed copy, releases -- */
+
+/**
+ * Where the running profile keeps its `package.json`.
+ *
+ * `DSH_PROFILE_DIR` is written for shell tools rather than for this process, so it
+ * is only the first guess. The authoritative answer is the `profileContext`
+ * service, which knows the directory it is actually running from; the environment
+ * is the fallback for a Host that composes this plugin without that service.
+ *
+ * @param {object} [env] - environment to read, injectable for tests.
+ * @returns {string} absolute path of the profile directory.
+ */
+export function resolveProfileDir(env = process.env) {
+  const explicit = text(env.DSH_PROFILE_DIR)
+  if (explicit !== '') return explicit
+  const home = text(env.DSH_HOME) !== ''
+    ? text(env.DSH_HOME)
+    : join(text(env.USERPROFILE, text(env.HOME, '.')), '.dsh')
+  return join(home, 'profiles', text(env.DSH_PROFILE, 'desktop'))
+}
+
+/** Read `name` and `version` from one directory's package.json, or null. */
+export function readManifest(directory) {
+  if (typeof directory !== 'string' || directory === '') return null
+  try {
+    const parsed = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'))
+    if (parsed === null || typeof parsed !== 'object') return null
+    return {
+      name: typeof parsed.name === 'string' ? parsed.name : '',
+      version: typeof parsed.version === 'string' ? parsed.version : null,
+      bundle: parsed.dsh?.bundle !== undefined,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** The comparison form of a path, so `F:\x` and `f:/x/` are the same checkout. */
+function comparablePath(value) {
+  const normalized = String(value).replace(/\\/g, '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+/**
+ * Classify one profile dependency spec.
+ *
+ * The distinction that matters is where the code actually comes from. `link:` is a
+ * symlink into a checkout, so the profile is running files that were never
+ * published; a `file:` tarball IS the published artifact. Reporting both as
+ * "installed v1.2.3" would hide the only difference the update button exists for.
+ *
+ * @param {unknown} spec - the dependency value from the profile manifest.
+ * @returns {{kind: 'link'|'path'|'tarball'|'registry'|'other', path: string|null, range: string|null}}
+ */
+export function classifySpec(spec) {
+  const value = typeof spec === 'string' ? spec.trim() : ''
+  if (value === '') return { kind: 'other', path: null, range: null }
+  const linked = /^link:/i.test(value)
+  const filed = /^file:/i.test(value)
+  const raw = value.replace(/^(?:file|link):/i, '')
+  if (linked || filed || isAbsolute(raw)) {
+    if (raw === '' || !isAbsolute(raw)) return { kind: 'other', path: null, range: null }
+    if (linked) return { kind: 'link', path: raw, range: null }
+    return { kind: /\.(?:tgz|tar\.gz)$/i.test(raw) ? 'tarball' : 'path', path: raw, range: null }
+  }
+  // A protocol or host alias is neither a path this can read nor a version this can
+  // compare: guessing a version for `github:me/repo` would be an invented answer.
+  if (/^(?:workspace:|npm:|git\+|git:|git@|github:|gitlab:|bitbucket:|ssh:|https?:)/i.test(value)) {
+    return { kind: 'other', path: null, range: null }
+  }
+  return { kind: 'registry', path: null, range: value }
+}
+
+/**
+ * What this profile has installed for one package name.
+ *
+ * A checkout can publish under a name that is not its directory's name (the
+ * checkout in `dsh-plugin-knowledge-console` publishes `dsh-knowledge-console`),
+ * so the name is not enough on its own: when nothing matches it, the specs are
+ * scanned for one that points at the configured checkout.
+ *
+ * @param {string} profileDir - the profile directory.
+ * @param {string} packageName - the package the repository publishes.
+ * @param {string} [localPath] - the configured checkout, if any.
+ * @returns {object} the install record the panel renders.
+ */
+export function readProfileInstall(profileDir, packageName, localPath = '') {
+  const base = {
+    packageName: typeof packageName === 'string' ? packageName : '',
+    present: false,
+    spec: '',
+    kind: 'other',
+    path: null,
+    installedVersion: null,
+    profileDir,
+    profileReadable: false,
+  }
+  if (readManifest(profileDir) === null) return base
+  const parsed = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8'))
+  const dependencies = parsed?.dependencies !== null && typeof parsed?.dependencies === 'object' ? parsed.dependencies : {}
+  let key = base.packageName !== '' && Object.hasOwn(dependencies, base.packageName) ? base.packageName : null
+  if (key === null && typeof localPath === 'string' && localPath !== '') {
+    const wanted = comparablePath(localPath)
+    for (const [candidate, spec] of Object.entries(dependencies)) {
+      const classified = classifySpec(spec)
+      if (classified.path !== null && comparablePath(classified.path) === wanted) {
+        key = candidate
+        break
+      }
+    }
+  }
+  if (key === null) return { ...base, profileReadable: true }
+  const spec = String(dependencies[key] ?? '')
+  const classified = classifySpec(spec)
+  const installed = readManifest(join(profileDir, 'node_modules', key))
+  return {
+    packageName: key,
+    present: true,
+    spec,
+    kind: classified.kind,
+    path: classified.path,
+    installedVersion: installed?.version ?? null,
+    profileDir,
+    profileReadable: true,
+  }
+}
+
+/**
+ * Compare two `major.minor.patch` versions.
+ *
+ * Returns null rather than guessing for anything else — a prerelease, a range, a
+ * version read from a directory that is not a package. "Cannot tell" and "older"
+ * lead to different sentences on screen, and only one of them justifies a button.
+ *
+ * @param {unknown} left - installed version.
+ * @param {unknown} right - released version.
+ * @returns {-1|0|1|null} the order, or null when the two are not comparable.
+ */
+export function compareVersions(left, right) {
+  const parse = (value) => {
+    const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(typeof value === 'string' ? value.trim() : '')
+    return match === null ? null : [Number(match[1]), Number(match[2]), Number(match[3])]
+  }
+  const a = parse(left)
+  const b = parse(right)
+  if (a === null || b === null) return null
+  for (const at of [0, 1, 2]) {
+    if (a[at] !== b[at]) return a[at] < b[at] ? -1 : 1
+  }
+  return 0
+}
+
+/** `v1.2.3` as `1.2.3`; anything else as null. */
+export function versionFromTag(tag) {
+  const match = /^v?(\d+\.\d+\.\d+)$/.exec(typeof tag === 'string' ? tag.trim() : '')
+  return match === null ? null : match[1]
+}
+
+/**
+ * The newest published release that carries an installable `.tgz`.
+ *
+ * Drafts are skipped — a draft is not downloadable by anyone but its author, and
+ * "update to the draft" is not a thing the panel should offer. A release without a
+ * tarball is skipped too: `.zip` is the tree, not what `pnpm add` takes.
+ *
+ * @param {object[]} releases - normalized releases, newest first as GitHub returns them.
+ * @param {string} [tag] - an explicit tag, when the caller named one.
+ * @returns {{tag: string, asset: string, version: string|null}|null} the choice, or null.
+ */
+export function pickInstallableRelease(releases, tag = '') {
+  const list = Array.isArray(releases) ? releases : []
+  const wanted = text(tag)
+  for (const release of list) {
+    if (release === null || typeof release !== 'object') continue
+    if (release.draft === true) continue
+    const releaseTag = text(release.tag)
+    if (releaseTag === '') continue
+    if (wanted !== '' && releaseTag !== wanted) continue
+    const assets = Array.isArray(release.assets) ? release.assets : []
+    const asset = assets.find((candidate) => /\.(?:tgz|tar\.gz)$/i.test(text(candidate?.name)))
+    if (asset === undefined) continue
+    return { tag: releaseTag, asset: text(asset.name), version: versionFromTag(releaseTag) }
+  }
+  return null
+}
+
+/**
+ * What installing the newest release would mean for this profile.
+ *
+ * `checkout` is the state the version comparison cannot reach and the reason this
+ * feature exists: a `link:` checkout and a published tarball can carry the very
+ * same version string while being different code, and only one of them is what a
+ * user who downloaded the release would run.
+ *
+ * @param {object} install - from `readProfileInstall`.
+ * @param {object|null} latest - from `pickInstallableRelease`.
+ * @returns {string} one of not-installed / no-release / current / update / ahead / differs / checkout.
+ */
+export function updateState(install, latest) {
+  if (install === null || typeof install !== 'object' || install.present !== true) return 'not-installed'
+  if (latest === null || latest === undefined) return 'no-release'
+  if (install.kind === 'link' || install.kind === 'path') return 'checkout'
+  const order = compareVersions(install.installedVersion, latest.version ?? versionFromTag(latest.tag))
+  if (order === 0) return 'current'
+  if (order === null) return 'differs'
+  return order < 0 ? 'update' : 'ahead'
+}
+
+/** The repository part of `owner/name`. */
+export function bareRepoName(repo) {
+  const value = text(repo)
+  return value.includes('/') ? value.slice(value.indexOf('/') + 1) : value
+}
+
+/**
+ * Everything the panel shows about "is the installed copy the released one".
+ *
+ * @param {object} params - the two sides.
+ * @param {string} params.profileDir - profile directory.
+ * @param {string} params.profileName - profile name, for the sentence on screen.
+ * @param {object} params.entry - the configured repository entry.
+ * @param {object[]} params.releases - that repository's normalized releases.
+ * @returns {object} the install block carried by every overview row.
+ */
+export function describeInstall({ profileDir, profileName, entry, releases } = {}) {
+  const checkout = readManifest(entry?.localPath ?? '')
+  const declared = checkout !== null && checkout.name !== '' ? checkout.name : bareRepoName(entry?.repo ?? '')
+  const install = readProfileInstall(profileDir, declared, entry?.localPath ?? '')
+  const latest = pickInstallableRelease(releases)
+  return {
+    profile: text(profileName, 'desktop'),
+    profileDir,
+    profileReadable: install.profileReadable === true,
+    packageName: install.present === true ? install.packageName : declared,
+    present: install.present === true,
+    spec: install.spec,
+    kind: install.kind,
+    installedVersion: install.installedVersion,
+    latestTag: latest === null ? null : latest.tag,
+    latestVersion: latest === null ? null : (latest.version ?? versionFromTag(latest.tag)),
+    latestAsset: latest === null ? null : latest.asset,
+    state: updateState(install, latest),
+  }
+}
+
 /* --------------------------------------------------------------- overview -- */
 
 /** Resolve a configured entry to the `owner/name` slug `gh` expects. */
@@ -1085,6 +1348,15 @@ export function apply(ctx, rawConfig) {
   let cache = null
 
   /**
+   * One install at a time.
+   *
+   * The plugin manager serialises through its own profile lock, so a second
+   * request would not corrupt anything — it would queue behind the first while the
+   * panel showed two spinners and neither could be cancelled. Refusing is clearer.
+   */
+  let updateInFlight = false
+
+  /**
    * The configuration this request should use.
    *
    * Resolved per request so `scripts/configure.mjs add` is visible on the next
@@ -1130,6 +1402,22 @@ export function apply(ctx, rawConfig) {
       return false
     }
     return true
+  }
+
+  /**
+   * The profile this Host is running from.
+   *
+   * `profileContext` is the authority — it is the service that knows where it was
+   * started before any environment variable was written for a shell. The
+   * environment is the fallback for a composition without that service.
+   */
+  const profileFacts = () => {
+    const service = typeof ctx.get === 'function' ? ctx.get('profileContext') : undefined
+    const dir = text(service?.dir)
+    return {
+      dir: dir !== '' ? dir : resolveProfileDir(),
+      name: text(service?.name, text(process.env.DSH_PROFILE, 'desktop')),
+    }
   }
 
   /** Resolve a body's `repo` to a configured entry, refusing anything unconfigured. */
@@ -1414,6 +1702,16 @@ export function apply(ctx, rawConfig) {
           projectsRoot: current.projectsRoot,
         },
         auth: authSnapshot(),
+        /**
+         * Which profile the update route would write to. Reported rather than
+         * assumed: "not installed" is a different sentence from "the panel looked in
+         * the wrong profile", and only the path makes the two distinguishable.
+         */
+        profile: {
+          name: profileFacts().name,
+          dir: profileFacts().dir,
+          readable: readManifest(profileFacts().dir) !== null,
+        },
         configFile: current.configFile,
         configSource: current.configSource,
         configProblem: current.configProblem,
@@ -1457,15 +1755,32 @@ export function apply(ctx, rawConfig) {
     const settled = await Promise.allSettled(
       current.repos.map((entry) => collectRepo({ config: current, ghPath, entry })),
     )
+    const profile = profileFacts()
     const repos = settled.map((outcome, index) => {
       const entry = current.repos[index]
-      if (outcome.status === 'fulfilled') return outcome.value
+      const value = outcome.status === 'fulfilled'
+        ? outcome.value
+        : {
+            repo: entry.repo,
+            slug: resolveSlug(current.owner, entry.repo),
+            label: entry.label !== '' ? entry.label : entry.repo,
+            localPath: entry.localPath,
+            releases: [],
+            problems: [String(outcome.reason?.message ?? outcome.reason)],
+          }
+      /*
+       * The install block is computed from local files, not from GitHub, so it is
+       * attached here rather than inside `collectRepo` — that function's contract is
+       * "one repository's remote and local git state", and this is neither.
+       */
       return {
-        repo: entry.repo,
-        slug: resolveSlug(current.owner, entry.repo),
-        label: entry.label !== '' ? entry.label : entry.repo,
-        localPath: entry.localPath,
-        problems: [String(outcome.reason?.message ?? outcome.reason)],
+        ...value,
+        install: describeInstall({
+          profileDir: profile.dir,
+          profileName: profile.name,
+          entry,
+          releases: value.releases ?? [],
+        }),
       }
     })
     const value = { fetchedAt: new Date().toISOString(), cached: false, repos, configSource: current.configSource, configProblem: current.configProblem }
@@ -1831,6 +2146,254 @@ export function apply(ctx, rawConfig) {
     writeJson(res, 200, { ok: true, value: { repo: target.entry.repo, runId, truncated: lines.length > tail.length, lines: tail } })
   }
 
+  /* ------------------------------------------------- installed-copy update -- */
+
+  /**
+   * Replace this profile's copy of a repository's package with the release's tgz.
+   *
+   * Why this exists: the console could trigger a release but never take it. A
+   * checkout installed with `link:` is not the artifact anybody downloads, and the
+   * only way to find that out was a terminal and `dsh plugin add file:<tgz>`. So
+   * the artifact is fetched to a plugin-owned directory and handed to the Host's own
+   * plugin manager — the same pnpm path `dsh plugin add` takes, which holds the
+   * profile lock and restores `package.json` when a run fails. Shelling out to the
+   * CLI from here would be a second writer against the same profile.
+   *
+   * Everything that can be decided locally is decided before GitHub is asked: a
+   * repository that is not a dependency of this profile has nothing to update, and
+   * saying so costs no network round trip.
+   */
+  const updateHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const manager = typeof ctx.get === 'function' ? ctx.get('pluginManager') : undefined
+    if (manager === undefined || manager === null || typeof manager.installBundle !== 'function') {
+      writeJson(res, 501, {
+        ok: false,
+        code: 'plugin-manager-missing',
+        message: 'this Host has no pluginManager service, so nothing here can install a package into the profile',
+      })
+      return
+    }
+    if (updateInFlight) {
+      writeJson(res, 409, { ok: false, code: 'busy', message: 'an update is already running; wait for it to settle' })
+      return
+    }
+    const profile = profileFacts()
+    const localPath = target.entry.localPath
+    const checkout = readManifest(localPath)
+    const declared = checkout !== null && checkout.name !== '' ? checkout.name : bareRepoName(target.entry.repo)
+    const install = readProfileInstall(profile.dir, declared, localPath)
+    if (install.present !== true) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'not-installed',
+        message: `${declared} is not a dependency of the ${profile.name} profile, so there is no installed copy to update`,
+        value: { repo: target.entry.repo, packageName: declared, profile: profile.name, profileDir: profile.dir },
+      })
+      return
+    }
+    const wanted = text(body?.tag)
+    if (wanted !== '' && !SLUG.test(wanted)) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: `unusable tag: ${wanted}` })
+      return
+    }
+
+    updateInFlight = true
+    try {
+      const releasesResult = await ghJson(ghPath, ['api', `repos/${target.slug}/releases?per_page=10`], current.requestTimeoutMs)
+      if (!releasesResult.ok) {
+        writeJson(res, 502, { ok: false, code: 'gh-failed', message: releasesResult.message })
+        return
+      }
+      const releases = Array.isArray(releasesResult.value)
+        ? releasesResult.value.map(normalizeRelease).filter((release) => release !== null)
+        : []
+      const latest = pickInstallableRelease(releases, wanted)
+      if (latest === null) {
+        writeJson(res, 409, {
+          ok: false,
+          code: 'no-release',
+          message: wanted === ''
+            ? 'this repository has no published release carrying a .tgz asset yet'
+            : `release ${wanted} is not published, or carries no .tgz asset`,
+          value: { repo: target.entry.repo, tag: wanted === '' ? null : wanted },
+        })
+        return
+      }
+
+      /*
+       * Downloaded beside the managed config file rather than into a temp directory,
+       * and kept: the profile's dependency ends up pointing at this path, so deleting
+       * the tarball afterwards would leave a manifest that no longer installs.
+       */
+      const directory = join(dirname(resolveConfigFilePath(config)), DOWNLOAD_DIR_NAME)
+      let tarball = ''
+      try {
+        mkdirSync(directory, { recursive: true })
+        tarball = join(directory, latest.asset)
+      } catch (error) {
+        writeJson(res, 500, { ok: false, code: 'download-dir-failed', message: `cannot prepare ${directory}: ${String(error?.message ?? error)}` })
+        return
+      }
+      const fetched = await ghRun(
+        ghPath,
+        ['release', 'download', latest.tag, '-R', target.slug, '-p', latest.asset, '-D', directory, '--clobber'],
+        Math.max(current.requestTimeoutMs, 60_000),
+      )
+      if (!fetched.ok) {
+        writeJson(res, 502, { ok: false, code: 'download-failed', message: firstLine(fetched.stderr) || `gh release download failed for ${latest.asset}` })
+        return
+      }
+      if (!existsSync(tarball)) {
+        writeJson(res, 502, { ok: false, code: 'download-failed', message: `gh reported success but ${latest.asset} is not in ${directory}` })
+        return
+      }
+      /*
+       * Make a no-op a no-op.
+       *
+       * Handed a spec the manifest already carries, pnpm changes nothing, so it
+       * reports no changed dependency — and the plugin manager reads "no dependency
+       * changed" as `ambiguous-install` and restores the profile. That is a true
+       * statement about pnpm and a false one about this request: the profile already
+       * points at exactly this artifact, which is the outcome that was asked for.
+       */
+      if (install.kind === 'tarball' && install.path !== null && comparablePath(install.path) === comparablePath(tarball)) {
+        cache = null
+        writeJson(res, 200, {
+          ok: true,
+          value: {
+            repo: target.entry.repo,
+            packageName: install.packageName,
+            tag: latest.tag,
+            version: latest.version ?? versionFromTag(latest.tag),
+            asset: latest.asset,
+            from: install.installedVersion,
+            previousSpec: install.spec,
+            tarball,
+            application: 'applied',
+            /** Nothing was written, so there is nothing a restart would make live. */
+            changed: false,
+            restartRequired: false,
+            pendingBuilds: [],
+            warnings: [],
+          },
+        })
+        return
+      }
+
+      const change = await manager.installBundle(tarball, { enabled: true })
+      cache = null
+      const failed = change === null || typeof change !== 'object' || change.changed !== true
+        || change.application === 'failed' || change.application === 'cancelled'
+      if (failed) {
+        const reason = change?.error?.diagnostic ?? change?.error?.code ?? 'the plugin manager installed nothing'
+        writeJson(res, 502, {
+          ok: false,
+          code: 'install-failed',
+          message: `installing ${latest.asset} failed: ${String(reason)}. The profile files were restored.`,
+          value: { repo: target.entry.repo, tag: latest.tag, asset: latest.asset, application: change?.application ?? null },
+        })
+        return
+      }
+      writeJson(res, 200, {
+        ok: true,
+        value: {
+          repo: target.entry.repo,
+          packageName: install.packageName,
+          tag: latest.tag,
+          version: latest.version ?? versionFromTag(latest.tag),
+          asset: latest.asset,
+          from: install.installedVersion,
+          previousSpec: install.spec,
+          tarball,
+          changed: true,
+          application: change.application,
+          /**
+           * Always true for an update, and reported as such rather than inferred by
+           * the panel: the module is already loaded, and even a live-reload profile
+           * cannot swap ESM under a running Host.
+           */
+          restartRequired: true,
+          pendingBuilds: Array.isArray(change.pendingBuilds) ? change.pendingBuilds : [],
+          warnings: Array.isArray(change.warnings) ? change.warnings : [],
+        },
+      })
+    } finally {
+      updateInFlight = false
+    }
+  }
+
+  /**
+   * Forward a restart to the one-click restart plugin, if this Host mounts it.
+   *
+   * This plugin deliberately restarts nothing itself. Which process to stop, which
+   * executable to relaunch and how to survive the gap are `dsh-plugin-restart`'s
+   * contract, and a second implementation of that would eventually kill an app it
+   * cannot start again. The forward is same-authority and server-side, which the
+   * sibling route's trust rule accepts for exactly the reason it accepts the
+   * browser: the request came from this machine and from this Host.
+   */
+  const restartHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    await readJsonBody(req)
+    const authority = typeof req.headers?.host === 'string' ? req.headers.host : ''
+    if (parseAuthority(authority) === undefined) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: 'the request carries no Host authority to forward to' })
+      return
+    }
+    let response
+    try {
+      response = await fetch(`http://${authority}/api/dsh-restart/restart`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+        signal: AbortSignal.timeout(RESTART_FORWARD_TIMEOUT_MS),
+      })
+    } catch (error) {
+      writeJson(res, 502, {
+        ok: false,
+        code: 'restart-unreachable',
+        message: `could not reach the restart route: ${String(error?.message ?? error)}`,
+      })
+      return
+    }
+    /*
+     * 401 is what this Host answers for a path no plugin mounted, so it means
+     * "dsh-plugin-restart is not installed here" — not "you may not do this".
+     * Saying so is the difference between a fixable install and a mystery.
+     */
+    if (response.status === 401 || response.status === 404) {
+      writeJson(res, 501, {
+        ok: false,
+        code: 'restart-unavailable',
+        message: 'dsh-plugin-restart is not mounted on this Host, so nothing here can restart DSH',
+      })
+      return
+    }
+    let payload = null
+    try {
+      payload = await response.json()
+    } catch {
+      payload = null
+    }
+    if (payload === null || typeof payload !== 'object') {
+      writeJson(res, 502, {
+        ok: false,
+        code: 'restart-unreadable',
+        message: `the restart route answered HTTP ${String(response.status)} without JSON`,
+      })
+      return
+    }
+    writeJson(res, response.status, payload)
+  }
+
   /* --------------------------------------------------- setup, no terminal -- */
 
   /**
@@ -2049,6 +2612,11 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/release-action`, releaseActionHandler],
     [`${ROUTE_PREFIX}/version-bump`, versionBumpHandler],
     [`${ROUTE_PREFIX}/logs`, logsHandler],
+    // Taking the release, not just cutting it: the artifact is fetched and handed
+    // to the Host's own plugin manager, and the restart is left to the plugin that
+    // owns restarting.
+    [`${ROUTE_PREFIX}/update`, updateHandler],
+    [`${ROUTE_PREFIX}/restart`, restartHandler],
     [`${ROUTE_PREFIX}/auth-start`, authStartHandler],
     [`${ROUTE_PREFIX}/auth-state`, authStateHandler],
     [`${ROUTE_PREFIX}/auth-cancel`, authCancelHandler],
