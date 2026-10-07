@@ -127,9 +127,28 @@ Release 是给人下载的，npm 是给 `dsh plugin add` 装的。面板把它�
 
 插件**不保存任何 token**。它用 DSH 自带的 pnpm（`profileContext.packageManager`，也就是插件管理器安装时用的那个），凭据来自 npm 自己读的用户级 `.npmrc`。
 
-这台机器现在没有任何 npm 凭据（也没有 `npm` 这个命令），所以面板在未登录时给一个输入框：在 npmjs.com 生成一个带 publish 权限的 Access Token → 粘贴 → 【写入并验证】。Host 把它写进 `%USERPROFILE%\.npmrc`（**就是 `npm login` 会写的那个文件**，其他行原样保留，旧版本留一份 `.bak`），然后立刻用 `whoami` 验证。token 不回显、不落插件、不进日志；页面也在请求返回的那一刻就清空输入框。
+`gh` 那侧不需要教：它自己开浏览器设备码流程。npm 这侧不一样——token 得**手动在网站上建**，而且那条路的 UI 在 2025 年 11 月变过。所以未登录时面板给的是**从零开始的四步**，不是一句话：
+
+| 步 | 面板说什么 |
+|---|---|
+| ① 没有账号 | 「打开 npmjs.com 注册」按钮 + **注册后必须到邮箱点确认链接**（未验证邮箱的账号发不出去） |
+| ② 建 token | 「打开 token 页面」→ `npmjs.com/settings/~/tokens`。**类型只有 Granular Access Token 一种可选**：Classic token 已于 **2025-11-19 被 npm 全部撤销**，现在也建不出来。Permissions 选 `Read and write`，Packages 选全部或只勾这个包 |
+| ②a 有效期 | **最长 90 天**，这是 npm 对可写 token 的硬限制。到期就静默失效，回到第 ② 步再建一个 |
+| ②b 2FA | 只有"给 CI 用、没人能输一次性密码"时才勾 **Bypass 2FA**。在这里推**不要勾** |
+| ③ 粘贴 | 写进 `%USERPROFILE%\.npmrc`（**就是 `npm login` 会写的那个文件**；其他行原样保留，旧版本留一份 `.bak`），然后立刻用 `whoami` 验证 |
+| ④ 2FA | 推送的确认行里会出现一次性密码输入框 |
+
+token 不回显、不落插件、不进日志；页面在请求返回的那一刻就清空输入框。token 被拒时，面板直接把**排查清单**摊在同一块里（复制不全 / 权限不是 Read and write / 已撤销或超过 90 天 / 范围是别的包 / 邮箱未验证），而不是只回一句 `ERR_PNPM_WHOAMI_UNAUTHORIZED`。
+
+推送失败也**归类**成下一步做什么，而不是把 npm 的原话丢给用户：`otp-required`（去填一次性密码）、`email-unverified`（去点确认链接）、`not-logged-in`（重建 token）、`already-published`（先升版本）、`payment-required`（私有包要付费）、`forbidden`（检查 token 的 Packages 范围）、`not-found`、`rate-limited`、`registry-error`、`network`、`timeout`、`unknown`。npm 的原话仍然原样显示在下面——归类是补充，不是替换。
 
 开了 2FA 的账号，推送时 npm 要一次性密码：确认行里就有那个输入框。子进程的 stdin 是关闭的（`ignore`），所以它**不会**挂着等一个没人持有的 stdin——失败会明说是要 OTP，而不是转圈到超时。
+
+### 另一条路：完全不用 token（trusted publishing）
+
+如果你的目标是"CI 里自动发布"，**不该**用上面这条路。npm 支持 **trusted publishing（GitHub Actions OIDC）**：`release.yml` 加 `id-token: write` 权限并在 npm 上登记这个仓库，发布时用 OIDC 换一次性凭据——**没有任何长期 token**，还自带 provenance。这与本插件"不存凭据"的原则完全一致，也是本仓库更推荐的方向。
+
+面板**不做**这件事：它是在**这台机器上推一次**的路径，不是 CI 的替代品。CI 发布需要 token 时，token 应放在仓库 secret 里（`NPM_TOKEN`），而不是这台机器上。
 
 ## 配置：用脚本，不要手改 YAML
 
@@ -296,7 +315,8 @@ pwsh -File scripts/push-via-api.ps1 -RepoPath 'F:\CodeProj\dsh-plugin-cicd'
 - **重启需要装了 `dsh-plugin-restart`**。发布台不自己杀进程——停哪个、怎么拉起来是那个插件的契约。
 - 更新的判定读的是 `node_modules/<name>/package.json` 的版本，不是依赖字符串。`link:` 时它等于本地检出的版本，所以"版本一样"绝不能被当成"装的是发布的那份"——那正是 `checkout` 这个状态存在的理由。
 - **npm 推送复用 Host 自己的包管理器**：优先 `profileContext.packageManager`（DSH 自带的 pnpm），其次 `DSH_PNPM`，再其次打包应用自带的 `resources/runtime/pnpm`，最后才是 PATH 上的 `pnpm`。走到最后一步而机器上没有 pnpm 时，报错会明说 `ENOENT` 与它找的是什么。源码里 `npm-status` 只做 `whoami`，网络那一侧是 HTTPS `fetch`（**不走** `HTTP_PROXY`，本机实测直连可达）。
-- **npm 推送没有 provenance**。真需要 `--provenance`（构建来源可验证）的包应当在 CI 里发布（`release.yml` + `NPM_TOKEN` + OIDC），面板这条路是"在这台机器上推一次"的路径，不是它的替代品。
+- **npm 推送没有 provenance**，而且用的是长期 token（可写 token 最长 90 天）。真需要 `--provenance`（构建来源可验证）或不想在机器上放任何 token 的包，应当走 **trusted publishing（GitHub Actions OIDC）**——那才是 CI 的正路，面板这条路是"在这台机器上推一次"。
+- npm 在 2025-11 之后**只有 Granular Access Token**：Classic token 已全部撤销且不能再创建。可写 token 默认强制 2FA、最长 90 天。任何还写着"建一个 Classic Automation token"的文档都已经过期了。
 - `private: true` 的包（例如 `dsh-knowledge-console`）面板**不会**提供推送按钮，这是有意的：那行字段是作者的决定。
 
 ## License

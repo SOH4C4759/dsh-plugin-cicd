@@ -1416,6 +1416,40 @@ export function npmPublishVerdict({ packageName = '', version = null, manifest =
 }
 
 /**
+ * What a failed publish actually means, as a name the panel can answer.
+ *
+ * A raw npm error is the least useful thing to show someone who has never made a
+ * token: `EOTP` and `E403` are one line of jargon each and completely different
+ * fixes. The patterns are matched most-specific-first, because `E403` appears inside
+ * messages that are about an unverified email or a token scoped to another package.
+ *
+ * @param {unknown} output - combined stdout and stderr of the publish.
+ * @returns {string} one of otp-required / email-unverified / not-logged-in /
+ *   already-published / payment-required / forbidden / not-found / rate-limited /
+ *   registry-error / network / unknown.
+ */
+export function classifyPublishFailure(output) {
+  const text = typeof output === 'string' ? output : ''
+  if (text.trim() === '') return 'unknown'
+  const rules = [
+    [/one-time password|one-time passcode|\bEOTP\b|ERR_PNPM_OTP/i, 'otp-required'],
+    [/verify your email|email address.{0,40}not verified|unverified email/i, 'email-unverified'],
+    [/EPUBLISHCONFLICT|cannot publish over|previously published/i, 'already-published'],
+    [/E402|Payment Required|private packages? (?:require|need)/i, 'payment-required'],
+    [/ENEEDAUTH|\bE401\b|You must be logged in|unauthorized/i, 'not-logged-in'],
+    [/\bE403\b|Forbidden|not authorized|does not have permission/i, 'forbidden'],
+    [/\bE404\b|Not Found/i, 'not-found'],
+    [/\bE429\b|Too Many Requests/i, 'rate-limited'],
+    [/\bE5\d\d\b|Internal Server Error|Service Unavailable|Bad Gateway/i, 'registry-error'],
+    [/ENOTFOUND|ECONNREFUSED|ETIMEDOUT|ECONNRESET|socket hang up|network/i, 'network'],
+  ]
+  for (const [pattern, code] of rules) {
+    if (pattern.test(text)) return code
+  }
+  return 'unknown'
+}
+
+/**
  * The package manager this Host itself uses.
  *
  * Reused rather than re-found, for the same reason `gh` is reused instead of a token:
@@ -3033,20 +3067,33 @@ export function apply(ctx, rawConfig) {
       })
       npmCache = null
       if (result.ok !== true) {
-        const combined = `${result.stdout}\n${result.stderr}`
         /*
-         * A one-time password is its own outcome, not a failure to report as a
-         * wall of text: the panel has a field for it, so it says which field.
+         * A named outcome, not a wall of npm text. `EOTP` and `E403` are one line of
+         * jargon each and completely different fixes; the panel answers each with the
+         * step that resolves it, which is the whole point of guiding a first publish.
          */
-        const needsOtp = /one-time password|one-time passcode|\bEOTP\b|ERR_PNPM_OTP|--otp/i.test(combined)
+        const code = result.killed === true
+          ? 'timeout'
+          : classifyPublishFailure(`${result.stdout}\n${result.stderr}`)
         const message = result.killed === true
           ? `the publish timed out after ${String(NPM_PUBLISH_TIMEOUT_MS)} ms`
           : (firstLine(result.stderr) || firstLine(result.stdout) || 'the publish failed')
-        writeJson(res, needsOtp ? 401 : 502, {
+        const status = code === 'otp-required' || code === 'not-logged-in' || code === 'forbidden' || code === 'email-unverified'
+          ? 401
+          : code === 'already-published'
+            ? 409
+            : 502
+        writeJson(res, status, {
           ok: false,
-          code: needsOtp ? 'otp-required' : 'publish-failed',
+          code,
           message,
-          value: { repo: target.entry.repo, packageName: manifest.name, version: manifest.version, registry, needsOtp },
+          value: {
+            repo: target.entry.repo,
+            packageName: manifest.name,
+            version: manifest.version,
+            registry,
+            needsOtp: code === 'otp-required',
+          },
         })
         return
       }

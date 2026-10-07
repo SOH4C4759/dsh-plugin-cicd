@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
+import { classifyPublishFailure, classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -396,6 +396,26 @@ check('the fallback reports where it got the answer', ['DSH_PNPM', 'bundled', 'p
 
 check('a directory that is not a checkout has no dirty count', (await readDirtyCount(join(tmpdir(), '__dsh-cicd-nope__'), 5_000)) === null)
 check('an empty path has no dirty count', (await readDirtyCount('', 5_000)) === null)
+
+/* -- 10b. What a failed publish means ----------------------------------------
+   This is what makes the credential guide usable rather than decorative: npm's own
+   words are jargon, and each of these five is a different next step on screen. The
+   order of the rules matters — `E403` shows up inside the email and scope messages,
+   so it must not be the first thing that matches. */
+check('a one-time password demand is recognised', classifyPublishFailure('npm ERR! code EOTP\nThis operation requires a one-time password') === 'otp-required')
+check('pnpm\'s own OTP error is recognised', classifyPublishFailure('[ERR_PNPM_OTP_REQUIRED] pass --otp') === 'otp-required')
+check('an unverified email is recognised', classifyPublishFailure('npm ERR! 403 Forbidden - PUT … You must verify your email before publishing') === 'email-unverified')
+check('an unverified email is not reported as a plain 403', classifyPublishFailure('E403 You must verify your email') === 'email-unverified')
+check('a missing credential is recognised', classifyPublishFailure('npm ERR! code ENEEDAUTH') === 'not-logged-in')
+check('a version conflict is recognised', classifyPublishFailure('npm ERR! code EPUBLISHCONFLICT cannot publish over previously published version') === 'already-published')
+check('the paid-private-package refusal is recognised', classifyPublishFailure('npm ERR! 402 Payment Required — private packages require a paid account') === 'payment-required')
+check('a scope refusal is recognised as forbidden', classifyPublishFailure('npm ERR! 403 Forbidden - PUT https://registry.npmjs.org/x - You do not have permission') === 'forbidden')
+check('a missing name is recognised', classifyPublishFailure('npm ERR! 404 Not Found - PUT https://registry.npmjs.org/x') === 'not-found')
+check('rate limiting is recognised', classifyPublishFailure('npm ERR! 429 Too Many Requests') === 'rate-limited')
+check('a registry 5xx is not blamed on the user', classifyPublishFailure('npm ERR! 503 Service Unavailable') === 'registry-error')
+check('a network failure is recognised', classifyPublishFailure('request to https://registry.npmjs.org failed, reason: getaddrinfo ENOTFOUND') === 'network')
+check('unrecognised output is named unknown rather than guessed at', classifyPublishFailure('something else entirely') === 'unknown')
+check('empty output is unknown, not a crash', classifyPublishFailure('') === 'unknown' && classifyPublishFailure(undefined) === 'unknown')
 
 /* -- 11. Live checks (opt-in) ----------------------------------------------- */
 if (process.env.DSH_CICD_LIVE === '1') {

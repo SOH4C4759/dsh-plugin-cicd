@@ -196,7 +196,35 @@ window.__ModuleLoader__.load({
       'npm.account': 'npm {account}',
       'npm.registry': '源 {registry}',
       'npm.recheck': '重新检测 npm',
-      'npm.notLoggedIn': '{command} 还没有登录 {registry}——发布需要 npm 的凭据，而插件自己不保存 token。不用开终端：在 npmjs.com 生成一个带 publish 权限的 Access Token，粘贴到下面，它会写进 {npmrc}（npm 自己读的那个用户级配置文件）。',
+      'npm.notLoggedIn': '{command} 还没有登录 {registry}——发布需要 npm 的凭据，而插件自己不保存 token。下面是从零开始的四步。',
+      'npm.guide.step1': '① 还没有 npm 账号？',
+      'npm.guide.signup': '打开 npmjs.com 注册',
+      'npm.guide.emailNote': '注册后**必须**到邮箱点确认链接：npm 不允许未验证邮箱的账号发布。',
+      'npm.guide.step2': '② 生成一个 Access Token',
+      'npm.guide.tokens': '打开 token 页面',
+      'npm.guide.tokenType': '类型只有一种可选：Granular Access Token。Classic token 已于 2025-11-19 被 npm 全部撤销，现在也建不出来——别去找它。',
+      'npm.guide.tokenScope': 'Permissions 选 Read and write；Packages 选全部，或只勾这个包（只勾一个包更安全）。',
+      'npm.guide.tokenExpiry': '有效期最长 90 天，这是 npm 对可写 token 的硬限制。到期后 token 就失效了，回到第 ② 步再生成一个。',
+      'npm.guide.token2fa': '只有"给 CI 用、没有人能输一次性密码"时才勾 Bypass 2FA。在这里推**不要勾**：推送时面板会让你填一次性密码。',
+      'npm.guide.step3': '③ 粘贴到下面',
+      'npm.guide.step3Note': '它会写进 {npmrc}（npm 自己读的用户级配置文件，其他行原样保留）；插件不保存 token，请求一返回输入框就清空。',
+      'npm.guide.step4': '④ 账号开了 2FA？',
+      'npm.guide.step4Note': '推送的确认行里会出现一次性密码输入框，填 6 位数字再点一次【确认推送】即可。',
+      'npm.guide.docs': 'npm 官方文档',
+      'npm.rejectedTitle': '这个 token 没有被接受。按顺序排查：',
+      'npm.rejectedCauses': '① 复制不全（前后带了空格或换行）；② 权限不是 Read and write；③ 已被撤销、或超过 90 天有效期；④ token 被限制到别的包或组织；⑤ 账号邮箱还没验证。',
+      'npm.hint.otp-required': '这个账号要求一次性密码：在推送的确认行里填 6 位数字，再点一次【确认推送】。',
+      'npm.hint.email-unverified': '先去邮箱点确认链接——npm 不允许未验证邮箱的账号发布——然后回来重试。',
+      'npm.hint.not-logged-in': 'token 无效、过期或已被撤销：照上面第 ② 步重新生成一个（可写 token 最长 90 天）。',
+      'npm.hint.already-published': '这个版本已经在 npm 上了。npm 不接受同一版本推两次：先用【升版本并发布】升版本，再推。',
+      'npm.hint.payment-required': 'npm 对私有包收费，公开包免费。检查 package.json 里有没有 private 字段、以及发布的是不是公开包。',
+      'npm.hint.forbidden': '这个 token 没有被授权发布这个包：检查 token 的 Packages 范围，以及包名是否属于你的账号或组织。',
+      'npm.hint.not-found': '源上没有这个包名可发布的位置：确认包名拼写、以及账号或组织名。',
+      'npm.hint.rate-limited': '被源限流了，等几分钟再试。',
+      'npm.hint.registry-error': '这是源自己出错（5xx），不是你配置的问题，稍后重试。',
+      'npm.hint.network': '连不上源：检查网络或代理设置。',
+      'npm.hint.timeout': '推送超过时限还没结束：可能是网络慢，也可能源在等你回答什么。重试一次，仍失败就看下面的原话。',
+      'npm.hint.unknown': '没识别出具体原因，看下面 npm 的原话。',
       'npm.tokenPlaceholder': 'npm_… 或粘贴 Access Token',
       'npm.writeToken': '写入并验证',
       'npm.tokenWritten': 'token 已写入 {npmrc}，当前账号 {account}。',
@@ -379,7 +407,35 @@ window.__ModuleLoader__.load({
       'npm.account': 'npm {account}',
       'npm.registry': 'registry {registry}',
       'npm.recheck': 'Re-check npm',
-      'npm.notLoggedIn': '{command} is not signed in to {registry} — publishing needs npm credentials, and this plugin stores no token of its own. No terminal needed: create an Access Token with publish rights on npmjs.com, paste it below, and it is written to {npmrc} (the user-level file npm itself reads).',
+      'npm.notLoggedIn': '{command} is not signed in to {registry} — publishing needs npm credentials, and this plugin stores no token of its own. Four steps, from nothing.',
+      'npm.guide.step1': '(1) No npm account yet?',
+      'npm.guide.signup': 'Open npmjs.com to sign up',
+      'npm.guide.emailNote': 'You MUST confirm the link npm emails you: an account with an unverified email cannot publish.',
+      'npm.guide.step2': '(2) Create an access token',
+      'npm.guide.tokens': 'Open the token page',
+      'npm.guide.tokenType': 'There is only one kind left: a Granular Access Token. Classic tokens were all revoked on 2025-11-19 and can no longer be created — do not go looking for one.',
+      'npm.guide.tokenScope': 'Set Permissions to Read and write; scope Packages to everything, or to just this package (narrower is safer).',
+      'npm.guide.tokenExpiry': 'The maximum lifetime is 90 days, which is npm\'s hard limit for a write token. When it expires it simply stops working; come back to step 2 and make another.',
+      'npm.guide.token2fa': 'Tick Bypass 2FA only for CI, where nobody can type a one-time password. For pushing here, leave it OFF — the panel will ask for the code.',
+      'npm.guide.step3': '(3) Paste it below',
+      'npm.guide.step3Note': 'It is written to {npmrc} (the user-level file npm itself reads; every other line is preserved). This plugin stores no token, and the field is cleared as soon as the request answers.',
+      'npm.guide.step4': '(4) Is 2FA on the account?',
+      'npm.guide.step4Note': 'The push confirmation grows a one-time password field: enter the 6 digits and press Push again.',
+      'npm.guide.docs': 'npm documentation',
+      'npm.rejectedTitle': 'That token was not accepted. Check, in order:',
+      'npm.rejectedCauses': '(1) it was copied incompletely (leading or trailing whitespace); (2) Permissions are not Read and write; (3) it was revoked, or passed its 90-day limit; (4) it is scoped to another package or organization; (5) the account email is still unverified.',
+      'npm.hint.otp-required': 'This account requires a one-time password: enter the 6 digits in the push confirmation and press Push again.',
+      'npm.hint.email-unverified': 'Confirm the link npm emailed you first — an unverified email cannot publish — then try again.',
+      'npm.hint.not-logged-in': 'The token is invalid, expired or revoked: make a new one as in step 2 (a write token lasts at most 90 days).',
+      'npm.hint.already-published': 'This version is already on npm, which never accepts the same version twice: bump the version first, then push.',
+      'npm.hint.payment-required': 'npm charges for private packages and not for public ones. Check for a private flag in package.json and whether this is meant to be public.',
+      'npm.hint.forbidden': 'This token is not allowed to publish this package: check its Packages scope, and whether the name belongs to your account or organization.',
+      'npm.hint.not-found': 'The registry has no publishable place for that name: check the spelling and the account or organization.',
+      'npm.hint.rate-limited': 'The registry is rate-limiting you; try again in a few minutes.',
+      'npm.hint.registry-error': 'The registry itself failed (5xx). That is not your configuration — try again shortly.',
+      'npm.hint.network': 'The registry cannot be reached: check the network or proxy settings.',
+      'npm.hint.timeout': 'The publish did not finish in time: a slow network, or the registry waiting for an answer. Retry once, and read its own words below if it fails again.',
+      'npm.hint.unknown': 'No specific cause was recognised; npm\'s own words are below.',
       'npm.tokenPlaceholder': 'npm_… or paste an access token',
       'npm.writeToken': 'Write and verify',
       'npm.tokenWritten': 'The token is in {npmrc}; signed in as {account}.',
@@ -1549,6 +1605,10 @@ window.__ModuleLoader__.load({
        * the field the moment that answers.
        */
       const [npmToken, setNpmToken] = React.useState('')
+      /** Set when a pasted token was refused, which is when the checklist is read. */
+      const [npmTokenRejected, setNpmTokenRejected] = React.useState(false)
+      /** The classified outcome of the last publish: `otp-required`, `E403`, … */
+      const [npmFailure, setNpmFailure] = React.useState(null)
       /**
        * The update that just landed and the restart it needs.
        *
@@ -1820,9 +1880,12 @@ window.__ModuleLoader__.load({
           }
           if (!result.response.ok || result.payload?.ok !== true) {
             setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            /* The named outcome is what turns npm's own words into a next step. */
+            setNpmFailure(String(result.payload?.code ?? 'unknown'))
             await loadNpm({ force: true })
             return
           }
+          setNpmFailure(null)
           const value = result.payload.value ?? {}
           setNotice(t(value.wasUnregistered === true ? 'state.npmFirstPublish' : 'state.npmPublished', {
             package: String(value.packageName ?? data.repo),
@@ -1855,9 +1918,11 @@ window.__ModuleLoader__.load({
         }
         if (!result.response.ok || result.payload?.ok !== true) {
           setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          setNpmTokenRejected(result.payload?.code === 'token-rejected')
           await loadNpm({ force: true })
           return
         }
+        setNpmTokenRejected(false)
         const value = result.payload.value ?? {}
         setNotice(t('npm.tokenWritten', { npmrc: String(value.npmrcPath ?? ''), account: String(value.account ?? '') }))
         await loadNpm({ force: true })
@@ -1899,6 +1964,11 @@ window.__ModuleLoader__.load({
        */
       const npmByRepo = new Map((npm?.repos ?? []).map((entry) => [entry.repo, entry]))
       const npmAuth = npm?.auth ?? null
+      const npmHintText = (() => {
+        if (npmFailure === null) return null
+        const text = t(`npm.hint.${npmFailure}`)
+        return text === `npm.hint.${npmFailure}` ? null : text
+      })()
       const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
       const setupNeeded = status !== null && (needsAccountSetup(gh) || configured.length === 0)
       const draftCount = repos.filter((entry) => entry.draftTag !== null && entry.draftTag !== undefined).length
@@ -1958,6 +2028,9 @@ window.__ModuleLoader__.load({
         ),
 
         error !== null ? h('div', { className: 'dsc-error', role: 'alert' }, errorText(t, error)) : null,
+        /* The next step for a named npm failure. Rendered only when a hint exists for
+           that code, so an unmapped name can never print a dictionary key on screen. */
+        npmHintText !== null ? h('div', { className: 'dsc-warn', role: 'status' }, npmHintText) : null,
         notice !== null ? h('div', { className: 'dsc-notice', role: 'status' }, notice) : null,
         /* The question an update leaves behind. It sits above the list rather than
            inside the row, because the row is about a repository and this is about
@@ -1976,13 +2049,15 @@ window.__ModuleLoader__.load({
             )
           : null,
         /*
-         * npm credentials, when there are none.
+         * The zero-basics version of the same block, with the four steps spelled out.
          *
-         * Panel-level rather than per row, because it is one fact about the machine
-         * and five copies of the same instruction is not five times as helpful. The
-         * token is typed here, written by the Host into the .npmrc npm itself reads,
-         * and never kept by this plugin — which is the same promise the GitHub side
-         * makes by reusing a signed-in `gh` instead of a stored token.
+         * A first npm publish is not like a first `gh auth login`: `gh` drives its own
+         * browser flow, while a token has to be made by hand on a website whose UI
+         * changed in November 2025 — classic tokens were revoked outright, what is
+         * left is a granular token with a 90-day ceiling and 2FA on by default. So
+         * this states the steps, the exact page, and the two settings that decide
+         * whether the paste works, instead of one sentence that assumes the reader
+         * already knows all of it.
          */
         npmAuth !== null && npmAuth.loggedIn !== true
           ? h(
@@ -1991,8 +2066,26 @@ window.__ModuleLoader__.load({
               h('span', { className: 'dsc-setup-strong' }, t('npm.notLoggedIn', {
                 command: String(npm?.packageManager?.command ?? 'pnpm'),
                 registry: String(npm.registry ?? ''),
-                npmrc: String(npmAuth.npmrcPath ?? ''),
               })),
+              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step1')),
+              h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h(Btn, { onClick: () => globalThis.open('https://www.npmjs.com/signup', '_blank', 'noopener,noreferrer') }, t('npm.guide.signup')),
+                h('span', null, t('npm.guide.emailNote')),
+              ),
+              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step2')),
+              h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h(Btn, { onClick: () => globalThis.open('https://www.npmjs.com/settings/~/tokens', '_blank', 'noopener,noreferrer') }, t('npm.guide.tokens')),
+                h(Btn, { kind: 'quiet', onClick: () => globalThis.open('https://docs.npmjs.com/creating-and-viewing-access-tokens', '_blank', 'noopener,noreferrer') }, t('npm.guide.docs')),
+              ),
+              h('span', null, t('npm.guide.tokenType')),
+              h('span', null, t('npm.guide.tokenScope')),
+              h('span', null, t('npm.guide.tokenExpiry')),
+              h('span', null, t('npm.guide.token2fa')),
+              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step3')),
               h(
                 'div',
                 { className: 'dsc-setup-line' },
@@ -2013,10 +2106,21 @@ window.__ModuleLoader__.load({
                 }, busy === 'npm-login' ? '…' : t('npm.writeToken')),
                 h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void loadNpm({ force: true }) } }, t('npm.recheck')),
               ),
-              /* Whatever the package manager said, verbatim: "not signed in" and "the
-                 token was revoked" are the same blank state and different problems. */
+              h('span', null, t('npm.guide.step3Note', { npmrc: String(npmAuth.npmrcPath ?? '') })),
+              /* A rejected token is the moment this block is actually read, so the
+                 checklist belongs here rather than in a document nobody opens. */
+              npmTokenRejected
+                ? h(
+                    React.Fragment,
+                    null,
+                    h('span', { className: 'dsc-warn' }, t('npm.rejectedTitle')),
+                    h('span', null, t('npm.rejectedCauses')),
+                  )
+                : null,
+              h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step4')),
+              h('span', null, t('npm.guide.step4Note')),
               npmAuth.message !== null && npmAuth.message !== undefined
-                ? h('span', null, String(npmAuth.message))
+                ? h('span', { className: 'dsc-mono' }, String(npmAuth.message))
                 : null,
               h('span', { className: 'dsc-mono' }, `${t('npm.npmrcPath')} ${String(npmAuth.npmrcPath ?? '')}`),
             )

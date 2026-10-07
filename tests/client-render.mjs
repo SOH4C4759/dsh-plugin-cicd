@@ -693,6 +693,18 @@ async function expandFirstRow(tree) {
   const text = textOf(panel)
   check('a missing npm credential is explained, not hidden', text.includes('还没有登录'), text.replace(/\s+/g, ' ').slice(0, 240))
   check('the explanation names the file npm itself reads', text.includes('C:\\Users\\x\\.npmrc'))
+  /* Zero-basics means the four steps are on screen, not one sentence that assumes
+     the reader already knows how npm tokens work. */
+  check('the guide walks all four steps', ['① 还没有 npm 账号？', '② 生成一个 Access Token', '③ 粘贴到下面', '④ 账号开了 2FA？'].every((step) => text.includes(step)), text.replace(/\s+/g, ' ').slice(0, 300))
+  check('the guide links to the sign-up page', hasButton(panel, '打开 npmjs.com 注册'))
+  check('the guide links to the token page', hasButton(panel, '打开 token 页面'))
+  check('the guide links to the npm documentation', hasButton(panel, 'npm 官方文档'))
+  /* The facts that changed in November 2025 and that a stale guide would get wrong:
+     classic tokens are gone, and a write token has a 90-day ceiling. */
+  check('the guide says classic tokens are gone', text.includes('Classic token 已于 2025-11-19'), text.replace(/\s+/g, ' ').slice(0, 300))
+  check('the guide states the 90-day ceiling', text.includes('最长 90 天'))
+  check('the guide says not to bypass 2FA for a local push', text.includes('不要勾'))
+  check('the guide says the email must be verified before publishing', text.includes('不允许未验证邮箱的账号发布'))
   /* What the package manager actually said, verbatim: "not signed in" and "that
      token was revoked" are the same blank state and different problems. */
   check('the package manager\'s own message is shown', text.includes('ERR_PNPM_WHOAMI_UNAUTHORIZED'))
@@ -715,6 +727,62 @@ async function expandFirstRow(tree) {
   check('an unanswered npm status invents no state', text.includes('npm 待推') === false && text.includes('npm 上还没有') === false, text.replace(/\s+/g, ' ').slice(0, 180))
   const { tree } = await expandFirstRow(silent)
   check('an unanswered npm status offers no push', hasButton(tree, '推送到 npm') === false)
+}
+
+/* -- 15. A failed push names the next step, not just the error --------------- */
+{
+  const answers = { '/npm-publish': { ok: false, code: 'otp-required', message: 'npm ERR! code EOTP — this operation requires a one-time password', __status: 401 } }
+  const panel = await renderPanel([repoFixture()], baseStatus.value, answers, npmStatusValue())
+  const { tree } = await expandFirstRow(panel)
+  clickButton(tree, '推送到 npm v1.0.1')
+  clickButton(await rerender(), '确认推送')
+  await rerender()
+  const after = await rerender()
+  const text = textOf(after)
+  check('a one-time password demand becomes a next step', text.includes('要求一次性密码'), text.replace(/\s+/g, ' ').slice(0, 260))
+  check('the registry\'s own words are still shown', text.includes('EOTP'))
+
+  const forbidden = await renderPanel([repoFixture()], baseStatus.value, {
+    '/npm-publish': { ok: false, code: 'forbidden', message: 'npm ERR! 403 Forbidden - PUT … You do not have permission', __status: 401 },
+  }, npmStatusValue())
+  const { tree: forbiddenTree } = await expandFirstRow(forbidden)
+  clickButton(forbiddenTree, '推送到 npm v1.0.1')
+  clickButton(await rerender(), '确认推送')
+  await rerender()
+  const forbiddenText = textOf(await rerender())
+  check('a scope refusal points at the token\'s package scope', forbiddenText.includes('Packages 范围'), forbiddenText.replace(/\s+/g, ' ').slice(0, 260))
+
+  /* An unmapped code must print nothing rather than a dictionary key. */
+  const unmapped = await renderPanel([repoFixture()], baseStatus.value, {
+    '/npm-publish': { ok: false, code: 'something-new', message: 'a failure from a future version', __status: 502 },
+  }, npmStatusValue())
+  const { tree: unmappedTree } = await expandFirstRow(unmapped)
+  clickButton(unmappedTree, '推送到 npm v1.0.1')
+  clickButton(await rerender(), '确认推送')
+  await rerender()
+  const unmappedText = textOf(await rerender())
+  check('an unrecognised failure code prints no dictionary key', unmappedText.includes('npm.hint.') === false, unmappedText.replace(/\s+/g, ' ').slice(0, 220))
+  check('an unrecognised failure still reports the error', unmappedText.includes('a failure from a future version'))
+}
+
+/* -- 16. A refused token raises the checklist ------------------------------- */
+{
+  const notSignedIn = npmStatusValue({
+    auth: { loggedIn: false, account: null, message: '[ERR_PNPM_WHOAMI_UNAUTHORIZED] You must be logged in to use whoami', npmrcPath: 'C:\\Users\\x\\.npmrc', npmrcReadable: true, npmrcHasToken: true },
+    repos: [npmFixture({ canPublish: false, blockers: ['not-logged-in'] })],
+  })
+  const panel = await renderPanel([repoFixture()], baseStatus.value, {
+    '/npm-login': { ok: false, code: 'token-rejected', message: 'the token was written to C:\\Users\\x\\.npmrc, but the registry did not accept it: ERR_PNPM_WHOAMI_UNAUTHORIZED', __status: 401 },
+  }, notSignedIn)
+  check('no checklist before a token was tried', textOf(panel).includes('这个 token 没有被接受') === false)
+  typeInto(panel, 'npm_', 'npm_bogus_token')
+  clickButton(await rerender(), '写入并验证')
+  await rerender()
+  const after = await rerender()
+  const text = textOf(after)
+  check('a refused token raises the checklist', text.includes('这个 token 没有被接受'), text.replace(/\s+/g, ' ').slice(0, 300))
+  check('the checklist names the 90-day limit among its causes', text.includes('90 天有效期'))
+  check('the refusal does not leak what was typed back into the page', text.includes('npm_bogus_token') === false)
 }
 
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
