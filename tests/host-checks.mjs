@@ -231,9 +231,18 @@ const otherCheckout = mkdtempSync(join(tmpdir(), 'dsh-cicd-other-'))
 const writeManifest = (dir, manifest) => writeFileSync(join(dir, 'package.json'), JSON.stringify(manifest, null, 2), 'utf8')
 writeManifest(checkoutDir, { name: 'dsh-demo', version: '1.2.0' })
 
+/* Every Windows spelling below is asserted on BOTH platforms on purpose. The bug
+   this pins: classifying `link:`/`file:` through `path.isAbsolute` made every
+   Windows-written spec `other` on the Linux runner, which turned a `link:` checkout
+   into "current" — the one answer that hides "you are not running the published
+   code". So the spellings stay Windows-shaped here and the assertions must hold
+   wherever this suite runs. */
 check('a link spec is classified as a checkout', classifySpec('link:F:\\CodeProj\\x').kind === 'link')
 check('a file tarball is classified as a tarball', classifySpec('file:F:\\dl\\x-1.0.0.tgz').kind === 'tarball')
 check('a file directory is classified as a path', classifySpec('file:F:\\CodeProj\\x').kind === 'path')
+check('a bare drive-letter path is a path on any platform', classifySpec('F:\\CodeProj\\x').kind === 'path')
+check('a prefixed spec keeps its path verbatim', classifySpec('link:F:\\CodeProj\\x').path === 'F:\\CodeProj\\x')
+check('link: without a path is not a kind', classifySpec('link:').kind === 'other')
 check('a registry range is classified as registry', classifySpec('^1.2.3').kind === 'registry')
 check('a git spec is not mistaken for a registry name', classifySpec('github:me/repo').kind === 'other')
 check('an empty spec is not a kind', classifySpec('').kind === 'other')
@@ -296,6 +305,11 @@ const describeOf = (deps, releases, installedVersion = '1.2.0') => {
   return describeInstall({ profileDir, profileName: 'desktop', entry, releases })
 }
 
+/* The consequence, not just the classification: a Windows-written `link:` spec whose
+   version EQUALS the release must still be `checkout`. If it ever reads `current`
+   again, the panel has gone back to telling a developer their profile runs the
+   published artifact while it runs a checkout. */
+check('a Windows-spelled link is a checkout even when the version matches', describeOf({ 'dsh-demo': 'link:F:\\CodeProj\\dsh-plugin-demo' }, [tgzOf('v1.2.0')], '1.2.0').state === 'checkout')
 check('an installed copy behind the release offers an update', describeOf({ 'dsh-demo': 'file:F:\\dl\\dsh-demo-1.2.0.tgz' }, [tgzOf('v1.3.0')], '1.2.0').state === 'update')
 check('an installed copy at the release version is current', describeOf({ 'dsh-demo': 'file:F:\\dl\\dsh-demo-1.3.0.tgz' }, [tgzOf('v1.3.0')], '1.3.0').state === 'current')
 check('an installed copy past the release says so instead of offering a downgrade silently', describeOf({ 'dsh-demo': 'file:F:\\dl\\dsh-demo-2.0.0.tgz' }, [tgzOf('v1.3.0')], '2.0.0').state === 'ahead')

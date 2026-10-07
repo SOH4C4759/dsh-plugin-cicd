@@ -955,6 +955,16 @@ function comparablePath(value) {
  * published; a `file:` tarball IS the published artifact. Reporting both as
  * "installed v1.2.3" would hide the only difference the update button exists for.
  *
+ * The shape test must NOT be `path.isAbsolute` alone. That function is
+ * platform-specific: on a POSIX Host it reads `F:\CodeProj\x` as RELATIVE, so every
+ * `link:`/`file:` spec a Windows profile writes classified as `other`. Measured on
+ * the Linux CI runner: three checks failed and `an installed tarball reports the
+ * version from node_modules` printed `"kind":"other"`. The consequence is the exact
+ * bug this judgement exists to prevent — a `link:` checkout whose version matches
+ * the release would be reported as `current`, with no way to tell that the profile
+ * is not running the published code. A `link:`/`file:` prefix and a drive-letter
+ * path therefore declare a local path by their TEXT, on every platform.
+ *
  * @param {unknown} spec - the dependency value from the profile manifest.
  * @returns {{kind: 'link'|'path'|'tarball'|'registry'|'other', path: string|null, range: string|null}}
  */
@@ -964,8 +974,9 @@ export function classifySpec(spec) {
   const linked = /^link:/i.test(value)
   const filed = /^file:/i.test(value)
   const raw = value.replace(/^(?:file|link):/i, '')
-  if (linked || filed || isAbsolute(raw)) {
-    if (raw === '' || !isAbsolute(raw)) return { kind: 'other', path: null, range: null }
+  const declaresAPath = linked || filed || isAbsolute(value) || /^[A-Za-z]:[\\/]/.test(value)
+  if (declaresAPath) {
+    if (raw === '') return { kind: 'other', path: null, range: null }
     if (linked) return { kind: 'link', path: raw, range: null }
     return { kind: /\.(?:tgz|tar\.gz)$/i.test(raw) ? 'tarball' : 'path', path: raw, range: null }
   }
