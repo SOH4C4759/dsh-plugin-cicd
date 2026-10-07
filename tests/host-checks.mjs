@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, nextVersion, normalizeRepoEntry, parseAuthStatus, parseReposFile, pickInstallableRelease, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, versionFromTag } from '../index.js'
+import { classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -325,7 +325,79 @@ check('a profile path falls back to the environment', resolveProfileDir({ DSH_PR
 check('a missing environment still yields a path', /profiles[\\/]desktop$/.test(resolveProfileDir({ DSH_HOME: 'C:\\h', DSH_PROFILE: 'desktop' })), resolveProfileDir({ DSH_HOME: 'C:\\h', DSH_PROFILE: 'desktop' }))
 check('an unreadable profile is reported, not thrown', readManifest(join(tmpdir(), '__dsh-cicd-nope__')) === null)
 
-/* -- 10. Live checks (opt-in) ----------------------------------------------- */
+/* -- 10. The npm channel ----------------------------------------------------
+   The push itself needs a registry and a credential, but almost none of its
+   judgement does: which registry to talk to, whether a token line exists, whether a
+   version is already published, and every reason a push must be refused are all pure
+   functions of strings and objects — which is exactly what makes them worth pinning. */
+check('a registry gains the trailing slash every URL assumes', normalizeRegistry('https://registry.npmjs.org') === 'https://registry.npmjs.org/')
+check('an explicit registry is kept', normalizeRegistry('https://npm.pkg.github.com/') === 'https://npm.pkg.github.com/')
+check('a registry with a path keeps it', normalizeRegistry('https://example.com/npm') === 'https://example.com/npm/')
+check('a non-http registry falls back rather than being used', normalizeRegistry('ftp://example.com/') === 'https://registry.npmjs.org/')
+/* A credential smuggled into a registry URL would end up on screen and in logs. */
+check('credentials inside a registry URL are refused', normalizeRegistry('https://user:pass@example.com/') === 'https://registry.npmjs.org/')
+check('an unparseable registry falls back', normalizeRegistry('not a url') === 'https://registry.npmjs.org/')
+check('an empty registry falls back', normalizeRegistry('') === 'https://registry.npmjs.org/')
+check('the auth key is the registry host and path', npmrcAuthKey('https://registry.npmjs.org') === '//registry.npmjs.org/')
+
+check('no .npmrc means no token', hasNpmToken('', 'https://registry.npmjs.org/') === false)
+check('a token line is found', hasNpmToken('//registry.npmjs.org/:_authToken=abc\n', 'https://registry.npmjs.org/') === true)
+check('a token for another registry is not this one', hasNpmToken('//npm.pkg.github.com/:_authToken=abc\n', 'https://registry.npmjs.org/') === false)
+check('a commented-out token is not a token', hasNpmToken('# //registry.npmjs.org/:_authToken=abc\n', 'https://registry.npmjs.org/') === false)
+check('an empty token value is not a token', hasNpmToken('//registry.npmjs.org/:_authToken=\n', 'https://registry.npmjs.org/') === false)
+
+const npmrcSource = 'registry=https://registry.npmjs.org/\n//registry.npmjs.org/:_authToken=old\n//npm.pkg.github.com/:_authToken=other\n'
+const npmrcUpdated = upsertAuthToken(npmrcSource, 'https://registry.npmjs.org/', 'new-token')
+check('an existing token is replaced in place', npmrcUpdated.ok === true && npmrcUpdated.text.includes('//registry.npmjs.org/:_authToken=new-token'))
+check('another registry\'s token is left alone', npmrcUpdated.text.includes('//npm.pkg.github.com/:_authToken=other'))
+check('unrelated settings survive', npmrcUpdated.text.includes('registry=https://registry.npmjs.org/'))
+check('the replacement is reported as such', npmrcUpdated.replaced === true)
+check('the old token is gone, not duplicated', npmrcUpdated.text.includes('_authToken=old') === false)
+const npmrcAppended = upsertAuthToken('registry=https://registry.npmjs.org/\n', 'https://registry.npmjs.org/', 'tok')
+check('a missing token line is appended', npmrcAppended.ok === true && npmrcAppended.text.includes('_authToken=tok') && npmrcAppended.replaced === false)
+/* `.npmrc` is line-oriented: a value that could start a line would let a pasted
+   string become a second setting. */
+check('a token that would forge a second line is refused', upsertAuthToken('', 'https://registry.npmjs.org/', 'abc\ndef').ok === false)
+check('an empty token is refused', upsertAuthToken('', 'https://registry.npmjs.org/', '   ').ok === false)
+
+check('an unknown name is unregistered', npmPackageState(null, '1.0.0').state === 'unregistered')
+check('a published version is recognised', npmPackageState({ versions: { '1.0.0': {} }, 'dist-tags': { latest: '1.0.0' } }, '1.0.0').published === true)
+check('a version that is not up there is unpublished', npmPackageState({ versions: { '1.0.0': {} }, 'dist-tags': { latest: '1.0.0' } }, '1.1.0').state === 'unpublished')
+check('the latest tag is carried even when it is not this version', npmPackageState({ versions: {}, 'dist-tags': { latest: '2.0.0' } }, '1.0.0').latest === '2.0.0')
+check('a malformed packument is unknown, not unregistered', npmPackageState('nope', '1.0.0').state === 'unknown')
+
+const pushable = { packageName: 'x', version: '1.0.0', manifest: { private: false }, registryState: { state: 'unpublished', published: false, latest: '0.9.0' }, authed: true, dirty: 0 }
+check('a clean, signed-in, unpublished package can be pushed', npmPublishVerdict(pushable).canPublish === true && npmPublishVerdict(pushable).blockers.length === 0)
+for (const [blocker, override] of [
+  ['private-package', { manifest: { private: true } }],
+  ['not-logged-in', { authed: false }],
+  ['dirty-tree', { dirty: 2 }],
+  ['already-published', { registryState: { state: 'published', published: true, latest: '1.0.0' } }],
+  ['registry-unreachable', { registryState: null }],
+  ['no-version', { version: null }],
+  ['no-checkout', { manifest: null }],
+]) {
+  const verdict = npmPublishVerdict({ ...pushable, ...override })
+  check(`a push is refused when: ${blocker}`, verdict.canPublish === false && verdict.blockers.includes(blocker), verdict.blockers.join(',') || '(none)')
+}
+check('a refusal answers without throwing on nothing', npmPublishVerdict().canPublish === false)
+
+check('the user-level .npmrc is where npm looks', resolveNpmrcPath({ USERPROFILE: 'C:\\u' }) === join('C:\\u', '.npmrc'))
+check('an explicit NPM_CONFIG_USERCONFIG wins', resolveNpmrcPath({ USERPROFILE: 'C:\\u', NPM_CONFIG_USERCONFIG: 'D:\\x\\.npmrc' }) === 'D:\\x\\.npmrc')
+
+/* The package manager is reused, not re-found — the same principle as reusing `gh`
+   instead of storing a token of this plugin's own. */
+const profileInvocation = resolvePackageManagerInvocation({ get: () => ({ packageManager: { command: 'node.exe', args: ['pnpm.cjs'], env: { DSH_X: '1' } } }) })
+check('the profile\'s own package manager is reused', profileInvocation.command === 'node.exe' && profileInvocation.args[0] === 'pnpm.cjs' && profileInvocation.source === 'profile')
+check('its environment comes with it', profileInvocation.env.DSH_X === '1')
+const fallbackInvocation = resolvePackageManagerInvocation({ get: () => undefined })
+check('a Host without a profile still names something runnable', typeof fallbackInvocation.command === 'string' && fallbackInvocation.command !== '', fallbackInvocation.source)
+check('the fallback reports where it got the answer', ['DSH_PNPM', 'bundled', 'path'].includes(fallbackInvocation.source), fallbackInvocation.source)
+
+check('a directory that is not a checkout has no dirty count', (await readDirtyCount(join(tmpdir(), '__dsh-cicd-nope__'), 5_000)) === null)
+check('an empty path has no dirty count', (await readDirtyCount('', 5_000)) === null)
+
+/* -- 11. Live checks (opt-in) ----------------------------------------------- */
 if (process.env.DSH_CICD_LIVE === '1') {
   console.log('\n-- live checks (DSH_CICD_LIVE=1) --')
   const version = await runTool(ghPath, ['--version'], 10_000)

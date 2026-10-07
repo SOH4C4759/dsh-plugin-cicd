@@ -189,6 +189,25 @@ function clickButton(node, label) {
   return clickButton(node.children, label)
 }
 
+/**
+ * Type into the first input whose placeholder matches, as a user would.
+ *
+ * The token field is the one control in this panel that is not a button, and a test
+ * that only clicks would never prove the sign-in path can be reached without a
+ * terminal — which is the whole point of that field existing.
+ *
+ * @returns {boolean} whether an input was found.
+ */
+function typeInto(node, placeholderPart, value) {
+  if (node === null || typeof node !== 'object') return false
+  if (Array.isArray(node)) return node.some((child) => typeInto(child, placeholderPart, value))
+  if (node.type === 'input' && String(node.props?.placeholder ?? '').includes(placeholderPart) && typeof node.props?.onChange === 'function') {
+    node.props.onChange({ target: { value } })
+    return true
+  }
+  return typeInto(node.children, placeholderPart, value)
+}
+
 /* ---- a document, a fetch that answers from a fixture, and the loader ---- */
 
 const styleElements = []
@@ -338,10 +357,44 @@ function installFixture(overrides) {
   }
 }
 
+/** One `npm-status` entry, exactly as the Host sends it. */
+function npmFixture(overrides) {
+  return {
+    repo: 'dsh-plugin-restart',
+    label: 'dsh-plugin-restart',
+    localPath: 'F:\\CodeProj\\dsh-plugin-restart',
+    packageName: 'dsh-plugin-restart',
+    version: '1.0.1',
+    dirty: 0,
+    privatePackage: false,
+    blockers: [],
+    canPublish: true,
+    state: 'unpublished',
+    latest: '1.0.0',
+    registryProblem: null,
+    registry: 'https://registry.npmjs.org/',
+    pageUrl: 'https://registry.npmjs.org/dsh-plugin-restart',
+    ...overrides,
+  }
+}
+
+/** One whole `npm-status` payload. */
+function npmStatusValue(overrides) {
+  return {
+    fetchedAt: '2026-10-07T01:00:00Z',
+    cached: false,
+    registry: 'https://registry.npmjs.org/',
+    packageManager: { source: 'profile', command: 'node.exe' },
+    auth: { loggedIn: true, account: 'soh4c4759', message: null, npmrcPath: 'C:\\Users\\x\\.npmrc', npmrcReadable: true, npmrcHasToken: true },
+    repos: [npmFixture()],
+    ...overrides,
+  }
+}
+
 const baseStatus = {
   ok: true,
   value: {
-    protocol: 4,
+    protocol: 5,
     config: { buildWorkflow: 'ci.yml', releaseWorkflow: 'release.yml', defaultBranch: 'main', pollSeconds: 30 },
     helper: { configureScript: 'F:\\CodeProj\\dsh-plugin-cicd\\scripts\\configure.mjs' },
     gh: { path: 'gh', available: true, version: 'gh version 2.102.0', authenticated: true, account: 'SOH4C4759', scopes: ['repo', 'workflow'], missingScopes: [], message: null },
@@ -350,10 +403,13 @@ const baseStatus = {
 }
 
 /** Render the panel against one fixture, from a clean hook state. */
-async function renderPanel(repos, statusValue = baseStatus.value, extra = {}) {
+async function renderPanel(repos, statusValue = baseStatus.value, extra = {}, npmValue = npmStatusValue()) {
   fixture = {
     '/status': { ok: true, value: statusValue },
     '/overview': { ok: true, value: { repos } },
+    /* The npm status is its own request; `null` means "the Host never answered",
+       which is a state the panel has to survive rather than fabricate around. */
+    ...(npmValue === null ? {} : { '/npm-status': { ok: true, value: npmValue } }),
     ...extra,
   }
   values.clear()
@@ -558,6 +614,107 @@ async function expandFirstRow(tree) {
   const after = await rerender()
   check('a refused restart is reported as a failure, not as success', textOf(after).includes('重启不了'), textOf(after).replace(/\s+/g, ' ').slice(0, 240))
   check('the refusal names the plugin that is missing', textOf(after).includes('dsh-plugin-restart'), textOf(after).replace(/\s+/g, ' ').slice(0, 200))
+}
+
+/* -- 10. npm: a version that is not up there is a job waiting ---------------- */
+{
+  const answers = {
+    '/npm-publish': { ok: true, value: { repo: 'dsh-plugin-restart', packageName: 'dsh-plugin-restart', version: '1.0.1', registry: 'https://registry.npmjs.org/', wasUnregistered: false, account: 'soh4c4759' } },
+  }
+  const collapsed = await renderPanel([repoFixture()], baseStatus.value, answers, npmStatusValue())
+  check('the npm status is actually asked for', calls.includes('/npm-status'), calls.join(','))
+  check('a version npm does not have is marked on the row', textOf(collapsed).includes('npm 待推 v1.0.1'), textOf(collapsed).replace(/\s+/g, ' ').slice(0, 180))
+  check('the npm account is shown in the header', textOf(collapsed).includes('npm soh4c4759'))
+
+  const { tree } = await expandFirstRow(collapsed)
+  const detail = textOf(tree)
+  check('the expansion says what npm currently has', detail.includes('npm 上是 1.0.0'), detail.replace(/\s+/g, ' ').slice(0, 240))
+  /* The GitHub Release for 1.0.1 does not exist in this fixture, and the two channels
+     are about to disagree in public — so the row says so before the click. */
+  check('a missing GitHub release for the same version is called out', detail.includes('先于 Release 面世'))
+
+  clickButton(tree, '推送到 npm v1.0.1')
+  const confirmation = await rerender()
+  const confirmText = textOf(confirmation)
+  check('the push asks before it uploads', confirmText.includes('npm 不允许同一版本推第二次'), confirmText.replace(/\s+/g, ' ').slice(0, 260))
+  check('the confirmation names the registry it would publish to', confirmText.includes('https://registry.npmjs.org/'))
+  check('the confirmation offers a place for a 2FA code', typeInto(confirmation, '6 位数字', '123456'))
+
+  clickButton(await rerender(), '确认推送')
+  await rerender()
+  const settled = await rerender()
+  check('the push really posted to the Host', calls.includes('/npm-publish'), calls.join(','))
+  check('a successful push is reported with the version', textOf(settled).includes('dsh-plugin-restart@1.0.1'), textOf(settled).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* -- 11. A name nobody owns says so ----------------------------------------- */
+{
+  const panel = await renderPanel([repoFixture()], baseStatus.value, {}, npmStatusValue({
+    repos: [npmFixture({ state: 'unregistered', latest: null })],
+  }))
+  /* On the row, a first publish and a later one are the same job, so they share the
+     same chip; the difference — "nobody owns this name yet" — belongs in the
+     expansion, where there is room to explain what it means. */
+  check('an unregistered name is offered on the row like any other push', textOf(panel).includes('npm 待推 v1.0.1'), textOf(panel).replace(/\s+/g, ' ').slice(0, 180))
+  const { tree } = await expandFirstRow(panel)
+  check('an unregistered name is marked as unowned in the expansion', textOf(tree).includes('npm 上还没有'))
+  check('an unregistered name is explained as a first release', textOf(tree).includes('首次发布'))
+}
+
+/* -- 12. Nothing to do renders no button ------------------------------------ */
+{
+  const published = await renderPanel([repoFixture()], baseStatus.value, {}, npmStatusValue({
+    repos: [npmFixture({ state: 'published', canPublish: false, blockers: ['already-published'], version: '1.0.1' })],
+  }))
+  check('a published version is shown as published', textOf(published).includes('npm v1.0.1'), textOf(published).replace(/\s+/g, ' ').slice(0, 180))
+  const { tree } = await expandFirstRow(published)
+  check('a published version offers no push', hasButton(tree, '推送到 npm') === false)
+  check('and says npm never takes the same version twice', textOf(tree).includes('同一版本推第二次'))
+
+  /* `private: true` is an author's decision, not a mistake — the reason has to be
+     the one on screen, or the missing button looks like a bug. */
+  const blocked = await renderPanel([repoFixture()], baseStatus.value, {}, npmStatusValue({
+    repos: [npmFixture({ canPublish: false, blockers: ['private-package'], privatePackage: true })],
+  }))
+  const { tree: blockedDetail } = await expandFirstRow(blocked)
+  check('a private package offers no push', hasButton(blockedDetail, '推送到 npm') === false)
+  check('a private package says why', textOf(blockedDetail).includes('"private": true'), textOf(blockedDetail).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* -- 13. npm credentials without a terminal --------------------------------- */
+{
+  const notSignedIn = npmStatusValue({
+    auth: { loggedIn: false, account: null, message: '[ERR_PNPM_WHOAMI_UNAUTHORIZED] You must be logged in to use whoami', npmrcPath: 'C:\\Users\\x\\.npmrc', npmrcReadable: false, npmrcHasToken: false },
+    repos: [npmFixture({ canPublish: false, blockers: ['not-logged-in'] })],
+  })
+  const panel = await renderPanel([repoFixture()], baseStatus.value, {
+    '/npm-login': { ok: true, value: { account: 'soh4c4759', registry: 'https://registry.npmjs.org/', npmrcPath: 'C:\\Users\\x\\.npmrc', replaced: false } },
+  }, notSignedIn)
+  const text = textOf(panel)
+  check('a missing npm credential is explained, not hidden', text.includes('还没有登录'), text.replace(/\s+/g, ' ').slice(0, 240))
+  check('the explanation names the file npm itself reads', text.includes('C:\\Users\\x\\.npmrc'))
+  /* What the package manager actually said, verbatim: "not signed in" and "that
+     token was revoked" are the same blank state and different problems. */
+  check('the package manager\'s own message is shown', text.includes('ERR_PNPM_WHOAMI_UNAUTHORIZED'))
+  check('the row offers no push while unauthenticated', hasButton(panel, '推送到 npm') === false)
+
+  const typed = typeInto(panel, 'npm_', 'npm_abcdefghijklmnop')
+  const ready = await rerender()
+  check('the token field accepts a token', typed === true)
+  const asked = clickButton(ready, '写入并验证')
+  await rerender()
+  const after = await rerender()
+  check('the token is really posted to the Host', calls.includes('/npm-login'), calls.join(','))
+  check('writing a token is confirmed with the account', asked === true && textOf(after).includes('soh4c4759'), textOf(after).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* -- 14. No npm answer means no npm claim ----------------------------------- */
+{
+  const silent = await renderPanel([repoFixture()], baseStatus.value, {}, null)
+  const text = textOf(silent)
+  check('an unanswered npm status invents no state', text.includes('npm 待推') === false && text.includes('npm 上还没有') === false, text.replace(/\s+/g, ' ').slice(0, 180))
+  const { tree } = await expandFirstRow(silent)
+  check('an unanswered npm status offers no push', hasButton(tree, '推送到 npm') === false)
 }
 
 console.log(`\n${results.length - failed}/${results.length} checks passed`)

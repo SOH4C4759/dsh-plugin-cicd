@@ -90,6 +90,26 @@ const RESTART_FORWARD_TIMEOUT_MS = 15_000
 /** Where a release tarball is downloaded to, beside the managed config file. */
 const DOWNLOAD_DIR_NAME = 'downloads'
 
+/** The registry this console publishes to, unless the row config names another. */
+const DEFAULT_NPM_REGISTRY = 'https://registry.npmjs.org/'
+
+/**
+ * One packument read is a single HTTPS request, so it is bounded tightly; a publish
+ * is a package-manager run that uploads the tarball, so it is not.
+ */
+const NPM_STATUS_TIMEOUT_MS = 8_000
+const NPM_PUBLISH_TIMEOUT_MS = 180_000
+
+/**
+ * How long one registry answer is reused.
+ *
+ * The npm state is asked for on demand — when the panel opens, after a push, after a
+ * sign-in — and never on the 30-second poll, because a request per repository per
+ * poll is a cost the panel does not need to pay for a fact that changes when someone
+ * publishes.
+ */
+const NPM_STATUS_TTL_MS = 60_000
+
 /**
  * Wire protocol of the browser half this Host half can serve.
  *
@@ -104,12 +124,15 @@ const DOWNLOAD_DIR_NAME = 'downloads'
  * release dispatch's preflight. A 2.x client asking a 2.x host to publish a
  * version that is already taken is the bug this protocol bump retires.
  *
+ * 5: `npm-status`, `npm-login` and `npm-publish`. A 4.x host has no `npm-*` route at
+ * all, so a 5.x client's npm button would read a 401 as "the registry rejected me".
+ *
  * 4: `update` and `restart`, and the `install` block on every overview row. A 3.x
  * client renders rows without it, so the two halves would still agree on the old
  * surface — but the new buttons post to routes a 3.x host does not mount, which is
  * exactly the 401-reads-as-a-credential-problem this number exists to prevent.
  */
-const PROTOCOL = 4
+const PROTOCOL = 5
 
 /** The managed repository list, written by `scripts/configure.mjs`. */
 const DEFAULT_CONFIG_FILE_NAME = 'repos.json'
@@ -358,6 +381,12 @@ export function resolveConfig(raw) {
      * `gh auth login` sits there printing nothing at all.
      */
     proxy: text(raw?.proxy),
+    /**
+     * The npm registry the push targets. Configurable because "publish to npm" means
+     * npmjs.com on most machines and a private registry on others, and a plugin that
+     * hard-coded the first would be wrong on the second without saying so.
+     */
+    npmRegistry: normalizeRegistry(raw?.npmRegistry),
   }
 }
 
@@ -563,6 +592,53 @@ function firstLine(value) {
 function workflowFileName(value) {
   const trimmed = text(value).replace(/\\/g, '/')
   return trimmed.slice(trimmed.lastIndexOf('/') + 1).toLowerCase()
+}
+
+/**
+ * Run one command in a directory of its own, with stdin closed.
+ *
+ * `runTool` is the gh- and git-shaped case; this is the package-manager-shaped one,
+ * which needs a working directory and extra environment. The stdin decision is the
+ * important one: a publish on an account with two-factor auth asks for a one-time
+ * password, and a child waiting on a stdin nobody holds would show a spinner until
+ * the timeout. `ignore` gives it an immediate EOF, so it fails with a message the
+ * panel can act on — which is what turns "it hangs" into "enter the code".
+ *
+ * @param {string} executable - resolved path or bare command name.
+ * @param {string[]} argv - arguments, passed without a shell.
+ * @param {object} options - `cwd`, `timeoutMs`, and environment additions.
+ * @returns {Promise<{ok: boolean, stdout: string, stderr: string, code: number|null, killed: boolean}>}
+ */
+async function runSpawn(executable, argv, { cwd = undefined, timeoutMs, env = {} } = {}) {
+  try {
+    const { stdout, stderr } = await runFile(executable, argv, {
+      timeout: timeoutMs,
+      windowsHide: true,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      ...(cwd === undefined ? {} : { cwd }),
+      env: {
+        ...process.env,
+        ...activeProxyEnvironment,
+        ...env,
+        NO_COLOR: '1',
+        // npm's own progress bars and prompts are useless to a captured pipe and have
+        // been known to keep a child alive after its work is done.
+        npm_config_progress: 'false',
+        npm_config_fund: 'false',
+        npm_config_audit: 'false',
+      },
+    })
+    return { ok: true, stdout, stderr, code: 0, killed: false }
+  } catch (error) {
+    return {
+      ok: false,
+      stdout: typeof error?.stdout === 'string' ? error.stdout : '',
+      stderr: typeof error?.stderr === 'string' && error.stderr !== '' ? error.stderr : String(error?.message ?? error),
+      code: Number.isInteger(error?.code) ? error.code : null,
+      killed: error?.killed === true,
+    }
+  }
 }
 
 /**
@@ -935,6 +1011,12 @@ export function readManifest(directory) {
       name: typeof parsed.name === 'string' ? parsed.name : '',
       version: typeof parsed.version === 'string' ? parsed.version : null,
       bundle: parsed.dsh?.bundle !== undefined,
+      /**
+       * `private: true` is the one manifest field that makes `publish` impossible, and
+       * it is a deliberate choice by the author rather than a mistake — so the panel
+       * reports it as a reason, instead of offering a button that must fail.
+       */
+      private: parsed.private === true,
     }
   } catch {
     return null
@@ -1158,6 +1240,236 @@ export function describeInstall({ profileDir, profileName, entry, releases } = {
     latestAsset: latest === null ? null : latest.asset,
     state: updateState(install, latest),
   }
+}
+
+/* ------------------------------------------------------------- npm registry -- */
+
+/**
+ * The registry to talk to, in the form every URL below assumes.
+ *
+ * A registry is a base, not a package URL: normalizing the trailing slash once here
+ * is what keeps `${registry}${name}` right for both `https://registry.npmjs.org` and
+ * a private registry written with a path. Anything that is not an http(s) URL without
+ * embedded credentials falls back to the default, because a credential smuggled into
+ * a registry URL would end up in the panel and in logs.
+ *
+ * @param {unknown} value - configured or defaulted registry.
+ * @param {string} [fallback] - what to answer when the value is unusable.
+ * @returns {string} a registry base ending in `/`.
+ */
+export function normalizeRegistry(value, fallback = DEFAULT_NPM_REGISTRY) {
+  const raw = text(value)
+  if (raw === '') return fallback
+  try {
+    const url = new URL(raw)
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return fallback
+    if (url.username !== '' || url.password !== '') return fallback
+    return url.href.endsWith('/') ? url.href : `${url.href}/`
+  } catch {
+    return fallback
+  }
+}
+
+/** The `//host/path/` prefix an `.npmrc` auth line is keyed by. */
+export function npmrcAuthKey(registry) {
+  const normalized = normalizeRegistry(registry)
+  const url = new URL(normalized)
+  const path = url.pathname.endsWith('/') ? url.pathname : `${url.pathname}/`
+  return `//${url.host}${path}`
+}
+
+/**
+ * Where the user-level `.npmrc` is.
+ *
+ * This is the file `npm login` and `pnpm login` write, and it is the only credential
+ * store this feature touches: the plugin holds no token of its own, exactly as it
+ * holds none of `gh`'s.
+ *
+ * @param {object} [env] - environment, injectable for tests.
+ * @returns {string} absolute path.
+ */
+export function resolveNpmrcPath(env = process.env) {
+  const explicit = text(env.NPM_CONFIG_USERCONFIG)
+  if (explicit !== '') return explicit
+  return join(text(env.USERPROFILE, text(env.HOME, '.')), '.npmrc')
+}
+
+/**
+ * Whether an `.npmrc` text carries a token for this registry.
+ *
+ * Only the presence of the key is answered. The value is deliberately not read out:
+ * a secret this plugin has no use for is a secret it must not hold, and returning it
+ * would put a live publish token into a JSON response and into whatever logs it.
+ *
+ * @param {string} source - the file's text.
+ * @param {string} registry - registry base.
+ * @returns {boolean} whether a usable line exists.
+ */
+export function hasNpmToken(source, registry) {
+  if (typeof source !== 'string' || source === '') return false
+  const key = npmrcAuthKey(registry)
+  for (const line of source.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed === '' || trimmed.startsWith('#') || trimmed.startsWith(';')) continue
+    const separator = trimmed.indexOf('=')
+    if (separator === -1) continue
+    const name = trimmed.slice(0, separator).trim()
+    const value = trimmed.slice(separator + 1).trim()
+    if ((name === `${key}:_authToken` || name === `${key}:_auth`) && value !== '') return true
+  }
+  return false
+}
+
+/**
+ * Put one token into an `.npmrc` text, replacing that registry's line and nothing else.
+ *
+ * `.npmrc` is line-oriented, so a value that could start a new line or a comment is
+ * refused rather than escaped: the only thing worse than a rejected token is a token
+ * that silently became two lines. Every other line — other registries, other
+ * settings, comments — is preserved byte for byte, because this file usually belongs
+ * to other tools too.
+ *
+ * @param {string} source - current file text (may be empty).
+ * @param {string} registry - registry base.
+ * @param {string} token - the token to write.
+ * @returns {{ok: true, text: string, replaced: boolean}|{ok: false, message: string}}
+ */
+export function upsertAuthToken(source, registry, token) {
+  const value = typeof token === 'string' ? token.trim() : ''
+  if (value === '') return { ok: false, message: 'the token is empty' }
+  if (!/^[A-Za-z0-9_\-.:+/=]+$/.test(value)) {
+    return { ok: false, message: 'the token has characters an .npmrc line cannot hold' }
+  }
+  const key = npmrcAuthKey(registry)
+  const wanted = [`${key}:_authToken`, `${key}:_auth`]
+  const line = `${key}:_authToken=${value}`
+  const lines = (typeof source === 'string' ? source : '').split(/\r?\n/)
+  let replaced = false
+  const next = lines.map((candidate) => {
+    const trimmed = candidate.trim()
+    if (trimmed === '' || trimmed.startsWith('#') || trimmed.startsWith(';')) return candidate
+    const separator = trimmed.indexOf('=')
+    if (separator === -1) return candidate
+    if (!wanted.includes(trimmed.slice(0, separator).trim())) return candidate
+    replaced = true
+    return line
+  })
+  if (!replaced) {
+    // Keep the file's own shape: an .npmrc conventionally ends with a newline, which
+    // splits into a final empty element that the new line goes before, not after.
+    if (next.length > 0 && next[next.length - 1].trim() === '') next.splice(next.length - 1, 0, line)
+    else next.push(line)
+  }
+  return { ok: true, text: next.join('\n'), replaced }
+}
+
+/**
+ * What the registry already knows about one package version.
+ *
+ * `versions` is the only real evidence: `dist-tags.latest` alone cannot answer "is
+ * THIS version published", and a version that is already on npm can never be
+ * republished — so the difference between the two decides whether the button exists
+ * or is a trap.
+ *
+ * @param {unknown} packument - the registry document, or null for "404, nobody owns this name".
+ * @param {string|null} version - the local version.
+ * @returns {{state: 'unregistered'|'published'|'unpublished'|'unknown', latest: string|null, published: boolean}}
+ */
+export function npmPackageState(packument, version) {
+  if (packument === null || packument === undefined) return { state: 'unregistered', latest: null, published: false }
+  if (typeof packument !== 'object') return { state: 'unknown', latest: null, published: false }
+  const versions = packument.versions !== null && typeof packument.versions === 'object' ? packument.versions : {}
+  const distTags = packument['dist-tags'] !== null && typeof packument['dist-tags'] === 'object' ? packument['dist-tags'] : {}
+  const latest = text(distTags.latest)
+  const published = typeof version === 'string' && version !== '' && Object.hasOwn(versions, version)
+  return { state: published ? 'published' : 'unpublished', latest: latest === '' ? null : latest, published }
+}
+
+/**
+ * Whether the push should be offered, and every reason it should not be.
+ *
+ * The blockers are named strings rather than a boolean because "there is no button"
+ * is the least useful thing a panel can say: `private-package` and `not-logged-in`
+ * are the same absence on screen and completely different fixes.
+ *
+ * @param {object} params - what was read about this repository.
+ * @returns {{state: string, latest: string|null, packageName: string, version: string|null, blockers: string[], canPublish: boolean}}
+ */
+export function npmPublishVerdict({ packageName = '', version = null, manifest = null, registryState = null, authed = false, dirty = null } = {}) {
+  const blockers = []
+  if (packageName === '') blockers.push('no-package-name')
+  if (manifest === null) blockers.push('no-checkout')
+  else if (manifest.private === true) blockers.push('private-package')
+  if (version === null || version === '') blockers.push('no-version')
+  if (authed !== true) blockers.push('not-logged-in')
+  if (registryState === null || registryState.state === 'unknown') blockers.push('registry-unreachable')
+  else if (registryState.published === true) blockers.push('already-published')
+  if (Number.isFinite(dirty) && dirty > 0) blockers.push('dirty-tree')
+  return {
+    state: registryState === null ? 'unknown' : registryState.state,
+    latest: registryState === null ? null : registryState.latest,
+    packageName,
+    version: version === null || version === '' ? null : version,
+    blockers,
+    canPublish: blockers.length === 0,
+  }
+}
+
+/**
+ * The package manager this Host itself uses.
+ *
+ * Reused rather than re-found, for the same reason `gh` is reused instead of a token:
+ * the Host already resolved one, it is the exact one the plugin manager installs
+ * with, and a second answer would eventually disagree with the first. The fallbacks
+ * are the two real ones — an explicit `DSH_PNPM`, and the packaged application's own
+ * bundled pnpm, which is reachable only because this process knows where it started.
+ *
+ * @param {object} ctx - Host plugin context.
+ * @returns {{command: string, args: string[], env: object, source: string}|null}
+ */
+export function resolvePackageManagerInvocation(ctx) {
+  const profile = typeof ctx?.get === 'function' ? ctx.get('profileContext') : undefined
+  const invocation = profile?.packageManager
+  if (invocation !== null && invocation !== undefined && typeof invocation.command === 'string' && invocation.command !== '') {
+    return {
+      command: invocation.command,
+      args: Array.isArray(invocation.args) ? invocation.args.map((arg) => String(arg)) : [],
+      env: invocation.env !== null && typeof invocation.env === 'object' ? { ...invocation.env } : {},
+      source: 'profile',
+    }
+  }
+  const explicit = text(process.env.DSH_PNPM)
+  if (explicit !== '') return { command: explicit, args: [], env: {}, source: 'DSH_PNPM' }
+  /*
+   * The packaged application ships pnpm under `resources/runtime`, and its own
+   * launcher runs it through the Electron binary with ELECTRON_RUN_AS_NODE — the same
+   * mechanism, not an invented path. Below that, `pnpm` on PATH is the honest last
+   * answer; a command that does not exist fails with ENOENT naming it, which is a
+   * better report than this plugin guessing at an install layout it cannot see.
+   */
+  const runtime = join(dirname(process.execPath), 'resources', 'runtime', 'pnpm', 'bin', 'pnpm.cjs')
+  if (existsSync(runtime)) {
+    return { command: process.execPath, args: [runtime], env: { ELECTRON_RUN_AS_NODE: '1' }, source: 'bundled' }
+  }
+  return { command: 'pnpm', args: [], env: {}, source: 'path' }
+}
+
+/**
+ * How many entries are uncommitted in a checkout, or null when it cannot be read.
+ *
+ * One `git status` rather than `readLocalState`'s four commands: the npm status is
+ * asked for per repository, and four spawns each would make opening the panel the
+ * most expensive thing it does.
+ *
+ * @param {string} localPath - configured checkout.
+ * @param {number} timeoutMs - deadline.
+ * @returns {Promise<number|null>} the count, or null when there is no checkout to ask.
+ */
+export async function readDirtyCount(localPath, timeoutMs) {
+  if (typeof localPath !== 'string' || localPath === '' || !existsSync(join(localPath, '.git'))) return null
+  const result = await runTool('git', ['-C', localPath, 'status', '--porcelain'], timeoutMs)
+  if (result.ok !== true) return null
+  return result.stdout.split('\n').filter((line) => line.trim() !== '').length
 }
 
 /* --------------------------------------------------------------- overview -- */
@@ -2405,6 +2717,357 @@ export function apply(ctx, rawConfig) {
     writeJson(res, response.status, payload)
   }
 
+  /* -------------------------------------------------------------- npm push -- */
+
+  /** One registry answer is reused briefly; a publish or a sign-in clears it. */
+  let npmCache = null
+
+  /** One publish at a time: npm refuses a second upload of the same version anyway. */
+  let npmPublishInFlight = false
+
+  /**
+   * Ask the registry about one package.
+   *
+   * A 404 is an ANSWER, not a failure: it is how the registry says "nobody owns this
+   * name", which is exactly the state a first publish is in.
+   *
+   * @param {string} registry - normalized registry base.
+   * @param {string} packageName - the package to ask about.
+   * @returns {Promise<{ok: true, value: object|null}|{ok: false, message: string}>}
+   */
+  const fetchPackument = async (registry, packageName) => {
+    try {
+      const response = await fetch(`${registry}${packageName}`, {
+        headers: { accept: 'application/json' },
+        signal: AbortSignal.timeout(NPM_STATUS_TIMEOUT_MS),
+      })
+      if (response.status === 404) return { ok: true, value: null }
+      if (!response.ok) return { ok: false, message: `the registry answered HTTP ${String(response.status)}` }
+      return { ok: true, value: await response.json() }
+    } catch (error) {
+      return { ok: false, message: String(error?.message ?? error) }
+    }
+  }
+
+  /**
+   * Ask the package manager who it is signed in as.
+   *
+   * This is the real check: an `.npmrc` line can be present and wrong, revoked, or
+   * scoped to another registry, and `whoami` is the only thing that answers "will an
+   * upload be accepted".
+   *
+   * @param {object} invocation - from `resolvePackageManagerInvocation`.
+   * @param {string} registry - normalized registry base.
+   * @returns {Promise<{loggedIn: boolean, account: string|null, message: string|null}>}
+   */
+  const readNpmAuth = async (invocation, registry) => {
+    if (invocation === null) return { loggedIn: false, account: null, message: 'no package manager is available to ask' }
+    const result = await runSpawn(invocation.command, [...invocation.args, 'whoami', '--registry', registry], {
+      timeoutMs: 20_000,
+      env: invocation.env,
+    })
+    if (result.ok !== true) {
+      return { loggedIn: false, account: null, message: firstLine(result.stderr) || firstLine(result.stdout) || 'the package manager refused to answer' }
+    }
+    const account = firstLine(result.stdout)
+    return account === ''
+      ? { loggedIn: false, account: null, message: 'the package manager answered without an account name' }
+      : { loggedIn: true, account, message: null }
+  }
+
+  /**
+   * What the npm registry holds for every configured repository.
+   *
+   * On demand rather than polled, and separate from `overview`: this is one HTTPS
+   * request per repository plus one `whoami`, and the answer changes when someone
+   * publishes, not every thirty seconds.
+   */
+  const npmStatusHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const registry = normalizeRegistry(current.npmRegistry)
+    const fresh = npmCache !== null && Date.now() - npmCache.at < NPM_STATUS_TTL_MS
+    if (fresh && body?.force !== true) {
+      writeJson(res, 200, { ok: true, value: { ...npmCache.value, cached: true } })
+      return
+    }
+    const invocation = resolvePackageManagerInvocation(ctx)
+    const npmrcPath = resolveNpmrcPath()
+    let npmrcText = ''
+    let npmrcReadable = true
+    try {
+      npmrcText = readFileSync(npmrcPath, 'utf8')
+    } catch {
+      npmrcReadable = false
+    }
+    const auth = await readNpmAuth(invocation, registry)
+
+    const repos = await Promise.all(current.repos.map(async (entry) => {
+      const localPath = entry.localPath
+      const manifest = readManifest(localPath)
+      const packageName = manifest !== null && manifest.name !== '' ? manifest.name : bareRepoName(entry.repo)
+      const version = manifest === null ? null : manifest.version
+      const [packument, dirty] = await Promise.all([
+        fetchPackument(registry, packageName),
+        readDirtyCount(localPath, current.requestTimeoutMs),
+      ])
+      const registryState = packument.ok === true ? npmPackageState(packument.value, version) : null
+      const verdict = npmPublishVerdict({
+        packageName,
+        version,
+        manifest,
+        registryState,
+        authed: auth.loggedIn,
+        dirty,
+      })
+      return {
+        repo: entry.repo,
+        label: entry.label !== '' ? entry.label : entry.repo,
+        localPath,
+        packageName,
+        version,
+        dirty,
+        privatePackage: manifest !== null && manifest.private === true,
+        blockers: verdict.blockers,
+        canPublish: verdict.canPublish,
+        state: verdict.state,
+        latest: verdict.latest,
+        /** Why the registry could not be asked, when it could not. */
+        registryProblem: packument.ok === true ? null : packument.message,
+        /** Carried per row so a row can render its own confirmation unaided. */
+        registry,
+        pageUrl: `${registry}${packageName}`,
+      }
+    }))
+
+    const value = {
+      fetchedAt: new Date().toISOString(),
+      cached: false,
+      registry,
+      packageManager: invocation === null ? null : { source: invocation.source, command: invocation.command },
+      auth: {
+        loggedIn: auth.loggedIn,
+        account: auth.account,
+        message: auth.message,
+        npmrcPath,
+        npmrcReadable,
+        /** Whether a token line exists at all, without reading the token itself. */
+        npmrcHasToken: hasNpmToken(npmrcText, registry),
+      },
+      repos,
+    }
+    npmCache = { at: Date.now(), value }
+    writeJson(res, 200, { ok: true, value })
+  }
+
+  /**
+   * Put an npm token where npm itself would put it, and prove it works.
+   *
+   * The panel is meant to be usable without a terminal, and `pnpm login` needs one —
+   * so the token a person already generated on npmjs.com is written into the same
+   * user-level `.npmrc` that `npm login` writes, and then verified with `whoami`.
+   * The plugin still stores nothing: the credential lives in the file the npm
+   * ecosystem owns, and it is never returned, echoed or logged here.
+   */
+  const npmLoginHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const registry = normalizeRegistry(current.npmRegistry)
+    const token = typeof body?.token === 'string' ? body.token.trim() : ''
+    const npmrcPath = resolveNpmrcPath()
+    let existing = ''
+    try {
+      existing = readFileSync(npmrcPath, 'utf8')
+    } catch {
+      existing = ''
+    }
+    const merged = upsertAuthToken(existing, registry, token)
+    if (merged.ok !== true) {
+      writeJson(res, 400, { ok: false, code: 'bad-token', message: merged.message })
+      return
+    }
+    try {
+      // Keep the previous revision, as every other write in this plugin does. The
+      // backup holds whatever the file held, which may itself be an older token —
+      // that is the user's own file and their own credential.
+      if (existsSync(npmrcPath)) writeFileSync(`${npmrcPath}.bak`, existing, 'utf8')
+      writeFileSync(npmrcPath, merged.text, 'utf8')
+    } catch (error) {
+      writeJson(res, 502, { ok: false, code: 'write-failed', message: `cannot write ${npmrcPath}: ${String(error?.message ?? error)}` })
+      return
+    }
+    const invocation = resolvePackageManagerInvocation(ctx)
+    const auth = await readNpmAuth(invocation, registry)
+    npmCache = null
+    if (auth.loggedIn !== true) {
+      writeJson(res, 401, {
+        ok: false,
+        code: 'token-rejected',
+        message: `the token was written to ${npmrcPath}, but the registry did not accept it: ${auth.message ?? 'unknown reason'}`,
+        value: { registry, npmrcPath, replaced: merged.replaced },
+      })
+      return
+    }
+    writeJson(res, 200, { ok: true, value: { account: auth.account, registry, npmrcPath, replaced: merged.replaced } })
+  }
+
+  /**
+   * Publish this repository's current version to the npm registry.
+   *
+   * Every refusal happens before anything is uploaded, because a publish is one of
+   * the two irreversible things this panel can do: npm lets a version be unpublished
+   * only briefly and never lets the same version be published twice. So a dirty tree
+   * is refused (the tarball is packed from the working directory, and the `files`
+   * allow-list does not protect a file that sits inside a listed directory), a
+   * version that is already on the registry is refused, and a missing credential is
+   * refused with what to do about it.
+   */
+  const npmPublishHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const registry = normalizeRegistry(current.npmRegistry)
+    const invocation = resolvePackageManagerInvocation(ctx)
+    if (invocation === null) {
+      writeJson(res, 501, { ok: false, code: 'no-package-manager', message: 'this Host has no package manager to publish with' })
+      return
+    }
+    if (npmPublishInFlight) {
+      writeJson(res, 409, { ok: false, code: 'busy', message: 'a publish is already running; wait for it to settle' })
+      return
+    }
+    const localPath = target.entry.localPath
+    const manifest = readManifest(localPath)
+    if (manifest === null || manifest.name === '') {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'no-checkout',
+        message: 'this repository has no local checkout with a package.json to publish',
+        value: { repo: target.entry.repo },
+      })
+      return
+    }
+    if (manifest.private === true) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'private-package',
+        message: `${manifest.name} is marked "private": true, so npm would refuse it. Publishing it is the author's decision to make first.`,
+        value: { repo: target.entry.repo, packageName: manifest.name },
+      })
+      return
+    }
+    if (manifest.version === null) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'no-version',
+        message: `${manifest.name} has no version in its package.json, so there is nothing to publish`,
+        value: { repo: target.entry.repo, packageName: manifest.name },
+      })
+      return
+    }
+    const dirty = await readDirtyCount(localPath, current.requestTimeoutMs)
+    if (Number.isFinite(dirty) && dirty > 0) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'dirty-tree',
+        message: `the checkout has ${String(dirty)} uncommitted change(s); a publish packs the working directory, so commit or stash them first`,
+        value: { repo: target.entry.repo, dirty },
+      })
+      return
+    }
+    const packument = await fetchPackument(registry, manifest.name)
+    if (packument.ok !== true) {
+      writeJson(res, 502, {
+        ok: false,
+        code: 'registry-unreachable',
+        message: `cannot ask ${registry} about ${manifest.name}: ${packument.message}`,
+        value: { repo: target.entry.repo, packageName: manifest.name, registry },
+      })
+      return
+    }
+    const registryState = npmPackageState(packument.value, manifest.version)
+    if (registryState.published === true) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'already-published',
+        message: `${manifest.name}@${manifest.version} is already on ${registry}; npm never accepts the same version twice, so bump the version first`,
+        value: { repo: target.entry.repo, packageName: manifest.name, version: manifest.version, latest: registryState.latest, registry },
+      })
+      return
+    }
+    const auth = await readNpmAuth(invocation, registry)
+    if (auth.loggedIn !== true) {
+      writeJson(res, 401, {
+        ok: false,
+        code: 'not-logged-in',
+        message: `${invocation.command} is not signed in to ${registry}: ${auth.message ?? 'no account'}`,
+        value: { repo: target.entry.repo, packageName: manifest.name, registry, npmrcPath: resolveNpmrcPath() },
+      })
+      return
+    }
+    const otp = text(body?.otp)
+    if (otp !== '' && !/^\d{6,8}$/.test(otp)) {
+      writeJson(res, 400, { ok: false, code: 'bad-otp', message: 'the one-time password must be 6 to 8 digits' })
+      return
+    }
+
+    const argv = [...invocation.args, 'publish', '--no-git-checks', '--registry', registry]
+    if (otp !== '') argv.push('--otp', otp)
+    // Only a scoped name carries an access level; passing it for an unscoped one is
+    // noise at best.
+    if (manifest.name.startsWith('@')) argv.push('--access', 'public')
+
+    npmPublishInFlight = true
+    try {
+      const result = await runSpawn(invocation.command, argv, {
+        cwd: localPath,
+        timeoutMs: NPM_PUBLISH_TIMEOUT_MS,
+        env: invocation.env,
+      })
+      npmCache = null
+      if (result.ok !== true) {
+        const combined = `${result.stdout}\n${result.stderr}`
+        /*
+         * A one-time password is its own outcome, not a failure to report as a
+         * wall of text: the panel has a field for it, so it says which field.
+         */
+        const needsOtp = /one-time password|one-time passcode|\bEOTP\b|ERR_PNPM_OTP|--otp/i.test(combined)
+        const message = result.killed === true
+          ? `the publish timed out after ${String(NPM_PUBLISH_TIMEOUT_MS)} ms`
+          : (firstLine(result.stderr) || firstLine(result.stdout) || 'the publish failed')
+        writeJson(res, needsOtp ? 401 : 502, {
+          ok: false,
+          code: needsOtp ? 'otp-required' : 'publish-failed',
+          message,
+          value: { repo: target.entry.repo, packageName: manifest.name, version: manifest.version, registry, needsOtp },
+        })
+        return
+      }
+      writeJson(res, 200, {
+        ok: true,
+        value: {
+          repo: target.entry.repo,
+          packageName: manifest.name,
+          version: manifest.version,
+          registry,
+          pageUrl: `${registry}${manifest.name}`,
+          wasUnregistered: registryState.state === 'unregistered',
+          account: auth.account,
+          note: firstLine(result.stdout) || null,
+        },
+      })
+    } finally {
+      npmPublishInFlight = false
+    }
+  }
+
   /* --------------------------------------------------- setup, no terminal -- */
 
   /**
@@ -2628,6 +3291,12 @@ export function apply(ctx, rawConfig) {
     // owns restarting.
     [`${ROUTE_PREFIX}/update`, updateHandler],
     [`${ROUTE_PREFIX}/restart`, restartHandler],
+    // One package, two channels: the GitHub Release above, and npm below it. The npm
+    // state is asked for on demand and the push is its own button, because a publish
+    // cannot be undone and must not ride along with a release.
+    [`${ROUTE_PREFIX}/npm-status`, npmStatusHandler],
+    [`${ROUTE_PREFIX}/npm-login`, npmLoginHandler],
+    [`${ROUTE_PREFIX}/npm-publish`, npmPublishHandler],
     [`${ROUTE_PREFIX}/auth-start`, authStartHandler],
     [`${ROUTE_PREFIX}/auth-state`, authStateHandler],
     [`${ROUTE_PREFIX}/auth-cancel`, authCancelHandler],

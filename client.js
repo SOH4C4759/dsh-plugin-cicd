@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
      * be missing while the button that calls it is on screen. Comparing this
      * number turns that into one sentence instead of a bare HTTP status.
      */
-    const PROTOCOL = 4
+    const PROTOCOL = 5
     const STATUS_TIMEOUT_MS = 20_000
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
@@ -62,6 +62,12 @@ window.__ModuleLoader__.load({
      * own, longer bound instead of borrowing the 45 s the dispatch actions use.
      */
     const UPDATE_TIMEOUT_MS = 180_000
+    /**
+     * Asking npm is one HTTPS request per repository plus a `whoami`; a publish
+     * uploads the tarball. Neither is an "action" a person waits on twice, so the
+     * status gets a short bound and the publish shares the update's long one.
+     */
+    const NPM_TIMEOUT_MS = 45_000
     const NOTICE_TTL_MS = 5_000
     /**
      * While an attempt is pending this polls `/auth-state` — and it is the only
@@ -183,6 +189,39 @@ window.__ModuleLoader__.load({
       'install.differs': 'profile 里是 {installed}，与 Release {tag} 不是同一号版本，无法比较先后。',
       'state.updated': '{package} 已从 {from} 换成 {tag} 的发布包。新版本要重启 DSH 才会真正生效。',
       'state.updatedSame': '{package} 已经指向 {tag} 这份发布包了：没有改动，也不需要重启。',
+      'npm.title': 'npm',
+      'npm.chipPublished': 'npm v{version}',
+      'npm.chipPending': 'npm 待推 v{version}',
+      'npm.chipUnregistered': 'npm 上还没有',
+      'npm.account': 'npm {account}',
+      'npm.registry': '源 {registry}',
+      'npm.recheck': '重新检测 npm',
+      'npm.notLoggedIn': '{command} 还没有登录 {registry}——发布需要 npm 的凭据，而插件自己不保存 token。不用开终端：在 npmjs.com 生成一个带 publish 权限的 Access Token，粘贴到下面，它会写进 {npmrc}（npm 自己读的那个用户级配置文件）。',
+      'npm.tokenPlaceholder': 'npm_… 或粘贴 Access Token',
+      'npm.writeToken': '写入并验证',
+      'npm.tokenWritten': 'token 已写入 {npmrc}，当前账号 {account}。',
+      'npm.npmrcPath': '配置文件',
+      'npm.state.published': '这个版本已经在 npm 上了（{version}），没有可推的。',
+      'npm.state.unregistered': 'npm 上还没有这个名字：这次推送就是它的首次发布。',
+      'npm.state.unpublished': 'npm 上是 {latest}，本地这个 {version} 还没推过。',
+      'npm.state.unknown': '读不到 npm 的状态（{reason}），所以不提供推送——宁可不给按钮，也不给一个注定失败的按钮。',
+      'npm.action.publish': '推送到 npm v{version}',
+      'npm.action.confirm': '确认推送',
+      'npm.otpLabel': '一次性密码',
+      'npm.otpHint': '账号开了 2FA 才需要；填一次即可，不会被保存。',
+      'npm.otpPlaceholder': '6 位数字',
+      'npm.blocked.private-package': 'package.json 里写着 "private": true，npm 会拒绝。这是作者的决定，不是这里该绕过的东西。',
+      'npm.blocked.not-logged-in': '还没有登录 npm，先把 token 写进去。',
+      'npm.blocked.dirty-tree': '工作区有未提交改动：publish 打包的是工作目录，先提交或暂存（files 白名单挡不住名单目录里的新文件）。',
+      'npm.blocked.no-checkout': '这个仓库没有可用的本地检出。',
+      'npm.blocked.no-version': 'package.json 里没有版本号。',
+      'npm.blocked.no-package-name': '读不到包名。',
+      'npm.blocked.already-published': '这个版本已经在 npm 上了（npm 不允许同一版本推第二次），先升版本。',
+      'npm.blocked.registry-unreachable': '连不上 npm 源，无法确认这个版本在不在。',
+      'confirm.npmPublish': '把 {package}@{version} 推到 {registry}？npm 不允许同一版本推第二次，撤回也只在很短的时间内可行——推上去任何人可见。',
+      'state.npmPublished': '已把 {package}@{version} 推到 {registry}。',
+      'state.npmFirstPublish': '{package}@{version} 已首次发布到 {registry}。',
+      'npm.githubDraft': '注意：GitHub 上这个版本只有草稿（或还没有 Release）——npm 会先于 Release 面世。',
       'state.updatedBuilds': '（注意：这次安装有 {count} 个构建脚本被拦住，没有执行。）',
       'restart.ask': '{package} 已经更新到 {tag}，但要重启 DSH 才会用上它——现在重启？',
       'restart.scheduled': '已安排重启：DSH 会在一两秒后关闭并自动重新打开。刷新页面不够，模块已经加载在运行中的进程里。',
@@ -333,6 +372,39 @@ window.__ModuleLoader__.load({
       'install.differs': 'The profile holds {installed}, which is not the same version number as release {tag}, so the two cannot be ordered.',
       'state.updated': '{package} was replaced with the release package {tag}. The new version takes effect only after DSH restarts.',
       'state.updatedSame': '{package} already points at the {tag} release package: nothing changed, and no restart is needed.',
+      'npm.title': 'npm',
+      'npm.chipPublished': 'npm v{version}',
+      'npm.chipPending': 'npm v{version} pending',
+      'npm.chipUnregistered': 'not on npm',
+      'npm.account': 'npm {account}',
+      'npm.registry': 'registry {registry}',
+      'npm.recheck': 'Re-check npm',
+      'npm.notLoggedIn': '{command} is not signed in to {registry} — publishing needs npm credentials, and this plugin stores no token of its own. No terminal needed: create an Access Token with publish rights on npmjs.com, paste it below, and it is written to {npmrc} (the user-level file npm itself reads).',
+      'npm.tokenPlaceholder': 'npm_… or paste an access token',
+      'npm.writeToken': 'Write and verify',
+      'npm.tokenWritten': 'The token is in {npmrc}; signed in as {account}.',
+      'npm.npmrcPath': 'config file',
+      'npm.state.published': 'This version is already on npm ({version}); there is nothing to push.',
+      'npm.state.unregistered': 'Nobody owns this name on npm yet: this push would be its first release.',
+      'npm.state.unpublished': 'npm has {latest}; the local {version} has not been pushed.',
+      'npm.state.unknown': 'The npm state cannot be read ({reason}), so no push is offered — a missing button beats one that must fail.',
+      'npm.action.publish': 'Push to npm v{version}',
+      'npm.action.confirm': 'Push',
+      'npm.otpLabel': 'One-time password',
+      'npm.otpHint': 'Only needed with 2FA on the account, and it is never stored.',
+      'npm.otpPlaceholder': '6 digits',
+      'npm.blocked.private-package': 'package.json says "private": true, which npm refuses. That is the author\'s decision, not something to work around here.',
+      'npm.blocked.not-logged-in': 'Not signed in to npm yet; write a token above first.',
+      'npm.blocked.dirty-tree': 'The checkout has uncommitted changes: publish packs the working directory, so commit or stash first (the files allow-list does not protect a new file inside a listed directory).',
+      'npm.blocked.no-checkout': 'This repository has no usable local checkout.',
+      'npm.blocked.no-version': 'package.json has no version.',
+      'npm.blocked.no-package-name': 'No package name could be read.',
+      'npm.blocked.already-published': 'This version is already on npm, which never accepts the same version twice — bump the version first.',
+      'npm.blocked.registry-unreachable': 'The npm registry cannot be reached, so whether this version exists is unknown.',
+      'confirm.npmPublish': 'Push {package}@{version} to {registry}? npm never accepts the same version twice, and unpublishing is only possible briefly — once it is up, anyone can see it.',
+      'state.npmPublished': 'Pushed {package}@{version} to {registry}.',
+      'state.npmFirstPublish': '{package}@{version} is now published to {registry} for the first time.',
+      'npm.githubDraft': 'Note: GitHub has only a draft (or no release) for this version — npm would go public before the Release does.',
       'state.updatedBuilds': '(Note: {count} build script(s) were blocked and did not run.)',
       'restart.ask': '{package} is updated to {tag}, but DSH has to restart to use it — restart now?',
       'restart.scheduled': 'Restart scheduled: DSH closes in a second or two and reopens by itself. Refreshing the page is not enough; the module is already loaded in the running process.',
@@ -483,6 +555,9 @@ window.__ModuleLoader__.load({
   background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary);
 }
 .dsc-input:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+/* The one-time password field is a control, not a form field: it shares the control
+   height and radius so it sits on a confirmation line with the buttons. */
+.dsc-otp { flex: 0 0 110px; min-width: 0; }
 .dsc-picker-list { max-height: 260px; overflow: auto; }
 .dsc-picker-row { display: flex; align-items: center; gap: var(--dsc-gap); padding: 5px 10px; border-top: 1px solid var(--dsw-alias-border-l1); font-size: var(--dsc-fs-md); cursor: pointer; }
 .dsc-picker-row:first-child { border-top: none; }
@@ -962,7 +1037,7 @@ window.__ModuleLoader__.load({
 
     /** One repository row, expandable into path, releases, runs and logs. */
     function RepoRow(props) {
-      const { t, data, busy, onAction, onBump, onPublish, onUpdate, logs, onLogs } = props
+      const { t, data, busy, onAction, onBump, onPublish, onUpdate, npm, onNpmPublish, logs, onLogs } = props
       const [open, setOpen] = React.useState(false)
       /**
        * A draft release is the panel's one invisible outcome: it exists, it is not
@@ -980,6 +1055,9 @@ window.__ModuleLoader__.load({
       const [bumping, setBumping] = React.useState(false)
       /** Installing a release rewrites a profile dependency, so it asks first too. */
       const [updating, setUpdating] = React.useState(false)
+      /** A publish cannot be undone, so it asks first — and 2FA needs somewhere to type. */
+      const [publishing, setPublishing] = React.useState(false)
+      const [otp, setOtp] = React.useState('')
       const run = data.latestRun
       const local = data.local ?? { available: false }
       /**
@@ -1013,6 +1091,34 @@ window.__ModuleLoader__.load({
         return t('install.notInstalled', params)
       })()
       /**
+       * What npm holds for this package, and why a push is or is not offered.
+       *
+       * Fetched on demand by the page rather than baked into the overview, so it is
+       * `null` until the first answer arrives — and a `null` renders nothing at all,
+       * which is the honest thing to show when the registry has not been asked.
+       */
+      const npmInfo = npm ?? null
+      const npmBlockers = Array.isArray(npmInfo?.blockers) ? npmInfo.blockers : []
+      const npmCanPush = npmInfo !== null && npmInfo.canPublish === true
+      const npmExplain = (() => {
+        if (npmInfo === null) return null
+        const params = {
+          version: String(npmInfo.version ?? '?'),
+          latest: String(npmInfo.latest ?? '—'),
+          reason: String(npmInfo.registryProblem ?? npmInfo.state ?? ''),
+        }
+        if (npmInfo.canPublish === true) {
+          if (npmInfo.state === 'unregistered') return t('npm.state.unregistered', params)
+          if (npmInfo.state === 'published') return t('npm.state.published', params)
+          return t('npm.state.unpublished', params)
+        }
+        /* The first blocker is the one to fix first; the rest are consequences. */
+        const first = npmBlockers[0]
+        const key = `npm.blocked.${first ?? 'registry-unreachable'}`
+        const text = t(key, params)
+        return text === key ? t('npm.state.unknown', params) : text
+      })()
+      /**
        * Whether releasing the local version is possible, decided by the Host so this
        * panel and the dispatch route cannot disagree. `blocked` is only ever proven
        * (the version's release belongs to another commit), never guessed.
@@ -1032,6 +1138,17 @@ window.__ModuleLoader__.load({
          every row would be a column of noise. */
       if (installState === 'update' && typeof install?.latestTag === 'string') {
         chips.push(h(Chip, { key: 'u', state: 'warn', title: installExplain ?? undefined }, t('chip.update', { tag: install.latestTag })))
+      }
+      /*
+       * The npm chip is the whole row-level surface for the second channel: a version
+       * that is on npm is a fact worth seeing, and a version that is not is a job
+       * waiting. Anything else — private, dirty, not signed in — belongs in the
+       * expansion, where there is room to say what to do about it.
+       */
+      if (npmInfo !== null && npmInfo.state === 'published') {
+        chips.push(h(Chip, { key: 'n', state: 'success', title: String(npmInfo.pageUrl ?? '') }, t('npm.chipPublished', { version: String(npmInfo.version ?? '') })))
+      } else if (npmCanPush) {
+        chips.push(h(Chip, { key: 'n', state: 'warn', title: npmExplain ?? undefined }, t('npm.chipPending', { version: String(npmInfo.version ?? '') })))
       }
       if (local.available === true) {
         if (Number.isFinite(local.dirty) && local.dirty > 0) chips.push(h(Chip, { key: 'd', state: 'warn' }, t('chip.dirty', { count: String(local.dirty) })))
@@ -1175,6 +1292,74 @@ window.__ModuleLoader__.load({
                     h('span', null, installExplain),
                   )
                 : null,
+              /* The second channel. A GitHub Release and an npm version are separate
+                 facts about the same package, and this is where they sit next to each
+                 other instead of in two browser tabs. */
+              npmInfo !== null
+                ? h(
+                    'div',
+                    { className: 'dsc-sub' },
+                    h('span', null, t('npm.title')),
+                    h(
+                      'div',
+                      { className: 'dsc-line' },
+                      h('span', { className: 'dsc-name', style: { minWidth: '0', fontWeight: '500' } }, String(npmInfo.packageName ?? '')),
+                      npmInfo.state === 'published'
+                        ? h(Chip, { state: 'success' }, `v${String(npmInfo.version ?? '?')}`)
+                        : npmInfo.state === 'unregistered'
+                          ? h(Chip, { state: 'warn' }, t('npm.chipUnregistered'))
+                          : h(Chip, { state: 'idle' }, `v${String(npmInfo.version ?? '?')}`),
+                      npmInfo.latest !== null && npmInfo.latest !== undefined
+                        ? h('span', { className: 'dsc-grow' }, `npm latest ${String(npmInfo.latest)}`)
+                        : h('span', { className: 'dsc-grow' }, String(npmInfo.pageUrl ?? '')),
+                      npmCanPush
+                        ? h(Btn, {
+                            disabled: busy !== '',
+                            title: npmExplain ?? undefined,
+                            onClick: () => setPublishing(true),
+                          }, busy === `npm:${data.repo}` ? '…' : t('npm.action.publish', { version: String(npmInfo.version ?? '') }))
+                        : null,
+                    ),
+                    h('span', null, npmExplain),
+                    /* A draft (or missing) GitHub release on the same version is worth
+                       saying out loud: the two channels are about to disagree in public. */
+                    npmCanPush && data.publishedTag !== `v${String(npmInfo.version ?? '')}`
+                      ? h('span', { className: 'dsc-warn' }, t('npm.githubDraft'))
+                      : null,
+                  )
+                : null,
+              publishing && npmCanPush
+                ? h(
+                    'div',
+                    { className: 'dsc-line' },
+                    h('span', { className: 'dsc-grow' }, t('confirm.npmPublish', {
+                      package: String(npmInfo.packageName ?? ''),
+                      version: String(npmInfo.version ?? ''),
+                      registry: String(npmInfo.registry ?? ''),
+                    })),
+                    h('input', {
+                      className: 'dsc-input dsc-otp',
+                      type: 'text',
+                      inputMode: 'numeric',
+                      autoComplete: 'one-time-code',
+                      placeholder: t('npm.otpPlaceholder'),
+                      title: t('npm.otpHint'),
+                      'aria-label': t('npm.otpLabel'),
+                      value: otp,
+                      onChange: (event) => setOtp(String(event?.target?.value ?? '').replace(/[^0-9]/g, '').slice(0, 8)),
+                    }),
+                    h(Btn, {
+                      kind: 'danger',
+                      disabled: busy !== '',
+                      onClick: () => {
+                        setPublishing(false)
+                        onNpmPublish(data, otp)
+                      },
+                    }, t('npm.action.confirm')),
+                    h(Btn, { kind: 'quiet', onClick: () => setPublishing(false) }, t('confirm.cancel')),
+                  )
+                : null,
+
               updating && installable && install?.latestTag
                 ? h(
                     'div',
@@ -1268,6 +1453,7 @@ window.__ModuleLoader__.load({
     function useConsoleState() {
       const [status, setStatus] = React.useState(null)
       const [overview, setOverview] = React.useState(null)
+      const [npm, setNpm] = React.useState(null)
       const [error, setError] = React.useState(null)
 
       const loadStatus = React.useCallback(async () => {
@@ -1301,7 +1487,25 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      return { status, overview, error, setError, loadStatus, loadOverview }
+      /**
+       * The npm registry's view of every configured package.
+       *
+       * Deliberately NOT part of the overview. The overview is polled every thirty
+       * seconds and answers from GitHub; this costs one HTTPS request per repository
+       * plus a `whoami`, and its answer changes when someone publishes — so it is
+       * fetched when the panel opens, after a publish, and when asked.
+       *
+       * A failure is reported as "no npm information", never as an empty one: a chip
+       * that says "not on npm" because the registry could not be reached would be a
+       * statement the Host never made.
+       */
+      const loadNpm = React.useCallback(async (options) => {
+        const result = await postJson('/npm-status', { force: options?.force === true }, NPM_TIMEOUT_MS)
+        if (!result.ok || !result.response.ok || result.payload?.ok !== true) return
+        setNpm(result.payload.value ?? null)
+      }, [])
+
+      return { status, overview, npm, error, setError, loadStatus, loadOverview, loadNpm }
     }
 
     /** Human-readable text for the transport and version failures. */
@@ -1333,10 +1537,18 @@ window.__ModuleLoader__.load({
     /** The console panel: compact rows, and the picker behind one button. */
     function ConsolePage(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
-      const { status, overview, error, setError, loadStatus, loadOverview } = useConsoleState()
+      const { status, overview, npm, error, setError, loadStatus, loadOverview, loadNpm } = useConsoleState()
       const [busy, setBusy] = React.useState('')
       const [notice, setNotice] = React.useState(null)
       const [logs, setLogs] = React.useState(null)
+      /**
+       * The npm token being typed, held only until the request that writes it.
+       *
+       * It lives in page state rather than anywhere durable on purpose: the Host
+       * writes it to the user-level `.npmrc` that npm itself reads, and clears it from
+       * the field the moment that answers.
+       */
+      const [npmToken, setNpmToken] = React.useState('')
       /**
        * The update that just landed and the restart it needs.
        *
@@ -1376,7 +1588,9 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         void loadStatus()
         void loadOverview({ force: true })
-      }, [loadStatus, loadOverview])
+        // Once, not on the poll: the npm answer changes when someone publishes.
+        void loadNpm({})
+      }, [loadStatus, loadOverview, loadNpm])
 
       const pollSeconds = status?.config?.pollSeconds ?? 30
       React.useEffect(() => {
@@ -1584,6 +1798,71 @@ window.__ModuleLoader__.load({
         setNotice(t('restart.scheduled'))
       }, [setError, t])
 
+      /**
+       * Push one package to npm.
+       *
+       * The one-time password is passed through and then thrown away, and every
+       * refusal comes back as the Host's own sentence — `private-package`,
+       * `dirty-tree` and `already-published` are three different fixes and the panel
+       * does not try to paraphrase them.
+       */
+      const onNpmPublish = React.useCallback(
+        async (data, otp) => {
+          const key = `npm:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson('/npm-publish', { repo: data.repo, otp: String(otp ?? '') }, UPDATE_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            await loadNpm({ force: true })
+            return
+          }
+          const value = result.payload.value ?? {}
+          setNotice(t(value.wasUnregistered === true ? 'state.npmFirstPublish' : 'state.npmPublished', {
+            package: String(value.packageName ?? data.repo),
+            version: String(value.version ?? ''),
+            registry: String(value.registry ?? ''),
+          }))
+          await loadNpm({ force: true })
+        },
+        [loadNpm, setError, t],
+      )
+
+      /**
+       * Write an npm token where npm itself reads it, and prove it works.
+       *
+       * The promise the panel makes about credentials is the one it already keeps for
+       * `gh`: it stores none. The token goes into the user-level `.npmrc` — the same
+       * file `npm login` writes — and is cleared from the field as soon as the Host
+       * answers, so it is not left sitting in a page that stays open for hours.
+       */
+      const onNpmLogin = React.useCallback(async () => {
+        setBusy('npm-login')
+        setNotice(null)
+        setError(null)
+        const result = await postJson('/npm-login', { token: npmToken }, ACTION_TIMEOUT_MS)
+        setBusy('')
+        setNpmToken('')
+        if (!result.ok) {
+          setError(result.aborted ? 'timeout' : 'host')
+          return
+        }
+        if (!result.response.ok || result.payload?.ok !== true) {
+          setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+          await loadNpm({ force: true })
+          return
+        }
+        const value = result.payload.value ?? {}
+        setNotice(t('npm.tokenWritten', { npmrc: String(value.npmrcPath ?? ''), account: String(value.account ?? '') }))
+        await loadNpm({ force: true })
+      }, [loadNpm, npmToken, setError, t])
+
       const onLogs = React.useCallback(async (data, entry) => {
         if (logs !== null && logs.repo === data.repo && logs.runId === entry.id) {
           setLogs(null)
@@ -1611,6 +1890,15 @@ window.__ModuleLoader__.load({
       const configured = status?.repos ?? []
       const repos = overview?.repos ?? []
       const gh = status?.gh ?? {}
+      /**
+       * npm's answers, keyed by the configured repository string.
+       *
+       * The overview and the npm status arrive independently, so a row renders
+       * without its npm chip until the second answer lands — and renders without one
+       * forever if that answer never comes, which is the point.
+       */
+      const npmByRepo = new Map((npm?.repos ?? []).map((entry) => [entry.repo, entry]))
+      const npmAuth = npm?.auth ?? null
       const missing = Array.isArray(gh.missingScopes) ? gh.missingScopes : []
       const setupNeeded = status !== null && (needsAccountSetup(gh) || configured.length === 0)
       const draftCount = repos.filter((entry) => entry.draftTag !== null && entry.draftTag !== undefined).length
@@ -1658,6 +1946,9 @@ window.__ModuleLoader__.load({
             'div',
             { className: 'dsc-meta' },
             gh.account !== null && gh.account !== undefined ? h(Chip, { state: 'idle' }, `${t('meta.account')} ${gh.account}`) : null,
+            npmAuth !== null && npmAuth.loggedIn === true
+              ? h(Chip, { state: 'idle', title: String(npm.registry ?? '') }, t('npm.account', { account: String(npmAuth.account ?? '') }))
+              : null,
             overview !== null && typeof overview.fetchedAt === 'string'
               ? h('span', null, t('meta.updated', { time: stamp(overview.fetchedAt) }), overview.cached === true ? ` (${t('meta.cached')})` : '')
               : null,
@@ -1682,6 +1973,52 @@ window.__ModuleLoader__.load({
                 h(Btn, { kind: 'primary', disabled: busy !== '', onClick: () => { void onRestart() } }, busy === 'restart' ? '…' : t('action.restartNow')),
                 h(Btn, { kind: 'quiet', onClick: () => setRestartPrompt(null) }, t('action.restartLater')),
               ),
+            )
+          : null,
+        /*
+         * npm credentials, when there are none.
+         *
+         * Panel-level rather than per row, because it is one fact about the machine
+         * and five copies of the same instruction is not five times as helpful. The
+         * token is typed here, written by the Host into the .npmrc npm itself reads,
+         * and never kept by this plugin — which is the same promise the GitHub side
+         * makes by reusing a signed-in `gh` instead of a stored token.
+         */
+        npmAuth !== null && npmAuth.loggedIn !== true
+          ? h(
+              'div',
+              { className: 'dsc-setup', role: 'status' },
+              h('span', { className: 'dsc-setup-strong' }, t('npm.notLoggedIn', {
+                command: String(npm?.packageManager?.command ?? 'pnpm'),
+                registry: String(npm.registry ?? ''),
+                npmrc: String(npmAuth.npmrcPath ?? ''),
+              })),
+              h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h('input', {
+                  className: 'dsc-input',
+                  type: 'password',
+                  autoComplete: 'off',
+                  spellCheck: 'false',
+                  placeholder: t('npm.tokenPlaceholder'),
+                  'aria-label': t('npm.tokenPlaceholder'),
+                  value: npmToken,
+                  onChange: (event) => setNpmToken(String(event?.target?.value ?? '')),
+                }),
+                h(Btn, {
+                  kind: 'primary',
+                  disabled: busy !== '' || npmToken.trim() === '',
+                  onClick: () => { void onNpmLogin() },
+                }, busy === 'npm-login' ? '…' : t('npm.writeToken')),
+                h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void loadNpm({ force: true }) } }, t('npm.recheck')),
+              ),
+              /* Whatever the package manager said, verbatim: "not signed in" and "the
+                 token was revoked" are the same blank state and different problems. */
+              npmAuth.message !== null && npmAuth.message !== undefined
+                ? h('span', null, String(npmAuth.message))
+                : null,
+              h('span', { className: 'dsc-mono' }, `${t('npm.npmrcPath')} ${String(npmAuth.npmrcPath ?? '')}`),
             )
           : null,
         stale
@@ -1742,6 +2079,8 @@ window.__ModuleLoader__.load({
                 onBump: () => onBump(data),
                 onPublish: (tag) => onPublish(data.repo, tag),
                 onUpdate: () => { void onUpdate(data) },
+                npm: npmByRepo.get(data.repo) ?? null,
+                onNpmPublish,
                 logs,
                 onLogs,
               })),

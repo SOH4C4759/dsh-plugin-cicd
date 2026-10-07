@@ -79,6 +79,11 @@ const EXPECTED = [
   // the plugin that owns restarting.
   '/api/dsh-cicd/update',
   '/api/dsh-cicd/restart',
+  // The second distribution channel: what npm holds, the credential that publishes
+  // it, and the push itself.
+  '/api/dsh-cicd/npm-status',
+  '/api/dsh-cicd/npm-login',
+  '/api/dsh-cicd/npm-publish',
   // Setup without a terminal: the browser sign-in and the repository list are
   // routes, not instructions to go and run something elsewhere.
   '/api/dsh-cicd/auth-start',
@@ -172,6 +177,28 @@ try {
      which is the real shape of "dsh-plugin-restart is not installed". */
   const restartMissing = await call('/api/dsh-cicd/restart', {})
   check('a restart without the restart plugin is named, not a bare failure', restartMissing.status === 501 && restartMissing.payload?.code === 'restart-unavailable', restartMissing.payload?.message ?? '')
+
+  /* --- the npm channel ----------------------------------------------------
+     Every refusal below happens before anything leaves this process, which is the
+     claim worth pinning: an unconfigured repository, a repository with no checkout to
+     publish, an empty token and a token that would forge a second `.npmrc` line are
+     all local facts. The status route is asserted only as "a verdict, not a hang" —
+     it reaches registry.npmjs.org, and a test that needs the public registry to
+     answer is a test that fails on a plane. */
+  const npmUnknown = await call('/api/dsh-cicd/npm-publish', { repo: 'someone/else' })
+  check('publishing an unconfigured repository is refused', npmUnknown.status === 400 && /not configured/.test(npmUnknown.payload?.message ?? ''), npmUnknown.payload?.message ?? '')
+
+  const npmNoCheckout = await call('/api/dsh-cicd/npm-publish', { repo: 'octocat/Hello-World' })
+  check('publishing without a local checkout is refused before npm is asked', npmNoCheckout.status === 400 && npmNoCheckout.payload?.code === 'no-checkout', npmNoCheckout.payload?.message ?? '')
+
+  const npmEmptyToken = await call('/api/dsh-cicd/npm-login', { token: '   ' })
+  check('an empty npm token is refused', npmEmptyToken.status === 400 && npmEmptyToken.payload?.code === 'bad-token', npmEmptyToken.payload?.message ?? '')
+
+  const npmInjectedToken = await call('/api/dsh-cicd/npm-login', { token: 'abc\ndef' })
+  check('a token that would forge a second .npmrc line is refused', npmInjectedToken.status === 400 && npmInjectedToken.payload?.code === 'bad-token', npmInjectedToken.payload?.message ?? '')
+
+  const npmStatus = await call('/api/dsh-cicd/npm-status', {})
+  check('npm-status answers with a verdict', npmStatus.payload !== null && typeof npmStatus.payload.ok === 'boolean', `HTTP ${npmStatus.status}`)
 
   /* --- setup routes -------------------------------------------------------
      Only the refusal paths of `auth-start` are exercised: its success path spawns

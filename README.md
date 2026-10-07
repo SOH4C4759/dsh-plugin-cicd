@@ -10,8 +10,11 @@
 - **发布了吗** —— 已发布的 Release、还在草稿箱里的 Release、资产清单。
 - **本地领先于发布吗** —— 本地 `package.json` 版本、领先/落后提交数、未提交文件数。
 - **装的是发布出去的那份吗** —— 本机 profile 里这份是 `link:` 的本地检出、还是 Release 上的 tgz；差几号版本。
+- **npm 上是哪一版** —— 这个版本在不在公开源上；不在的话，一次点击就能推上去。
 
-面板上能直接做的动作：`构建`（触发 `ci.yml`）、`发布`（触发 `release.yml`，默认产出草稿）、`升版本并发布`、`公开发布草稿`、`装 Release vX` / `更新到 vX`、`重跑`、`取消`、`看失败日志`，以及更新之后的 `立即重启 DSH`。
+也就是说：**一个包，两条分发渠道**。GitHub Release 给人下载与审阅，npm 让 `dsh plugin add <名字>` 一条命令装完。
+
+面板上能直接做的动作：`构建`（触发 `ci.yml`）、`发布`（触发 `release.yml`，默认产出草稿）、`升版本并发布`、`公开发布草稿`、`推送到 npm vX`（+ 在面板里写 npm token）、`装 Release vX` / `更新到 vX`、`重跑`、`取消`、`看失败日志`，以及更新之后的 `立即重启 DSH`。
 
 ## 安装
 
@@ -35,6 +38,8 @@ dsh plugin --profile desktop add "link:F:\CodeProj\dsh-plugin-cicd"
 | 移除仓库 | 取消勾选 | **不需要** |
 | 触发构建 / 发布出草稿 | 仓库那一行的「构建」「发布」 | **不需要** |
 | 公开草稿 | 展开行 →「公开草稿」→「确认公开？」（两次点击） | **不需要** |
+| 给 npm 一个 token | 面板顶部（未登录时才出现）粘贴 Access Token →「写入并验证」 | **不需要**（Host 写进 npm 自己读的 `~/.npmrc`，插件不保存 token） |
+| 推送到 npm | 展开行 →「推送到 npm vX」→「确认推送」（两次点击；开了 2FA 就在同一行填一次性密码） | **不需要**（Host 用 DSH 自带的 pnpm 发布，复用同一个包管理器） |
 | 更新已装的那份 | 行上的「装 Release vX」/「更新到 vX」→ 展开处「确认更新」 | **不需要**（Host 把 tgz 交给 DSH 自己的插件管理器安装） |
 | 让新版生效 | 更新后面板直接问「现在重启？」→「立即重启 DSH」 | **不需要**（转发给 `dsh-plugin-restart`；没装它会明确说） |
 | 看失败日志 / 重跑 / 取消 | 展开行里的对应按钮 | **不需要** |
@@ -97,6 +102,35 @@ dsh plugin --profile desktop add "file:$PWD\dsh-plugin-cicd-0.1.0.tgz"
 
 **没有装它就没有这部份**：`update` 路由需要 Host 提供 `pluginManager` 服务，没有就回 `501 plugin-manager-missing`，而不是假装装过。
 
+## 推送到 npm（第二条分发渠道）
+
+Release 是给人下载的，npm 是给 `dsh plugin add` 装的。面板把它们并排放：一行上既有 GitHub 的 tag，也有 npm 上的版本。**独立按钮，不和「发布」绑在一起**——推送不可逆，不该搭在另一个动作上顺带发生。
+
+每一行先说清 npm 现在是什么状态：
+
+| 面板看到 | 判定 | 按钮 |
+|---|---|---|
+| 这个版本已在 npm 上 | **已发布** | 没有按钮（npm 不允许同一版本推第二次） |
+| 名字在 npm 上还没人占 | **未注册** | 【推送到 npm vX】——这次就是**首次发布** |
+| 名字已存在，但这个版本没推过 | **未发布** | 【推送到 npm vX】 |
+| 问不到源（离线/被拦） | **未知** | **没有按钮**——宁可不给，也不给一个注定失败的 |
+
+推送前会逐条拒绝，且**每一条都发生在任何字节上传之前**：
+
+- **`private: true`** —— 作者的决定，不是这里能绕过的（本仓库集里的 `dsh-knowledge-console` 就是这种）。
+- **工作区有未提交改动** —— `publish` 打包的是**工作目录**；`files` 白名单挡不住"白名单目录里的新文件"。
+- **这个版本已经在 npm 上** —— npm 不接受同一版本推两次，撤回也只在很短的时间内可行。
+- **没有登录 npm** —— 面板直接给出解决路径（见下）。
+- **没有本地检出 / 没有版本号 / 读不到源**。
+
+### 凭据：和复用 `gh` 同一个原则
+
+插件**不保存任何 token**。它用 DSH 自带的 pnpm（`profileContext.packageManager`，也就是插件管理器安装时用的那个），凭据来自 npm 自己读的用户级 `.npmrc`。
+
+这台机器现在没有任何 npm 凭据（也没有 `npm` 这个命令），所以面板在未登录时给一个输入框：在 npmjs.com 生成一个带 publish 权限的 Access Token → 粘贴 → 【写入并验证】。Host 把它写进 `%USERPROFILE%\.npmrc`（**就是 `npm login` 会写的那个文件**，其他行原样保留，旧版本留一份 `.bak`），然后立刻用 `whoami` 验证。token 不回显、不落插件、不进日志；页面也在请求返回的那一刻就清空输入框。
+
+开了 2FA 的账号，推送时 npm 要一次性密码：确认行里就有那个输入框。子进程的 stdin 是关闭的（`ignore`），所以它**不会**挂着等一个没人持有的 stdin——失败会明说是要 OTP，而不是转圈到超时。
+
 ## 配置：用脚本，不要手改 YAML
 
 包本身**不带仓库列表**——哪些仓库被监视是部署状态，不是包状态；把某个人的私有仓库名打进公开包，每个安装者都得先去拆它。
@@ -145,6 +179,7 @@ patch 里仍可用的选项（每个都有默认值）：
 | `overviewTtlMs` | `15000` | 概览缓存窗口；面板轮询会走缓存 |
 | `logTailLines` | `120` | 失败日志取最后多少行 |
 | `pollSeconds` | `30` | 面板自动刷新间隔 |
+| `npmRegistry` | `https://registry.npmjs.org/` | 推送目标源。改成私有源即可（只能 http/https，且 URL 里带凭据会被拒绝）；`.npmrc` 里的 token 行按这个源的 host 匹配 |
 | `enabled` | `true` | 关掉后路由只回「已停用」，不碰 GitHub |
 
 所有值都做**夹取**而不是拒绝：手写的 patch 不该能让宿主起不来，最坏情况是某个路由报告「未配置」。
@@ -166,16 +201,20 @@ scope 是从 `gh auth status` 真读出来的：缺 `repo` 读不到私有仓库
 
 本机 `gh` 已经登录、已经带好了 token scope。复用它意味着：插件**不存任何凭据**，不需要你再走一次 OAuth/PAT，而面板执行的命令就是你会手敲的那条（`gh run list` / `gh workflow run` / `gh release edit`）。反过来，任何要求你再输一次 token 的方案，都是把同一条权限链复制了第二份。
 
+npm 这一侧是同一条原则的两个面：**包管理器**复用 Host 自己的 pnpm（`profileContext.packageManager`——插件管理器安装插件时用的就是它，第二个答案早晚会和第一个不一致），**凭据**放在 npm 自己读的 `.npmrc` 里。面板提供了一个写 token 的入口，但写的是那个文件，不是插件的任何存储：这与"面板能登录 GitHub 但插件不存 token"是同一句话。
+
 调用一律用 `execFile` 传 argv、**不经 shell**；仓库名、workflow 名、tag 在进入 `gh` 之前都按 slug 形状校验过。子进程带 `GH_PROMPT_DISABLED=1`，否则一个想提问的 `gh` 会挂在没人持有的 stdin 上，面板只会转圈到超时。
 
 ## 安全边界
 
 - 所有路由都是 **POST + 仅回环 + 同源**（`isTrustedRequest`），与宿主设置桥对自家回环路由的信任策略一致：只有「来自本机」且「来自这个 Host 服务的文档」的请求能过。这些路由以本机 GitHub 凭据行事，所以不能只按端口放行。
-- 只读部分：状态、概览、运行、日志。**有副作用的是六条**：`dispatch`、`run-action`、`release-action`、`version-bump`、`update`、`restart`。
+- 只读部分：状态、概览、运行、日志、npm 状态。**有副作用的是八条**：`dispatch`、`run-action`、`release-action`、`version-bump`、`update`、`restart`、`npm-login`、`npm-publish`。
 - `version-bump` 是唯一会**写本地检出**的路由：只改 `package.json` 的版本行，然后 `git commit` 只提交这一个文件并推送当前分支。工作区不干净、分支没有上游、或落后于上游时它直接拒绝，不做任何写入。
 - `update` 是唯一会**改 profile 依赖**的路由：下载 Release 里的 tgz，再交给 Host 的插件管理器安装；失败时由管理器还原 `package.json` 与 lockfile。
 - `restart` 自己不重启任何东西：它把请求转发到同一个 Host 上的 `/api/dsh-restart/restart`，由 `dsh-plugin-restart` 决定停哪个进程、用什么命令拉起来。没有那个插件就回 `501 restart-unavailable`。
-- `公开发布草稿` 是唯一的不可逆动作，所以它要两次点击、中间那一步明说「发布后任何人可见，无法收回」。
+- `npm-login` 是唯一会**写用户级配置**的路由：把 token 合并进 `~/.npmrc`（其他行原样保留，旧版本留 `.bak`）。token **绝不出现在任何响应、日志或状态里**——`npm-status` 只回答"有没有那一行"，不回答"那行是什么"。
+- `npm-publish` 是另一个**不可逆**动作：npm 不允许同一版本推两次，撤回也只在很短的时间内可行。所以它也要两次点击，且推送前逐条拒绝（`private: true`、脏工作区、版本已存在、未登录）。
+- `公开发布草稿`、`npm-publish` 是仅有的两个不可逆动作，两者都要两次点击、中间那一步明说后果。
 
 ## HTTP 接口
 
@@ -193,8 +232,13 @@ scope 是从 `gh auth status` 真读出来的：缺 `repo` 读不到私有仓库
 | `POST /api/dsh-cicd/logs` | `{repo, runId}` 失败步骤日志的尾部 |
 | `POST /api/dsh-cicd/update` | `{repo, tag?}`：把该 Release 的 `.tgz` 下载到 `<DSH_HOME>\dsh-plugin-cicd\downloads\` 并装进当前 profile。tag 缺省 = 最新一个**非草稿**且带 tgz 的 Release |
 | `POST /api/dsh-cicd/restart` | 无参数：转发到 `dsh-plugin-restart` 的重启路由；没挂载则 `501 restart-unavailable` |
+| `POST /api/dsh-cicd/npm-status` | 无参数（`{force:true}` 绕缓存）：`whoami` 的结果 + 每个包在源上的状态。**按需拉取，不参与 30 秒轮询**——每个仓库一次 HTTPS 加一次 `whoami` |
+| `POST /api/dsh-cicd/npm-login` | `{token}`：把 token 合并进用户级 `.npmrc` 再用 `whoami` 验证。token 不回显 |
+| `POST /api/dsh-cicd/npm-publish` | `{repo, otp?}`：用 Host 自己的 pnpm 发布当前版本。`otp` 是 2FA 一次性密码（6–8 位） |
 
 一律返回 `{ ok: true, value }` 或 `{ ok: false, code, message }`。
+
+`npm-status` 的每条仓库记录：`{ repo, label, localPath, packageName, version, dirty, privatePackage, state, latest, blockers, canPublish, registryProblem, registry, pageUrl }`。`state` ∈ `unregistered` / `unpublished` / `published` / `unknown`；`blockers` 是**具名原因**（`private-package`、`dirty-tree`、`not-logged-in`、`already-published`、`registry-unreachable`、`no-checkout`、`no-version`、`no-package-name`）——"没有按钮"是最没用的一句话，`private: true` 和"没登录"在屏幕上同样是空白，修法却完全不同。
 
 `overview` 的每一行多一个 `install` 块：`{ profile, profileDir, profileReadable, packageName, present, spec, kind, installedVersion, latestTag, latestVersion, latestAsset, state }`。`state` ∈ `not-installed` / `no-release` / `current` / `update` / `ahead` / `differs` / `checkout`——判决在 Host 上做，所以面板和 `update` 路由不会各说一套。
 
@@ -222,7 +266,7 @@ scope 是从 `gh auth status` 真读出来的：缺 `repo` 读不到私有仓库
 
 ## 本仓库自身的 CI/CD
 
-它自己也用同一套：[`ci.yml`](.github/workflows/ci.yml) 每次 push 跑 [`tests/host-checks.mjs`](tests/host-checks.mjs)（120 条离线检查，覆盖入口校验/配置夹取/降级路径/发布预检与版本号运算/安装态与更新判决）、[`tests/mount-check.mjs`](tests/mount-check.mjs)（30 条：真挂载、真起 HTTP、真走路由，含更新与转发重启的两条拒绝路径）、[`tests/bump-e2e.mjs`](tests/bump-e2e.mjs)（29 条：真 git 仓库、真提交、真推送，以及每条拒绝都不留半截改动）与 [`tests/client-render.mjs`](tests/client-render.mjs)（41 条：用桩 React 真渲染面板，证明「发布」与【升版本并发布】确实按判决切换、被拦的原因真的到了屏幕上，以及一次更新真的 POST 了 `/update`、随后真的问要不要重启、点下去真的 POST 了 `/restart`），并真造一个发布包；[`release.yml`](.github/workflows/release.yml) 在 `v*` tag 上构建并上传 Release，**对解包后的资产**再跑一遍这几套。发布流程见 [RELEASING.md](RELEASING.md)。
+它自己也用同一套：[`ci.yml`](.github/workflows/ci.yml) 每次 push 跑 [`tests/host-checks.mjs`](tests/host-checks.mjs)（167 条离线检查，覆盖入口校验/配置夹取/降级路径/发布预检与版本号运算/安装态与更新判决/npm 源与 token 与每条拒绝）、[`tests/mount-check.mjs`](tests/mount-check.mjs)（35 条：真挂载、真起 HTTP、真走路由，含更新、转发重启与 npm 三条拒绝路径）、[`tests/bump-e2e.mjs`](tests/bump-e2e.mjs)（29 条：真 git 仓库、真提交、真推送，以及每条拒绝都不留半截改动）与 [`tests/client-render.mjs`](tests/client-render.mjs)（71 条：用桩 React 真渲染面板，证明「发布」与【升版本并发布】确实按判决切换、被拦的原因真的到了屏幕上、一次更新真的 POST 了 `/update` 并接着问要不要重启、以及一次 npm 推送真的 POST 了 `/npm-publish` 且未登录时真的能只靠粘贴 token 完成），并真造一个发布包；[`release.yml`](.github/workflows/release.yml) 在 `v*` tag 上构建并上传 Release，**对解包后的资产**再跑一遍这几套。发布流程见 [RELEASING.md](RELEASING.md)。
 
 `tests/host-checks.mjs` 里另有一半检查需要真实的 `gh` 与特定的仓库状态，用 `DSH_CICD_LIVE=1` 打开：
 
@@ -251,6 +295,9 @@ pwsh -File scripts/push-via-api.ps1 -RepoPath 'F:\CodeProj\dsh-plugin-cicd'
 - **更新需要 Host 提供 `pluginManager` 服务**（DSH 自带）。没有它时 `update` 回 `501`，不会退化成自己起一个 `dsh` 子进程去写 profile。
 - **重启需要装了 `dsh-plugin-restart`**。发布台不自己杀进程——停哪个、怎么拉起来是那个插件的契约。
 - 更新的判定读的是 `node_modules/<name>/package.json` 的版本，不是依赖字符串。`link:` 时它等于本地检出的版本，所以"版本一样"绝不能被当成"装的是发布的那份"——那正是 `checkout` 这个状态存在的理由。
+- **npm 推送复用 Host 自己的包管理器**：优先 `profileContext.packageManager`（DSH 自带的 pnpm），其次 `DSH_PNPM`，再其次打包应用自带的 `resources/runtime/pnpm`，最后才是 PATH 上的 `pnpm`。走到最后一步而机器上没有 pnpm 时，报错会明说 `ENOENT` 与它找的是什么。源码里 `npm-status` 只做 `whoami`，网络那一侧是 HTTPS `fetch`（**不走** `HTTP_PROXY`，本机实测直连可达）。
+- **npm 推送没有 provenance**。真需要 `--provenance`（构建来源可验证）的包应当在 CI 里发布（`release.yml` + `NPM_TOKEN` + OIDC），面板这条路是"在这台机器上推一次"的路径，不是它的替代品。
+- `private: true` 的包（例如 `dsh-knowledge-console`）面板**不会**提供推送按钮，这是有意的：那行字段是作者的决定。
 
 ## License
 
