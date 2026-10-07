@@ -776,6 +776,10 @@ async function expandFirstRow(tree) {
   check('the guide states the 90-day ceiling', text.includes('最长 90 天'))
   check('the guide says not to bypass 2FA for a local push', text.includes('不要勾'))
   check('the guide says the email must be verified before publishing', text.includes('不允许未验证邮箱的账号发布'))
+  /* npmjs.com answers a whole-site 403 to some networks, and the token does not care
+     where it was minted — a guide that assumes this machine can open the site sends
+     someone to fight a bot challenge they cannot win from there. */
+  check('the guide offers the other-device workaround', text.includes('换一台设备或换一个网络'), text.replace(/\s+/g, ' ').slice(0, 320))
   /* A step is only ticked where the Host can actually know: it can see a missing
      token line, and it cannot see whether an account was ever registered. */
   check('step ③ is the one step with a live state', text.includes('待做'))

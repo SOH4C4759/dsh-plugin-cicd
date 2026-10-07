@@ -221,6 +221,7 @@ window.__ModuleLoader__.load({
       'npm.guide.tokenScope': 'Permissions 选 Read and write；Packages 选全部，或只勾这个包（只勾一个包更安全）。',
       'npm.guide.tokenExpiry': '有效期最长 90 天，这是 npm 对可写 token 的硬限制。到期后 token 就失效了，回到第 ② 步再生成一个。',
       'npm.guide.token2fa': '只有"给 CI 用、没有人能输一次性密码"时才勾 Bypass 2FA。在这里推**不要勾**：推送时面板会让你填一次性密码。',
+      'npm.guide.blocked': '如果 npmjs.com 在你这台机器上打不开，或者被"我不是机器人"的验证拦住：**换一台设备或换一个网络**（手机流量最省事）打开 npmjs.com 生成 token，再把那串字符粘到第 ③ 步。面板只认这个 token，不在乎它是在哪里生成的——这一步和你本机的浏览器无关。',
       'npm.guide.step3': '③ 粘贴到下面',
       'npm.guide.step3Note': '它会写进 {npmrc}（npm 自己读的用户级配置文件，其他行原样保留）；插件不保存 token，请求一返回输入框就清空。',
       'npm.guide.step4': '④ 账号开了 2FA？',
@@ -540,6 +541,7 @@ window.__ModuleLoader__.load({
       'npm.guide.tokenScope': 'Set Permissions to Read and write; scope Packages to everything, or to just this package (narrower is safer).',
       'npm.guide.tokenExpiry': 'The maximum lifetime is 90 days, which is npm\'s hard limit for a write token. When it expires it simply stops working; come back to step 2 and make another.',
       'npm.guide.token2fa': 'Tick Bypass 2FA only for CI, where nobody can type a one-time password. For pushing here, leave it OFF — the panel will ask for the code.',
+      'npm.guide.blocked': 'If npmjs.com will not open on this machine, or an "are you a robot" check blocks it: create the token on ANOTHER device or network (a phone on mobile data is easiest) and paste the string into step 3. The panel only needs the token — where it was made makes no difference, and this step has nothing to do with this machine\'s browser.',
       'npm.guide.step3': '(3) Paste it below',
       'npm.guide.step3Note': 'It is written to {npmrc} (the user-level file npm itself reads; every other line is preserved). This plugin stores no token, and the field is cleared as soon as the request answers.',
       'npm.guide.step4': '(4) Is 2FA on the account?',
@@ -2735,6 +2737,11 @@ window.__ModuleLoader__.load({
         h('span', null, t('npm.guide.tokenScope')),
         h('span', null, t('npm.guide.tokenExpiry')),
         h('span', null, t('npm.guide.token2fa')),
+        /* The step that is not on this machine: npmjs.com sits behind a bot challenge
+           that answers whole-site 403s to some networks, and the token does not care
+           where it was minted. Saying so here is the difference between a five-minute
+           workaround and an afternoon spent on the wrong problem. */
+        h('span', { className: 'dsc-quiet' }, t('npm.guide.blocked')),
 
         h(
           'div',

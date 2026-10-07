@@ -140,6 +140,10 @@ Release 是给人下载的，npm 是给 `dsh plugin add` 装的。面板把它�
 
 token 不回显、不落插件、不进日志；页面在请求返回的那一刻就清空输入框。token 被拒时，面板直接把**排查清单**摊在同一块里（复制不全 / 权限不是 Read and write / 已撤销或超过 90 天 / 范围是别的包 / 邮箱未验证），而不是只回一句 `ERR_PNPM_WHOAMI_UNAUTHORIZED`。
 
+**如果 npmjs.com 在你这台机器上打不开**——实测过：整站被 Cloudflare 挑战拦下（`/`、`/signup`、`/settings/~/tokens` 一起回 **403 `Just a moment...`**，走本地代理也一样）——那就**换一台设备或换一个网络**（手机流量最省事）生成 token，再粘到第 ③ 步。**面板只认这个 token，不在乎它在哪里生成**，这一步和你本机的浏览器无关。
+
+同时**别再指望命令行**：`POST registry.npmjs.org/-/user/org.couchdb.user:*` 现在回 **405 Method Not Allowed**，也就是 `npm login --auth-type=legacy` / `pnpm login` 这条路已被 npm 移除；而建 token 的 `POST /-/npm/v1/tokens` 虽然还活着并真在认证（假凭据回 `404 User not found`），但 npm 公告写明新 classic token 不能再经 API 创建。所以**网站（或在另一台设备上打开它）是唯一的路**。发布本身不受影响：`registry.npmjs.org` 一直是通的。
+
 **凭据是三个状态，不是一个布尔值**（`npmAuthState`）。`whoami` 是用户级端点，而 granular token 是**包级范围**的——它完全可能在 `whoami` 上被拒、却发布得好好的。把这种拒绝读成"没登录"，就会正好挡住引导让用户去建的那种 token，还会对刚做完第 ③ 步的人说"你还没开始"。所以：
 
 | 状态 | 面板 |
