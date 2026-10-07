@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyPublishFailure, classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
+import { classifyPublishFailure, classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -381,6 +381,18 @@ for (const [blocker, override] of [
   check(`a push is refused when: ${blocker}`, verdict.canPublish === false && verdict.blockers.includes(blocker), verdict.blockers.join(',') || '(none)')
 }
 check('a refusal answers without throwing on nothing', npmPublishVerdict().canPublish === false)
+
+/* Three states, because a granular token is scoped to packages and `whoami` is a
+   user-level endpoint: it can refuse a token that publishes perfectly well. Reading
+   that refusal as "not signed in" would tell a first-time publisher their brand-new
+   token is not a credential — the worst place for a false negative. */
+check('a confirmed account is signed-in', npmAuthState({ whoami: true, hasToken: true }) === 'signed-in')
+check('whoami alone is enough', npmAuthState({ whoami: true, hasToken: false }) === 'signed-in')
+check('a token line without whoami is still a credential', npmAuthState({ whoami: false, hasToken: true }) === 'credential-present')
+check('nothing at all is the state the guide belongs to', npmAuthState({ whoami: false, hasToken: false }) === 'none')
+check('the state helper answers on an empty call', npmAuthState() === 'none')
+/* And the verdict must not refuse a push just because whoami stayed quiet. */
+check('an unconfirmed credential still offers the push', npmPublishVerdict({ ...pushable, authed: true }).canPublish === true)
 
 check('the user-level .npmrc is where npm looks', resolveNpmrcPath({ USERPROFILE: 'C:\\u' }) === join('C:\\u', '.npmrc'))
 check('an explicit NPM_CONFIG_USERCONFIG wins', resolveNpmrcPath({ USERPROFILE: 'C:\\u', NPM_CONFIG_USERCONFIG: 'D:\\x\\.npmrc' }) === 'D:\\x\\.npmrc')

@@ -1386,13 +1386,42 @@ export function npmPackageState(packument, version) {
 }
 
 /**
+ * Whether this machine can publish, as three states rather than a boolean.
+ *
+ * `whoami` is the obvious probe and not a sufficient one. It is a user-level
+ * endpoint, while a granular access token — the only kind npm has issued since
+ * November 2025 — is scoped to packages, so it can be refused there and still work
+ * for `publish`. Reading that refusal as "not signed in" would block the very
+ * credential npm now tells everyone to create, which is the worst possible place for
+ * a false negative: the panel would tell a first-time publisher that their brand-new
+ * token is not a credential.
+ *
+ * So a token line in `.npmrc` counts as a credential on its own, and `whoami` is what
+ * turns it into a name:
+ *   signed-in          whoami answered; the account is known.
+ *   credential-present a token line exists but whoami would not confirm it. The
+ *                      publish itself is the real test, and its failure is classified.
+ *   none               nothing to authenticate with — where the guide belongs.
+ *
+ * @param {object} params - the two probes.
+ * @param {boolean} params.whoami - whether `whoami` answered.
+ * @param {boolean} params.hasToken - whether `.npmrc` carries a token for this registry.
+ * @returns {'signed-in'|'credential-present'|'none'}
+ */
+export function npmAuthState({ whoami = false, hasToken = false } = {}) {
+  if (whoami === true) return 'signed-in'
+  return hasToken === true ? 'credential-present' : 'none'
+}
+
+/**
  * Whether the push should be offered, and every reason it should not be.
  *
  * The blockers are named strings rather than a boolean because "there is no button"
  * is the least useful thing a panel can say: `private-package` and `not-logged-in`
  * are the same absence on screen and completely different fixes.
  *
- * @param {object} params - what was read about this repository.
+ * @param {object} params - what was read about this repository. `authed` means a
+ *   credential EXISTS (see `npmAuthState`), not that the account is confirmed.
  * @returns {{state: string, latest: string|null, packageName: string, version: string|null, blockers: string[], canPublish: boolean}}
  */
 export function npmPublishVerdict({ packageName = '', version = null, manifest = null, registryState = null, authed = false, dirty = null } = {}) {
@@ -2756,6 +2785,15 @@ export function apply(ctx, rawConfig) {
   /** One registry answer is reused briefly; a publish or a sign-in clears it. */
   let npmCache = null
 
+  /** The user-level `.npmrc` text, or '' when there is none to read. */
+  const readNpmrcText = () => {
+    try {
+      return readFileSync(resolveNpmrcPath(), 'utf8')
+    } catch {
+      return ''
+    }
+  }
+
   /** One publish at a time: npm refuses a second upload of the same version anyway. */
   let npmPublishInFlight = false
 
@@ -2828,14 +2866,11 @@ export function apply(ctx, rawConfig) {
     }
     const invocation = resolvePackageManagerInvocation(ctx)
     const npmrcPath = resolveNpmrcPath()
-    let npmrcText = ''
-    let npmrcReadable = true
-    try {
-      npmrcText = readFileSync(npmrcPath, 'utf8')
-    } catch {
-      npmrcReadable = false
-    }
+    const npmrcReadable = existsSync(npmrcPath)
+    const npmrcText = readNpmrcText()
+    const hasToken = hasNpmToken(npmrcText, registry)
     const auth = await readNpmAuth(invocation, registry)
+    const authState = npmAuthState({ whoami: auth.loggedIn, hasToken })
 
     const repos = await Promise.all(current.repos.map(async (entry) => {
       const localPath = entry.localPath
@@ -2852,7 +2887,9 @@ export function apply(ctx, rawConfig) {
         version,
         manifest,
         registryState,
-        authed: auth.loggedIn,
+        // A credential that exists is enough to offer the push: whether it is accepted
+        // is the registry's answer to give, and the publish route names it if not.
+        authed: authState !== 'none',
         dirty,
       })
       return {
@@ -2881,13 +2918,16 @@ export function apply(ctx, rawConfig) {
       registry,
       packageManager: invocation === null ? null : { source: invocation.source, command: invocation.command },
       auth: {
-        loggedIn: auth.loggedIn,
+        /** signed-in / credential-present / none — see `npmAuthState`. */
+        state: authState,
+        loggedIn: authState === 'signed-in',
         account: auth.account,
+        /** What `whoami` said when it did not confirm. Shown verbatim. */
         message: auth.message,
         npmrcPath,
         npmrcReadable,
         /** Whether a token line exists at all, without reading the token itself. */
-        npmrcHasToken: hasNpmToken(npmrcText, registry),
+        npmrcHasToken: hasToken,
       },
       repos,
     }
@@ -2911,12 +2951,7 @@ export function apply(ctx, rawConfig) {
     const registry = normalizeRegistry(current.npmRegistry)
     const token = typeof body?.token === 'string' ? body.token.trim() : ''
     const npmrcPath = resolveNpmrcPath()
-    let existing = ''
-    try {
-      existing = readFileSync(npmrcPath, 'utf8')
-    } catch {
-      existing = ''
-    }
+    const existing = readNpmrcText()
     const merged = upsertAuthToken(existing, registry, token)
     if (merged.ok !== true) {
       writeJson(res, 400, { ok: false, code: 'bad-token', message: merged.message })
@@ -3036,12 +3071,20 @@ export function apply(ctx, rawConfig) {
       })
       return
     }
+    /*
+     * The gate is "is there anything to authenticate WITH", not "did `whoami` answer".
+     * A granular token is scoped to packages and can be refused by the user-level
+     * endpoint while publishing perfectly well, so `whoami` is asked for the account
+     * name and never used as the permission slip. A publish with a bad token fails
+     * anyway, and it fails with a classification that says which step to repeat.
+     */
+    const hasToken = hasNpmToken(readNpmrcText(), registry)
     const auth = await readNpmAuth(invocation, registry)
-    if (auth.loggedIn !== true) {
+    if (hasToken !== true && auth.loggedIn !== true) {
       writeJson(res, 401, {
         ok: false,
         code: 'not-logged-in',
-        message: `${invocation.command} is not signed in to ${registry}: ${auth.message ?? 'no account'}`,
+        message: `${invocation.command} has no credential for ${registry}: ${auth.message ?? 'no account'}`,
         value: { repo: target.entry.repo, packageName: manifest.name, registry, npmrcPath: resolveNpmrcPath() },
       })
       return

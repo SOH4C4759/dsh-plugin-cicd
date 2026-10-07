@@ -211,6 +211,9 @@ window.__ModuleLoader__.load({
       'npm.guide.step4': '④ 账号开了 2FA？',
       'npm.guide.step4Note': '推送的确认行里会出现一次性密码输入框，填 6 位数字再点一次【确认推送】即可。',
       'npm.guide.docs': 'npm 官方文档',
+      'npm.credentialPresentTitle': '这个源上已经有一行 token',
+      'npm.credentialPresent': '.npmrc 里已经有 {registry} 的凭据，但 whoami 没有确认它。granular token 是包级范围的，而 whoami 是用户级端点——它拒绝一个能正常发布的 token 是正常的。所以推送本身才是真正的验证：直接推，失败时下方会告诉你是要填一次性密码、还是重建 token。',
+      'npm.replaceToken': '换一个 token',
       'npm.rejectedTitle': '这个 token 没有被接受。按顺序排查：',
       'npm.rejectedCauses': '① 复制不全（前后带了空格或换行）；② 权限不是 Read and write；③ 已被撤销、或超过 90 天有效期；④ token 被限制到别的包或组织；⑤ 账号邮箱还没验证。',
       'npm.hint.otp-required': '这个账号要求一次性密码：在推送的确认行里填 6 位数字，再点一次【确认推送】。',
@@ -422,6 +425,9 @@ window.__ModuleLoader__.load({
       'npm.guide.step4': '(4) Is 2FA on the account?',
       'npm.guide.step4Note': 'The push confirmation grows a one-time password field: enter the 6 digits and press Push again.',
       'npm.guide.docs': 'npm documentation',
+      'npm.credentialPresentTitle': 'This registry already has a token line',
+      'npm.credentialPresent': '.npmrc carries a credential for {registry}, but whoami would not confirm it. A granular token is scoped to PACKAGES while whoami is a user-level endpoint, so refusing a token that publishes perfectly well is normal. The publish itself is the real test: just push, and if it fails the panel says whether to enter a one-time password or make a new token.',
+      'npm.replaceToken': 'Replace the token',
       'npm.rejectedTitle': 'That token was not accepted. Check, in order:',
       'npm.rejectedCauses': '(1) it was copied incompletely (leading or trailing whitespace); (2) Permissions are not Read and write; (3) it was revoked, or passed its 90-day limit; (4) it is scoped to another package or organization; (5) the account email is still unverified.',
       'npm.hint.otp-required': 'This account requires a one-time password: enter the 6 digits in the push confirmation and press Push again.',
@@ -1964,6 +1970,18 @@ window.__ModuleLoader__.load({
        */
       const npmByRepo = new Map((npm?.repos ?? []).map((entry) => [entry.repo, entry]))
       const npmAuth = npm?.auth ?? null
+      /**
+       * Three states, not a boolean — the Host's `npmAuthState`.
+       *
+       * A granular token is scoped to packages, so `whoami` (a user-level endpoint)
+       * can refuse it while `publish` accepts it. Collapsing that into "not signed in"
+       * would show the four-step guide to someone who just finished step 3.
+       */
+      const npmCredential = npmAuth === null
+        // No answer is not "no credential": rendering the four-step guide here would
+        // claim the machine has nothing to authenticate with, which nobody has said.
+        ? 'unknown'
+        : String(npmAuth.state ?? (npmAuth.loggedIn === true ? 'signed-in' : 'none'))
       const npmHintText = (() => {
         if (npmFailure === null) return null
         const text = t(`npm.hint.${npmFailure}`)
@@ -2059,13 +2077,59 @@ window.__ModuleLoader__.load({
          * whether the paste works, instead of one sentence that assumes the reader
          * already knows all of it.
          */
-        npmAuth !== null && npmAuth.loggedIn !== true
+        npmCredential === 'credential-present'
+          ? h(
+              'div',
+              { className: 'dsc-setup', role: 'status' },
+              h('span', { className: 'dsc-setup-strong' }, t('npm.credentialPresentTitle')),
+              h('span', null, t('npm.credentialPresent', { registry: String(npm?.registry ?? ''), npmrc: String(npmAuth?.npmrcPath ?? '') })),
+              /* What `whoami` actually said, because "not signed in" and "this token
+                 was revoked" look identical and need different fixes. */
+              npmAuth?.message !== null && npmAuth?.message !== undefined
+                ? h('span', { className: 'dsc-mono' }, String(npmAuth.message))
+                : null,
+              h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void loadNpm({ force: true }) } }, t('npm.recheck')),
+                h(Btn, { kind: 'quiet', onClick: () => setNpmTokenRejected(false) }, t('npm.replaceToken')),
+              ),
+              npmTokenRejected
+                ? h(
+                    React.Fragment,
+                    null,
+                    h('span', { className: 'dsc-warn' }, t('npm.rejectedTitle')),
+                    h('span', null, t('npm.rejectedCauses')),
+                  )
+                : null,
+              h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h('input', {
+                  className: 'dsc-input',
+                  type: 'password',
+                  autoComplete: 'off',
+                  spellCheck: 'false',
+                  placeholder: t('npm.tokenPlaceholder'),
+                  'aria-label': t('npm.tokenPlaceholder'),
+                  value: npmToken,
+                  onChange: (event) => setNpmToken(String(event?.target?.value ?? '')),
+                }),
+                h(Btn, {
+                  kind: 'primary',
+                  disabled: busy !== '' || npmToken.trim() === '',
+                  onClick: () => { void onNpmLogin() },
+                }, busy === 'npm-login' ? '…' : t('npm.writeToken')),
+              ),
+            )
+          : null,
+        npmCredential === 'none'
           ? h(
               'div',
               { className: 'dsc-setup', role: 'status' },
               h('span', { className: 'dsc-setup-strong' }, t('npm.notLoggedIn', {
                 command: String(npm?.packageManager?.command ?? 'pnpm'),
-                registry: String(npm.registry ?? ''),
+                registry: String(npm?.registry ?? ''),
               })),
               h('span', { className: 'dsc-setup-strong' }, t('npm.guide.step1')),
               h(

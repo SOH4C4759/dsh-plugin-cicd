@@ -728,6 +728,9 @@ async function expandFirstRow(tree) {
   const silent = await renderPanel([repoFixture()], baseStatus.value, {}, null)
   const text = textOf(silent)
   check('an unanswered npm status invents no state', text.includes('npm 待推') === false && text.includes('npm 上还没有') === false, text.replace(/\s+/g, ' ').slice(0, 180))
+  /* "No answer" is not "no credential": the four-step guide would claim this machine
+     has nothing to authenticate with, which nobody has said. */
+  check('an unanswered npm status does not claim there is no credential', text.includes('① 还没有 npm 账号？') === false)
   const { tree } = await expandFirstRow(silent)
   check('an unanswered npm status offers no push', hasButton(tree, '推送到 npm') === false)
 }
@@ -766,6 +769,25 @@ async function expandFirstRow(tree) {
   const unmappedText = textOf(await rerender())
   check('an unrecognised failure code prints no dictionary key', unmappedText.includes('npm.hint.') === false, unmappedText.replace(/\s+/g, ' ').slice(0, 220))
   check('an unrecognised failure still reports the error', unmappedText.includes('a failure from a future version'))
+}
+
+/* -- 15b. A credential whoami will not confirm is not "no credential" ------- */
+{
+  /* The real shape: a granular token is package-scoped, so the user-level `whoami`
+     endpoint refuses it while `publish` would accept it. Showing the four-step guide
+     here would tell someone who just finished step 3 that they never started. */
+  const unconfirmed = npmStatusValue({
+    auth: { state: 'credential-present', loggedIn: false, account: null, message: '[ERR_PNPM_WHOAMI_UNAUTHORIZED] You must be logged in to use whoami', npmrcPath: 'C:\\Users\\x\\.npmrc', npmrcReadable: true, npmrcHasToken: true },
+    repos: [npmFixture()],
+  })
+  const panel = await renderPanel([repoFixture()], baseStatus.value, {}, unconfirmed)
+  const text = textOf(panel)
+  check('an unconfirmed credential is not treated as no credential', text.includes('已经有一行 token'), text.replace(/\s+/g, ' ').slice(0, 240))
+  check('an unconfirmed credential does not re-teach the four steps', text.includes('① 还没有 npm 账号？') === false)
+  check('an unconfirmed credential keeps the push available', text.includes('npm 待推 v1.0.1'))
+  const { tree } = await expandFirstRow(panel)
+  check('the push is offered with an unconfirmed credential', hasButton(tree, '推送到 npm v1.0.1'))
+  check('whoami\'s own refusal is still shown, not hidden', text.includes('ERR_PNPM_WHOAMI_UNAUTHORIZED'))
 }
 
 /* -- 16. A refused token raises the checklist ------------------------------- */

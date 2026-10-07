@@ -140,6 +140,17 @@ Release 是给人下载的，npm 是给 `dsh plugin add` 装的。面板把它�
 
 token 不回显、不落插件、不进日志；页面在请求返回的那一刻就清空输入框。token 被拒时，面板直接把**排查清单**摊在同一块里（复制不全 / 权限不是 Read and write / 已撤销或超过 90 天 / 范围是别的包 / 邮箱未验证），而不是只回一句 `ERR_PNPM_WHOAMI_UNAUTHORIZED`。
 
+**凭据是三个状态，不是一个布尔值**（`npmAuthState`）。`whoami` 是用户级端点，而 granular token 是**包级范围**的——它完全可能在 `whoami` 上被拒、却发布得好好的。把这种拒绝读成"没登录"，就会正好挡住引导让用户去建的那种 token，还会对刚做完第 ③ 步的人说"你还没开始"。所以：
+
+| 状态 | 面板 |
+|---|---|
+| `signed-in`（`whoami` 答了） | 顶部显示 `npm <账号>`，不出引导 |
+| `credential-present`（`.npmrc` 里有 token，但 `whoami` 不确认） | 一句说明 + 原样显示 `whoami` 的拒绝，**照着可以推**；真伪由推送来判 |
+| `none`（两者都没有） | 四步引导 |
+| 没有答案（`/npm-status` 未响应） | **什么都不显示**——"没有答案"不等于"没有凭据" |
+
+同理，推送的闸门是"**有没有可用来认证的东西**"，不是"`whoami` 答没答"：token 不对的话推送本来就会失败，而失败已经被归类成下一步。
+
 推送失败也**归类**成下一步做什么，而不是把 npm 的原话丢给用户：`otp-required`（去填一次性密码）、`email-unverified`（去点确认链接）、`not-logged-in`（重建 token）、`already-published`（先升版本）、`payment-required`（私有包要付费）、`forbidden`（检查 token 的 Packages 范围）、`not-found`、`rate-limited`、`registry-error`、`network`、`timeout`、`unknown`。npm 的原话仍然原样显示在下面——归类是补充，不是替换。
 
 开了 2FA 的账号，推送时 npm 要一次性密码：确认行里就有那个输入框。子进程的 stdin 是关闭的（`ignore`），所以它**不会**挂着等一个没人持有的 stdin——失败会明说是要 OTP，而不是转圈到超时。
