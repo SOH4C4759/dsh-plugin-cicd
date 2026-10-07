@@ -539,7 +539,6 @@ async function expandFirstRow(tree) {
 
 /* -- 9. A missing restart plugin is named, not swallowed -------------------- */
 {
-  const refused = { error: 'host' }
   const panel = await renderPanel(
     [repoFixture({ install: installFixture({ state: 'update', latestTag: 'v1.0.1', latestVersion: '1.0.1' }) })],
     baseStatus.value,
@@ -558,7 +557,7 @@ async function expandFirstRow(tree) {
   await rerender()
   const after = await rerender()
   check('a refused restart is reported as a failure, not as success', textOf(after).includes('重启不了'), textOf(after).replace(/\s+/g, ' ').slice(0, 240))
-  check('the refusal names the plugin that is missing', textOf(after).includes('dsh-plugin-restart'), refused.error)
+  check('the refusal names the plugin that is missing', textOf(after).includes('dsh-plugin-restart'), textOf(after).replace(/\s+/g, ' ').slice(0, 200))
 }
 
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
