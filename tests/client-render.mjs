@@ -1332,8 +1332,13 @@ function previewFixture(overrides) {
     check('the code is announced as an image, for a screen reader', svg.props?.role === 'img' && svg.props?.['aria-label'] === 'B 站登录二维码', String(svg.props?.['aria-label']))
   }
 
-  /* Longer than version 10 holds. The panel shows the link and says why, never a code
-     that encodes something else. */
+  /* That URL is the H5 page for a PHONE: a desktop browser answers it with the
+     Bilibili app's APK, which is a download rather than a sign-in. The code is the way
+     through, and offering the page beside it is offering a dead end. */
+  check('nothing offers to open the sign-in page', hasButton(waiting, '打开登录页面') === false, textOf(waiting).replace(/\s+/g, ' ').slice(0, 220))
+
+  /* Longer than version 10 holds. The panel shows the fallback and says why, never a
+     code that encodes something else. */
   fixture['/bilibili-status'] = {
     ok: true,
     value: biliValue({ login: { state: 'waiting', url: `https://example.com/${'a'.repeat(260)}`, startedAt: '2026-10-08T01:00:00Z', expiresAt: '2026-10-08T01:03:00Z', scanned: false, message: '' } }),
@@ -1343,7 +1348,9 @@ function previewFixture(overrides) {
   const tooLong = await renderSettings('bilibili')
   check('a URL too long to encode draws no code', findSvg(tooLong) === null)
   check('and says so, instead of drawing something wrong', textOf(tooLong).includes('画不成二维码'), textOf(tooLong).replace(/\s+/g, ' ').slice(-200))
-  check('the link is still there, which is the other way through', hasButton(tooLong, '打开登录页面'))
+  /* The fallback is the paste field, not a browser page: that URL is the phone's H5
+     page, and a desktop browser answers it with the app's APK instead of a sign-in. */
+  check('the fallback offered is the paste field, not a browser page', hasButton(tooLong, '保存并验证') && hasButton(tooLong, '打开登录页面') === false, textOf(tooLong).replace(/\s+/g, ' ').slice(-260))
 }
 
 console.log(`\n${results.length - failed}/${results.length} checks passed`)

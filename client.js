@@ -377,11 +377,10 @@ window.__ModuleLoader__.load({
       'bili.credential.source': '凭据文件 {path}',
       'bili.credential.external': '这份凭据来自配置指定的外部文件（不是面板写入的）：{path}',
       'bili.signIn': '登录 B 站',
-      'bili.signIn.hint': '点一下会生成一个二维码：用手机 B 站 App 扫，或者在你已经登录 B 站的浏览器里打开那条链接确认。这里会自动继续，不需要终端。',
+      'bili.signIn.hint': '点一下会生成一个二维码：用手机 B 站 App 扫，然后在手机上确认。这里会自动继续，不需要终端。扫不动就用下面粘贴的方式。',
       'bili.qrLabel': 'B 站登录二维码',
       'bili.qrHint': '用手机 B 站 App 扫码。二维码约 3 分钟后过期，过期就再点一次【登录 B 站】。',
-      'bili.qrTooLong': '这条登录链接太长，画不成二维码——请用【打开登录页面】。',
-      'bili.openLogin': '打开登录页面',
+      'bili.qrTooLong': '这条登录链接太长，画不成二维码——请改用下面粘贴 SESSDATA 的方式。',
       'bili.waiting': '等待扫码…',
       'bili.waitingScanned': '已扫码，请在手机上确认…',
       'bili.signIn.done': '已登录：{uname}',
@@ -714,11 +713,10 @@ window.__ModuleLoader__.load({
       'bili.credential.source': 'Credential file {path}',
       'bili.credential.external': 'This credential comes from the external file named in the config, not from this panel: {path}',
       'bili.signIn': 'Sign in to Bilibili',
-      'bili.signIn.hint': 'One click produces a code to scan with the Bilibili app — or open the link it comes with in a browser that is already signed in and confirm. This page continues by itself, with no terminal.',
+      'bili.signIn.hint': 'One click produces a code to scan with the Bilibili app, then confirm on the phone. This page continues by itself, with no terminal. If the code will not scan, paste the cookies instead.',
       'bili.qrLabel': 'Bilibili sign-in code',
       'bili.qrHint': 'Scan this with the Bilibili app. It expires after about three minutes; press 【Sign in to Bilibili】 again if it does.',
-      'bili.qrTooLong': 'This sign-in URL is too long to draw as a code — use 【Open the sign-in page】.',
-      'bili.openLogin': 'Open the sign-in page',
+      'bili.qrTooLong': 'This sign-in URL is too long to draw as a code — paste SESSDATA below instead.',
       'bili.waiting': 'Waiting to be scanned…',
       'bili.waitingScanned': 'Scanned — confirm it on your phone…',
       'bili.signIn.done': 'Signed in: {uname}',
@@ -3245,9 +3243,12 @@ window.__ModuleLoader__.load({
                   'div',
                   { className: 'dsc-setup-line' },
                   h('span', { className: 'dsc-grow' }, login.state === 'scanned' ? t('bili.waitingScanned') : t('bili.waiting')),
-                  login.url
-                    ? h(Btn, { disabled: busy !== '', onClick: () => globalThis.open(String(login.url), '_blank', 'noopener,noreferrer') }, t('bili.openLogin'))
-                    : null,
+                  /*
+                   * No "open the sign-in page" button. That URL is the H5 page for a
+                   * PHONE, and opening it in a desktop browser offers the Bilibili app's
+                   * APK instead of a sign-in — a download, not a login. The code above is
+                   * the way through; the paste route below it is the fallback.
+                   */
                   h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void cancel() } }, t('bili.cancelSignIn')),
                 ),
               )
