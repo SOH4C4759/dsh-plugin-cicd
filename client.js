@@ -865,7 +865,11 @@ window.__ModuleLoader__.load({
    a QR is read by a camera, so it cannot follow a dark theme's colours the way the
    rest of this panel does. */
 .dsc-scan { display: flex; flex-direction: column; gap: 6px; padding: var(--dsc-gap) 0; align-items: flex-start; }
-.dsc-qr { width: 176px; height: 176px; background: #fff; padding: 8px; border-radius: 4px; box-sizing: content-box; }
+/* Sized for the WORST case the encoder can produce: version 10 is 57 modules across, so
+   220px leaves about 3.8px per module — and the common login URL is version 8 (49
+   modules, about 4.5px). A camera needs the modules to be separable, and the only person
+   who can check that is holding the phone. */
+.dsc-qr { width: 220px; height: 220px; background: #fff; padding: 8px; border-radius: 4px; box-sizing: content-box; }
 .dsc-qr rect { fill: #000; }
 /* The console's own segment strip, inside its one Plugins tab. Left-aligned and with a
    rule under it, so it reads as "which part of this page" rather than as a second set
