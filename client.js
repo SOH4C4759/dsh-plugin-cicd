@@ -403,6 +403,7 @@ window.__ModuleLoader__.load({
       'bili.bind.placeholder': 'BV 号，如 BV1RopP6FEJp',
       'bili.bind.save': '绑定',
       'bili.bind.unbind': '解绑',
+      'bili.bind.locked': '已绑定：要换视频先【解绑】。',
       'bili.bind.done': '已绑定 {bvid}{baseline}',
       'bili.bind.baseline': '（基线 {tag}：只有之后发布的新版本会自动播报）',
       'bili.bind.baselineUnknown': '（读不到 Release 列表，绑定时刻之前的版本都按已公开处理）',
@@ -739,6 +740,7 @@ window.__ModuleLoader__.load({
       'bili.bind.placeholder': 'BV id, e.g. BV1RopP6FEJp',
       'bili.bind.save': 'Bind',
       'bili.bind.unbind': 'Unbind',
+      'bili.bind.locked': 'Bound: press 【Unbind】 first to change the video.',
       'bili.bind.done': 'Bound {bvid}{baseline}',
       'bili.bind.baseline': ' (baseline {tag}: only releases published after this are announced automatically)',
       'bili.bind.baselineUnknown': ' (the release list could not be read, so everything published before now counts as already public)',
@@ -3390,23 +3392,33 @@ window.__ModuleLoader__.load({
         h(
           'div',
           { className: 'dsc-line' },
-          h('input', {
-            className: 'dsc-input',
-            type: 'text',
-            spellCheck: 'false',
-            placeholder: t('bili.bind.placeholder'),
-            'aria-label': t('bili.bind.placeholder'),
-            value: draft,
-            onChange: (event) => setDraft(String(event?.target?.value ?? '').trim()),
-          }),
-          h(Btn, {
-            kind: binding === null ? 'primary' : undefined,
-            disabled: busy !== '' || draft.trim() === '',
-            onClick: () => { void onBind(data, draft.trim(), binding === null ? true : binding.auto !== false) },
-          }, busy === `bili-bind:${data.repo}` ? '…' : t('bili.bind.save')),
+          /*
+           * Bound is a state, not a draft. Editing a live binding in place would change
+           * which video a repository announces under, with the announcement history
+           * still pointing at the old one — so the field is only editable while there is
+           * nothing bound, and once there is, the single action left is 解绑. A wrong BV
+           * is therefore fixed by untying it first, which is also the only way the ledger
+           * and the binding stay consistent with each other.
+           */
           binding === null
-            ? null
+            ? h('input', {
+                className: 'dsc-input',
+                type: 'text',
+                spellCheck: 'false',
+                placeholder: t('bili.bind.placeholder'),
+                'aria-label': t('bili.bind.placeholder'),
+                value: draft,
+                onChange: (event) => setDraft(String(event?.target?.value ?? '').trim()),
+              })
+            : h('span', { className: 'dsc-mono dsc-bound' }, String(binding.bvid)),
+          binding === null
+            ? h(Btn, {
+                kind: 'primary',
+                disabled: busy !== '' || draft.trim() === '',
+                onClick: () => { void onBind(data, draft.trim(), true) },
+              }, busy === `bili-bind:${data.repo}` ? '…' : t('bili.bind.save'))
             : h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void onBind(data, '', true) } }, t('bili.bind.unbind')),
+          binding === null ? null : h('span', { className: 'dsc-quiet' }, t('bili.bind.locked')),
           h('span', { className: 'dsc-grow' }, binding === null
             ? t('bili.repo.none')
             : bili?.video?.ok === true

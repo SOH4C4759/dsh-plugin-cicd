@@ -40,6 +40,8 @@ import {
   parseLedger,
   recordLedgerEntry,
   replyFailure,
+  MAINTENANCE_NOTE,
+  summarizeCommits,
   summarizeRelease,
   withDeviceIds,
 } from '../lib/bilibili.mjs'
@@ -107,6 +109,46 @@ const autoNotes = summarizeRelease({
 check('GitHub\'s own boilerplate is not the summary', autoNotes === 'Fix the thing', autoNotes)
 check('an empty release still says something', summarizeRelease({ tag: 'v3' }, { fallback: '本次更新已发布。' }) === '本次更新已发布。')
 check('a long summary is cut, not dumped', summarizeRelease({ tag: 'v1', name: 'x'.repeat(300) }).length <= 90)
+
+/* What changed, out of the commits between two releases.
+   This is the ONLY source for these repositories: their release bodies are exactly
+   `**Full Changelog**: <url>`, because the release workflow creates them with no notes.
+   So "介绍这次更新" has to come from the history, and the filtering is what decides
+   whether a viewer reads news or bookkeeping. */
+const commit = (message) => ({ commit: { message } })
+check('commit subjects become the summary', summarizeCommits([commit('feat: 新增语音'), commit('fix: 音量')]) === '新功能：新增语音；修复：音量')
+check('the type becomes a word a viewer reads', summarizeCommits([commit('fix: 音量')]) === '修复：音量' && summarizeCommits([commit('perf: 启动更快')]) === '性能：启动更快')
+check('merge commits are bookkeeping, not news', summarizeCommits([commit('Merge pull request #7 from o/r'), commit('feat: a')]) === '新功能：a')
+check('a release chore is not news either', summarizeCommits([commit('chore(release): v1.0.1'), commit('feat: a')]) === '新功能：a')
+check('a build tweak is not news, which is most of these histories', summarizeCommits([commit('ci: also publish the installable tarball'), commit('feat: a')]) === '新功能：a')
+/* It put "文档：document the release procedure" FIRST in a comment under a demo video
+   before this rule: the reader came for the feature list. */
+check('release documentation is not news either', summarizeCommits([commit('docs: document the release procedure'), commit('fix: a')]) === '修复：a')
+check('a skip-ci marker is not news', summarizeCommits([commit('test: x [skip ci]'), commit('feat: a')]) === '新功能：a')
+check('only the first line of a message is used', summarizeCommits([commit('feat: a\n\nlong body nobody reads')]) === '新功能：a')
+check('the same subject is said once', summarizeCommits([commit('feat: a'), commit('feat: a'), commit('fix: b')]) === '新功能：a；修复：b')
+check('a pull-request number tail is stripped', summarizeCommits([commit('fix: a (#12)')]) === '修复：a')
+check('three at most, because this is a comment box', summarizeCommits([commit('feat: 1'), commit('fix: 2'), commit('perf: 3'), commit('refactor: 4')]) === '新功能：1；修复：2；性能：3')
+check('a subject in another language is passed through untouched', summarizeCommits([commit('fix: 音量包了一层')]) === '修复：音量包了一层')
+check('no history at all is an empty string, so the caller can fall back', summarizeCommits([]) === '' && summarizeCommits(null) === '')
+check('a range that is all bookkeeping says so instead of nothing', summarizeCommits([commit('ci: a'), commit('chore(release): v1')]) === MAINTENANCE_NOTE)
+check('plain strings work too, which is what the ledger already holds', summarizeCommits(['feat: a']) === '新功能：a')
+
+const silentRelease = { tag: 'v1.0.1', name: 'v1.0.1', body: '**Full Changelog**: https://github.com/o/r/compare/v1.0.0...v1.0.1' }
+const withCommits = summarizeRelease(silentRelease, { commits: [commit('feat: 这次真的改了东西')] })
+check('a release that says nothing falls back to the commits', withCommits === '新功能：这次真的改了东西', withCommits)
+check('a release that says something still wins over the commits', summarizeRelease({ tag: 'v1', name: 'v1', body: '手写的更新说明' }, { commits: [commit('feat: x')] }) === '手写的更新说明')
+/* The release workflow names every release `<repo> <tag>`, so that name is the tag
+   repeated — treating it as a description is what made every comment read
+   "【更新 v1.0.1】dsh-plugin-restart v1.0.1" and hid the changes behind it. */
+const namedLikeTheWorkflow = summarizeRelease({ tag: 'v1.0.1', name: 'dsh-plugin-restart v1.0.1', body: '' }, { names: ['dsh-plugin-restart'], commits: [commit('fix: 真的修了东西')] })
+check('a release named after its own repo and tag is not a description', namedLikeTheWorkflow === '修复：真的修了东西', namedLikeTheWorkflow)
+check('nor is the same name with a colon', summarizeRelease({ tag: 'v0.1.1', name: 'dsh-ui-sound: v0.1.1', body: '' }, { names: ['dsh-ui-sound'], commits: [commit('fix: x')] }) === '修复：x')
+check('but a real title still wins', summarizeRelease({ tag: 'v1', name: '发布台：B 站更新播报', body: '' }, { names: ['dsh-plugin-cicd'], commits: [commit('feat: x')] }) === '发布台：B 站更新播报')
+
+const changesOnly = composeComment({ tag: 'v2', release: silentRelease, template: '【{tag}】本版更新：{changes}', commits: [commit('feat: a'), commit('fix: b')] })
+check('{changes} is available to a template on its own', changesOnly.text === '【v2】本版更新：新功能：a；修复：b', changesOnly.text)
+check('and an unknown placeholder is still reported, not invented', changesOnly.unknown.length === 0)
 
 const composed = composeComment({
   label: '发布台',

@@ -3921,14 +3921,49 @@ export function apply(ctx, rawConfig) {
   }
 
   /** The comment one release would produce, in the configured template. */
-  const composeForEntry = (current, entry, release) => composeComment({
+  const composeForEntry = (current, entry, release, commits = null) => composeComment({
     label: entry.label !== '' ? entry.label : entry.repo,
     repo: entry.repo,
     tag: typeof release?.tag === 'string' ? release.tag : '',
     release,
+    commits,
     template: current.bilibiliTemplate,
     date: new Date().toISOString().slice(0, 10),
   })
+
+  /**
+   * What changed between the previous release and this one.
+   *
+   * The release itself cannot answer this for these repositories: their bodies are
+   * exactly `**Full Changelog**: <url>`, because the release workflow creates them with
+   * no notes. So the changes are read from the history GitHub already has — one compare
+   * call between the two tags — which is also the only source that is true rather than
+   * retyped.
+   *
+   * Best effort by design: an unreadable range is not a reason to hold back a comment
+   * that the release itself can still describe, so every failure answers with no commits
+   * and the composition falls back the way it always did.
+   *
+   * @returns {Promise<object[]>} compare entries, or an empty array.
+   */
+  const readReleaseChanges = async (current, entry, release) => {
+    const slug = resolveSlug(current.owner, entry.repo)
+    const tag = typeof release?.tag === 'string' ? release.tag : ''
+    if (slug === null || tag === '') return []
+    const list = await ghJson(ghPath, ['api', `repos/${slug}/releases?per_page=30`], current.requestTimeoutMs)
+    if (list.ok !== true || !Array.isArray(list.value)) return []
+    const published = list.value
+      .filter((item) => item !== null && typeof item === 'object' && item.draft !== true && typeof item.tag_name === 'string')
+      /* Newest first, sorted here rather than trusted: the API happens to return that
+         order, and the "previous release" this picks must not depend on a habit. */
+      .sort((left, right) => String(right.created_at ?? '').localeCompare(String(left.created_at ?? '')))
+    const at = published.findIndex((item) => item.tag_name === tag)
+    const previous = at >= 0 ? published[at + 1] : undefined
+    if (previous === undefined) return []
+    const compare = await ghJson(ghPath, ['api', `repos/${slug}/compare/${previous.tag_name}...${tag}`], current.requestTimeoutMs)
+    if (compare.ok !== true) return []
+    return Array.isArray(compare.value?.commits) ? compare.value.commits : []
+  }
 
   /**
    * Post one release's update note, and record what happened either way.
@@ -3966,7 +4001,7 @@ export function apply(ctx, rawConfig) {
         value: { repo: entry.repo, bvid: binding.bvid },
       }
     }
-    const composed = composeForEntry(current, entry, release)
+    const composed = composeForEntry(current, entry, release, await readReleaseChanges(current, entry, release))
     const message = (text !== '' ? text : composed.text).trim()
     if (message === '') {
       return { ok: false, code: 'empty-comment', message: '评论内容是空的，没有发送。', value: { repo: entry.repo, tag: release.tag } }
@@ -4525,7 +4560,11 @@ export function apply(ctx, rawConfig) {
       ledger: read.ledger,
       force,
     })
-    const composed = release === null ? null : composeForEntry(current, target.entry, release)
+    /* The preview and the post read the same changes, so the sentence the panel shows is
+       the sentence that goes out — including the commit list. */
+    const composed = release === null
+      ? null
+      : composeForEntry(current, target.entry, release, await readReleaseChanges(current, target.entry, release))
 
     if (body?.dryRun === true) {
       writeJson(res, 200, {

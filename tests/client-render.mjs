@@ -1106,7 +1106,13 @@ function inputValue(node, placeholderPart) {
   const { tree } = await expandFirstRow(panel)
   const rowText = textOf(tree)
   check('the row names the video it is bound to', rowText.includes('绑定的视频') && rowText.includes('一支视频'), rowText.replace(/\s+/g, ' ').slice(-320))
-  check('the binding is prefilled, so editing it does not start from nothing', inputValue(tree, 'BV') === 'BV1RopP6FEJp', inputValue(tree, 'BV'))
+  /* A bound video is a STATE, not a draft. Editing it in place would change which video
+     a repository announces under while the announcement history still points at the old
+     one, so the field is gone once something is bound and the only action left is 解绑. */
+  check('a bound video is shown, not offered for editing', textOf(tree).includes('BV1RopP6FEJp') && inputValue(tree, 'BV') === null, String(inputValue(tree, 'BV')))
+  check('and the way to change it is spelled out', textOf(tree).includes('要换视频先【解绑】'))
+  check('binding again is not on offer', hasButton(tree, '绑定') === false, textOf(tree).replace(/\s+/g, ' ').slice(-200))
+  check('unbinding is', hasButton(tree, '解绑'))
   check('the row offers the manual announcement', hasButton(tree, '发更新评论'))
 
   /* The preview is the Host's own composition — the sentence shown is the sentence
