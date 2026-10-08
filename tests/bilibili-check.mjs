@@ -128,7 +128,17 @@ check('a skip-ci marker is not news', summarizeCommits([commit('test: x [skip ci
 check('only the first line of a message is used', summarizeCommits([commit('feat: a\n\nlong body nobody reads')]) === '新功能：a')
 check('the same subject is said once', summarizeCommits([commit('feat: a'), commit('feat: a'), commit('fix: b')]) === '新功能：a；修复：b')
 check('a pull-request number tail is stripped', summarizeCommits([commit('fix: a (#12)')]) === '修复：a')
-check('three at most, because this is a comment box', summarizeCommits([commit('feat: 1'), commit('fix: 2'), commit('perf: 3'), commit('refactor: 4')]) === '新功能：1；修复：2；性能：3')
+/* Order is a decision, and this one was made from a real comment: the compare API hands
+   commits oldest first, and taking the first three put a release's EARLIEST work in the
+   note — for v0.5.0, three npm details, while 提交, the Bilibili note and the one-page
+   settings were cut off the end. A version culminates in what it is for. */
+check('a feature outranks a fix, even when the fix is newer', summarizeCommits([commit('feat: a'), commit('fix: b')]) === '新功能：a；修复：b')
+check('within a kind, the newest comes first', summarizeCommits([commit('feat: older'), commit('feat: newer')]) === '新功能：newer；新功能：older')
+check('three at most, because this is a comment box', summarizeCommits([commit('feat: 1'), commit('fix: 2'), commit('perf: 3'), commit('refactor: 4')]) === '性能：3；新功能：1；重构：4')
+/* A type the repository invented is still a type: the scope belongs to its conventions,
+   not to the viewer reading a comment. */
+check('an unknown type loses its prefix rather than showing it', summarizeCommits([commit('polish(bilibili): size the code')]) === 'size the code')
+check('and is not mistaken for bookkeeping', summarizeCommits([commit('polish: tidy the row')]) === 'tidy the row')
 check('a subject in another language is passed through untouched', summarizeCommits([commit('fix: 音量包了一层')]) === '修复：音量包了一层')
 check('no history at all is an empty string, so the caller can fall back', summarizeCommits([]) === '' && summarizeCommits(null) === '')
 check('a range that is all bookkeeping says so instead of nothing', summarizeCommits([commit('ci: a'), commit('chore(release): v1')]) === MAINTENANCE_NOTE)
