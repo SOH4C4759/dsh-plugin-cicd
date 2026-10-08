@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, defaultCloneUrl, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, packumentUrl, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, statusPath, updateState, upsertAuthToken, versionFromTag } from '../index.js'
+import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, confirmVisible, defaultCloneUrl, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, packumentUrl, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, statusPath, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -471,6 +471,52 @@ check('a bare name uses the configured owner', defaultCloneUrl('octocat', 'Hello
 check('a bare name with no owner has no address to guess at', defaultCloneUrl('', 'Hello-World') === '')
 check('no repository, no address', defaultCloneUrl('octocat', '') === '' && defaultCloneUrl(undefined, undefined) === '')
 check('a stray slash is tidied rather than doubled', defaultCloneUrl('', '/octocat/Hello-World/') === 'https://github.com/octocat/Hello-World.git')
+
+/* Accepted is not the same as readable. Bilibili answers `code: 0` with an rpid for a
+   comment the public listing may never serve, and two of these were filed as announced
+   and then answered `12006 没有该评论` when looked up.
+   The waiting is measured, not superstition: a fresh comment answers 12006 immediately
+   and reads back from about four seconds, so a single check would libel a good comment. */
+{
+  const scripted = (answers) => {
+    let calls = 0
+    return {
+      read: async () => {
+        const answer = answers[Math.min(calls, answers.length - 1)]
+        calls += 1
+        return answer
+      },
+      calls: () => calls,
+    }
+  }
+  const waits = []
+  const wait = async (ms) => { waits.push(ms) }
+
+  const delayed = scripted([
+    { ok: true, visible: false, code: 12006, message: '没有该评论' },
+    { ok: true, visible: false, code: 12006, message: '没有该评论' },
+    { ok: true, visible: true, code: 0, message: '' },
+  ])
+  const late = await confirmVisible({ read: delayed.read, aid: 1, rpid: '2', attempts: 3, delayMs: 3000, wait })
+  check('a comment that appears late is still confirmed', late.visible === true && late.attempts === 3, JSON.stringify(late))
+  check('and it waited between the asks rather than hammering', waits.length === 2 && waits[0] === 3000, JSON.stringify(waits))
+
+  const never = scripted([{ ok: true, visible: false, code: 12006, message: '没有该评论' }])
+  const missing = await confirmVisible({ read: never.read, aid: 1, rpid: '2', attempts: 3, delayMs: 0, wait })
+  check('a comment that never appears is reported as not visible', missing.visible === false && missing.attempts === 3, JSON.stringify(missing))
+  check('and Bilibili\'s own reason comes with it', missing.code === 12006 && missing.message === '没有该评论', JSON.stringify(missing))
+
+  const first = scripted([{ ok: true, visible: true, code: 0, message: '' }])
+  const immediate = await confirmVisible({ read: first.read, aid: 1, rpid: '2', attempts: 3, delayMs: 3000, wait })
+  check('a comment that is already readable costs one call', immediate.visible === true && first.calls() === 1, String(first.calls()))
+
+  /* A transport failure is not a verdict: it is asked again like any other miss. */
+  const broken = scripted([{ ok: false, visible: false, code: null, message: 'HTTP 500' }])
+  const failed = await confirmVisible({ read: broken.read, aid: 1, rpid: '2', attempts: 2, delayMs: 0, wait })
+  check('a transport failure is retried and then reported honestly', failed.visible === false && broken.calls() === 2, JSON.stringify(failed))
+  const tolerated = await confirmVisible({ read: async () => undefined, aid: 1, rpid: '2', attempts: 2, delayMs: 0, wait })
+  check('a reader that answers nothing at all does not crash the check', tolerated.visible === false, JSON.stringify(tolerated))
+}
 
 /* The line the panel shows. Captured from a real `pnpm publish` of an
    already-published version: every byte goes to STDOUT (measured: stderr = 0), the

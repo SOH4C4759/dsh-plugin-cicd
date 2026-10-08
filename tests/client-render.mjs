@@ -1428,5 +1428,56 @@ function previewFixture(overrides) {
   check('and the key that fixes it is named', textOf(noRootTree).includes('projectsRoot'))
 }
 
+/* -- 21. "已发送" and "读得到" are two different facts ------------------------
+   Bilibili answers `code: 0` with an rpid for a comment the public listing may never
+   serve. Two of these were filed as announced and then answered `12006 没有该评论` when
+   looked up, and the panel showed "已播报" the whole time. The Host now reads the comment
+   back before answering, records what it found, and the panel says which of the two
+   happened. */
+{
+  const announcedEntry = (overrides) => ({
+    repo: 'dsh-plugin-restart',
+    tag: 'v1.0.1',
+    bvid: 'BV1RopP6FEJp',
+    at: '2026-10-08T02:00:00Z',
+    state: 'announced',
+    attempts: 0,
+    text: '【更新 v1.0.1】修复：x',
+    rpid: '316418818849',
+    code: 0,
+    message: '',
+    failure: null,
+    url: 'https://www.bilibili.com/video/BV1RopP6FEJp/#reply316418818849',
+    ...overrides,
+  })
+
+  const invisible = await renderPanel([repoFixture({ publishedTag: 'v1.0.1' })], baseStatus.value, {
+    '/bilibili-status': { ok: true, value: biliValue({ repos: [biliFixture({ announced: [announcedEntry({ visible: false, visibleCode: 12006 })] })] }) },
+  })
+  const { tree } = await expandFirstRow(invisible)
+  check('an announcement nobody can read is not shown as a success', textOf(tree).includes('已发送但读不到'), textOf(tree).replace(/\s+/g, ' ').slice(-260))
+
+  const visible = await renderPanel([repoFixture({ publishedTag: 'v1.0.1' })], baseStatus.value, {
+    '/bilibili-status': { ok: true, value: biliValue({ repos: [biliFixture({ announced: [announcedEntry({ visible: true, visibleCode: 0 })] })] }) },
+  })
+  const { tree: visibleTree } = await expandFirstRow(visible)
+  check('and one that reads back is not flagged', textOf(visibleTree).includes('已发送但读不到') === false)
+
+  /* The manual post reports what the Host found, rather than assuming the cheerful one. */
+  const posting = await renderPanel([repoFixture({ publishedTag: 'v1.0.1' })], baseStatus.value, {
+    '/bilibili-status': { ok: true, value: biliValue() },
+    '/bilibili-announce': { ok: true, value: { repo: 'dsh-plugin-restart', tag: 'v1.0.1', bvid: 'BV1RopP6FEJp', rpid: '1', url: 'u', text: 't', visible: false, note: '读不到' } },
+  })
+  const { tree: postingTree } = await expandFirstRow(posting)
+  clickButton(postingTree, '发更新评论')
+  const previewed = await rerender()
+  /* The fixture's binding wrote a baseline, so the Host's verdict is "already known" and
+     the panel offers the override: 【仍然发送】, which is also the path a person uses to
+     repost something that vanished. */
+  clickButton(previewed, '仍然发送')
+  const afterPost = await rerender()
+  check('a post that does not read back says so', textOf(afterPost).includes('但公开列表里读不到'), textOf(afterPost).replace(/\s+/g, ' ').slice(-260))
+}
+
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
 if (failed > 0) process.exit(1)

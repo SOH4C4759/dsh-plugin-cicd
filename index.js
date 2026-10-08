@@ -667,6 +667,36 @@ function firstLine(value) {
 /** How many changed file names the overview carries; the count is carried in full. */
 const LOCAL_FILE_LIMIT = 20
 
+/**
+ * Ask repeatedly whether a comment can be read back, and answer honestly either way.
+ *
+ * The reader is injected because the interesting part is the RETRY, and the route that
+ * uses it cannot be driven in a test — reaching a real post needs a readable release
+ * list, and the suite deliberately hands the Host a `gh` that cannot exist.
+ *
+ * @param {object} params - `{read, aid, rpid, attempts, delayMs, wait}`.
+ * @returns {Promise<{visible: boolean, attempts: number, code: number|null, message: string}>}
+ */
+export async function confirmVisible({
+  read,
+  aid,
+  rpid,
+  attempts = 3,
+  delayMs = 3000,
+  wait = (ms) => new Promise((settle) => setTimeout(settle, ms)),
+}) {
+  let last = { code: null, message: '' }
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const found = await read(aid, rpid)
+    if (found !== null && found !== undefined && found.ok === true && found.visible === true) {
+      return { visible: true, attempts: attempt, code: 0, message: '' }
+    }
+    last = { code: found?.code ?? null, message: String(found?.message ?? '') }
+    if (attempt < attempts) await wait(delayMs)
+  }
+  return { visible: false, attempts, code: last.code, message: last.message }
+}
+
 /** A clone moves a repository, not a request: give it minutes, not seconds. */
 const CLONE_TIMEOUT_MS = 180_000
 
@@ -4082,6 +4112,30 @@ export function apply(ctx, rawConfig) {
     }
   }
 
+  /**
+   * Whether a comment Bilibili ACCEPTED can actually be read back.
+   *
+   * `code: 0` and an rpid mean the comment was taken, not that a reader can see it. Two
+   * of these comments were recorded as announced and then answered `12006 没有该评论`
+   * when looked up — a post that no one can find, filed as a success.
+   *
+   * Measured, so the waiting is not superstition: a freshly posted comment answers
+   * `12006` immediately and reads back from about four seconds. A single immediate check
+   * would therefore report a perfectly good comment as invisible, which is worse than not
+   * checking at all — so it asks, waits, and asks again.
+   *
+   * @returns {Promise<{visible: boolean, attempts: number, code: number|null, message: string}>}
+   */
+  const verifyVisible = async (cookie, aid, rpid, options = {}) => {
+    const client = bilibiliClient()
+    return await confirmVisible({
+      read: (video, comment) => client.readComment(cookie, video, comment),
+      aid,
+      rpid,
+      ...options,
+    })
+  }
+
   /** The comment one release would produce, in the configured template. */
   const composeForEntry = (current, entry, release, commits = null) => composeComment({
     label: entry.label !== '' ? entry.label : entry.repo,
@@ -4186,6 +4240,10 @@ export function apply(ctx, rawConfig) {
       bvid: binding.bvid,
       message,
     })
+    /* Accepted is not the same as readable. Ask, wait, ask again — see `verifyVisible`. */
+    const verified = posted.ok === true && posted.rpid !== null
+      ? await verifyVisible(cookieHeader(cookies), video.aid, posted.rpid)
+      : null
     const previous = findLedgerEntry(read.ledger, entry.repo, release.tag)
     const attempts = (Number.isFinite(previous?.attempts) ? Number(previous.attempts) : 0) + (posted.ok === true ? 0 : 1)
     const record = {
@@ -4202,6 +4260,13 @@ export function apply(ctx, rawConfig) {
       message: posted.message,
       failure: posted.ok === true ? null : posted.failure.kind,
       url: posted.ok === true && posted.rpid !== null ? `https://www.bilibili.com/video/${binding.bvid}/#reply${posted.rpid}` : null,
+      /*
+       * Whether a reader can find it, which is the fact the panel has been asserting
+       * without knowing. `null` means the question was never asked (the post failed), and
+       * an absent field means the same for entries written before this existed.
+       */
+      visible: verified === null ? null : verified.visible === true,
+      visibleCode: verified === null ? null : verified.code,
     }
     const stored = appendLedger(record)
     if (posted.ok !== true) {
@@ -4224,6 +4289,12 @@ export function apply(ctx, rawConfig) {
         account: account?.uname ?? '',
         video: video.title,
         trigger,
+        visible: record.visible,
+        /* Said in the answer rather than buried in the ledger: the panel has to be able
+           to tell "posted" from "posted and findable". */
+        note: record.visible === true
+          ? ''
+          : `已发送，但公开列表里读不到（B 站说：${String(verified?.message ?? '') === '' ? String(verified?.code ?? '') : String(verified?.message ?? '')}）——可能还在审核，也可能已被移除。可以稍后用【仍然发送】重发。`,
       },
     }
   }

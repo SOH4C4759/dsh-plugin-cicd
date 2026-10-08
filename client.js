@@ -425,7 +425,10 @@ window.__ModuleLoader__.load({
       'bili.announce.confirm': '确认发送',
       'bili.announce.force': '仍然发送',
       'bili.announce.cancel': '取消',
-      'bili.announce.sent': '已发送到 {bvid} 的评论区（{tag}）。',
+      'bili.announce.sent': '已发送到 {bvid} 的评论区（{tag}），并且已经能公开读到。',
+      'bili.announce.unverified': 'B 站收下了这条评论（{bvid} · {tag}），但公开列表里读不到——可能还在审核，也可能已被移除。要重发就用【仍然发送】。',
+      'bili.visible.false': '已发送但读不到',
+      'bili.visible.hint': 'B 站接受了这条评论，但公开列表里读不到它（B 站原话：{code}）。审核中的和被移除的，从接口上看一模一样。可以用【仍然发送】重发。',
       'bili.announce.previewFailed': '预览失败：{reason}',
       'bili.repo.none': '这个仓库还没有绑定 B 站视频。',
       'bili.state.already': '{tag} 已经播报过了。',
@@ -770,7 +773,10 @@ window.__ModuleLoader__.load({
       'bili.announce.confirm': 'Post it',
       'bili.announce.force': 'Post anyway',
       'bili.announce.cancel': 'Cancel',
-      'bili.announce.sent': 'Posted to the comments under {bvid} ({tag}).',
+      'bili.announce.sent': 'Posted to the comments under {bvid} ({tag}), and it reads back publicly.',
+      'bili.announce.unverified': 'Bilibili accepted this comment ({bvid} · {tag}) but the public listing does not serve it — it may still be in review, or it may have been removed. Use 【Send anyway】 to post it again.',
+      'bili.visible.false': 'posted, not readable',
+      'bili.visible.hint': 'Bilibili accepted this comment, but the public listing does not serve it (Bilibili said: {code}). A comment in review and a removed one are indistinguishable through the API. Use 【Send anyway】 to post it again.',
       'bili.announce.previewFailed': 'Preview failed: {reason}',
       'bili.repo.none': 'This repository has no video bound.',
       'bili.state.already': '{tag} has already been announced.',
@@ -2560,7 +2566,14 @@ window.__ModuleLoader__.load({
             return null
           }
           const value = result.payload.value ?? {}
-          setNotice(t('bili.announce.sent', { bvid: String(value.bvid ?? ''), tag: String(value.tag ?? '') }))
+          /*
+           * Bilibili accepted it; that is not the same as a reader finding it. The Host
+           * now looks the comment back up before answering, so the panel can say which of
+           * the two happened instead of asserting the cheerful one.
+           */
+          setNotice(value.visible === false
+            ? t('bili.announce.unverified', { bvid: String(value.bvid ?? ''), tag: String(value.tag ?? '') })
+            : t('bili.announce.sent', { bvid: String(value.bvid ?? ''), tag: String(value.tag ?? '') }))
           await loadBili({ force: true })
           return value
         },
@@ -3553,6 +3566,12 @@ window.__ModuleLoader__.load({
                 ? t('bili.announced.none')
                 : `${t('bili.chip.announced', { tag: String(last.tag) })}${last.url ? '' : ''}`),
               pendingTag !== null ? h(Chip, { state: 'warn' }, t('bili.chip.pending', { tag: pendingTag })) : null,
+              /* The comment exists as far as Bilibili is concerned, and not as far as a
+                 reader is — a distinction the ledger now records and the panel used to
+                 hide behind "已播报". */
+              last !== null && last.visible === false
+                ? h(Chip, { state: 'warn', title: t('bili.visible.hint', { code: String(last.visibleCode ?? '?') }) }, t('bili.visible.false'))
+                : null,
               last !== null && typeof last.url === 'string' && last.url !== ''
                 ? h(Btn, { kind: 'quiet', onClick: () => globalThis.open(String(last.url), '_blank', 'noopener,noreferrer') }, t('action.open'))
                 : null,
