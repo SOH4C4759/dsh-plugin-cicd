@@ -282,6 +282,8 @@ check('the client declares the services it needs', Array.isArray(sandbox.__load?
 
 /* Mount it the way the Host does, and capture what it registers. */
 const registered = new Map()
+/** What each registration asked for, so a test can tell WHICH slot it went into. */
+const registrationMeta = new Map()
 let dictionary = null
 sandbox.__load.apply({
   effect: (fn) => fn(),
@@ -291,13 +293,17 @@ sandbox.__load.apply({
   },
   slots: {
     inject: (name, fn) => fn(),
-    /* Key by `id` where there is one: several settings sections share the slot name
-       `settings.section`, and keying by name made the second silently replace the
-       first — which is exactly how a missing settings page passes a whole suite. */
+    /* Key by `id` where there is one: one plugin may contribute several entries to one
+       slot, and keying by name made the second silently replace the first — which is
+       exactly how a missing settings page passes a whole suite. */
     register: (meta, component) => {
       const key = typeof meta.id === 'string' && meta.id !== '' ? meta.id : meta.name
       registered.set(key, component)
-      return () => registered.delete(key)
+      registrationMeta.set(key, meta)
+      return () => {
+        registered.delete(key)
+        registrationMeta.delete(key)
+      }
     },
   },
 })
@@ -310,10 +316,23 @@ function translate(key, params) {
 
 check('the main view is registered', typeof registered.get('main') === 'function')
 check('the theme is injected once', styleElements.length === 1)
-check('the GitHub settings section is registered', typeof registered.get('github-account') === 'function')
+check('the GitHub page is registered', typeof registered.get('github-account') === 'function')
 /* The npm guide is a configuration page, not a paragraph in the panel — so it has to
    be a registration of its own, beside the GitHub one rather than replacing it. */
-check('npm credentials get a settings section of their own', typeof registered.get('npm-credentials') === 'function')
+check('npm credentials get a page of their own', typeof registered.get('npm-credentials') === 'function')
+/*
+ * The three pages are tabs inside the Plugins section, not sections of their own.
+ * `settings.section` is a flat list shared with every other plugin: three rows from
+ * one plugin took 3 of 13 and took them above 通用 / 模型 / 插件, while every other
+ * third-party plugin here takes exactly one. Nothing else in the suite can tell the
+ * two homes apart, so this is the check that pins the move.
+ */
+check('the GitHub page is a tab inside the Plugins section', registrationMeta.get('github-account')?.name === 'settings.plugins.tab', String(registrationMeta.get('github-account')?.name))
+check('the npm page is a tab inside the Plugins section', registrationMeta.get('npm-credentials')?.name === 'settings.plugins.tab', String(registrationMeta.get('npm-credentials')?.name))
+check('the Bilibili page is a tab inside the Plugins section', registrationMeta.get('bilibili-announce')?.name === 'settings.plugins.tab', String(registrationMeta.get('bilibili-announce')?.name))
+check('the console takes no top-level settings section at all', [...registrationMeta.values()].every((meta) => meta.name !== 'settings.section'), [...registrationMeta.values()].map((meta) => meta.name).join(','))
+check('the tabs keep the order the job is done in', Number(registrationMeta.get('github-account')?.order) < Number(registrationMeta.get('npm-credentials')?.order) && Number(registrationMeta.get('npm-credentials')?.order) < Number(registrationMeta.get('bilibili-announce')?.order), [registrationMeta.get('github-account')?.order, registrationMeta.get('npm-credentials')?.order, registrationMeta.get('bilibili-announce')?.order].join(' < '))
+check('the tabs stay inside the Plugins section, before the marketplace', Number(registrationMeta.get('bilibili-announce')?.order) < 60, String(registrationMeta.get('bilibili-announce')?.order))
 
 const ConsolePage = registered.get('main')
 const NpmCredentialsPage = registered.get('npm-credentials')
@@ -754,7 +773,10 @@ async function expandFirstRow(tree) {
   check('the row offers no push while unauthenticated', hasButton(panel, '推送到 npm') === false)
   /* The panel is the operational view: it carries the control, not the course. The
      four steps moved to their own settings page, and the panel says where. */
-  check('the panel points at the settings guide', text.includes('设置 → npm 凭据'), text.replace(/\s+/g, ' ').slice(0, 240))
+  /* The path names all three hops, because the page moved: it is a tab inside Plugins
+     now, and a hint that stopped at 设置 would send someone to a nav row that is not
+     there any more. */
+  check('the panel points at the settings guide, by its real path', text.includes('设置 → 插件 → npm 凭据'), text.replace(/\s+/g, ' ').slice(0, 240))
   check('the panel no longer walks the four steps itself', text.includes('① 还没有 npm 账号？') === false)
 
   const typed = typeInto(panel, 'npm_', 'npm_abcdefghijklmnop')
@@ -968,7 +990,7 @@ function biliValue(overrides) {
   }
 }
 
-check('Bilibili notes get a settings section of their own', typeof registered.get('bilibili-announce') === 'function')
+check('Bilibili notes get a page of their own', typeof registered.get('bilibili-announce') === 'function')
 
 /**
  * The value of the first input whose placeholder contains this text.
