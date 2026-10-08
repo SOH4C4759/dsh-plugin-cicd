@@ -1,16 +1,15 @@
 /**
  * Browser half of the `dsh-plugin-cicd` bundle — 发布台 (Release Console).
  *
- * Six registrations:
+ * Four registrations:
  *   main                   the operating view: one compact row per repository
  *   sidebar.panellist      its sidebar button
- *   settings.plugins.tab   「GitHub 账户」: sign-in, scopes, and the repository list
- *   settings.plugins.tab   「npm 凭据」: the token, and every package's npm state
- *   settings.plugins.tab   「B 站播报」: the web session, the bound video, the template
+ *   settings.plugins.tab   「DSH 插件发布台」: the three credentials, one page
  *
- * The three pages sit inside the Plugins settings section rather than as sections of
- * their own: `settings.section` is a flat list shared with every other plugin, and
- * three rows from one plugin is not a fair share of it.
+ * That settings page holds GitHub, npm and Bilibili as SEGMENTS rather than as three
+ * pages of their own. Both shared surfaces this plugin could have taken are flat
+ * lists — `settings.section` (the top-level nav) and `settings.plugins.tab` (the strip
+ * inside Plugins) — and one row per plugin is this plugin's share of each.
  *
  * The layout rule is density. This panel's job is to answer "which of my
  * repositories needs attention" at a glance, and a card per repository with a
@@ -45,12 +44,23 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-cicd'
     /** Sidebar entry id and `main` slot key — the same value links the two. */
     const PANEL_ID = 'dsh-cicd'
-    /** Settings page id. `account` is a shipped section, so this must not reuse it. */
-    const SETTINGS_ID = 'github-account'
-    /** npm's own settings page; a second fresh id for the same reason. */
-    const NPM_SETTINGS_ID = 'npm-credentials'
-    /** And the third: the Bilibili update notes. Same rule, another fresh id. */
-    const BILIBILI_SETTINGS_ID = 'bilibili-announce'
+    /**
+     * The console's one page in the Plugins section. `account`, `general` and the rest
+     * are shipped sections, so this must not reuse one of their ids.
+     */
+    const SETTINGS_ID = 'dsh-cicd'
+    /**
+     * The three credentials, as segments inside that one page.
+     *
+     * They are not tabs of their own: this plugin would then take three of the rows in
+     * a tab strip shared with every other plugin, which is the same unfair share of a
+     * shared surface that moved them out of the top-level nav in the first place. As
+     * segments they stay one thing — the console's settings — and the strip stays one
+     * row per plugin.
+     */
+    const SEGMENT_GITHUB = 'github'
+    const SEGMENT_NPM = 'npm'
+    const SEGMENT_BILIBILI = 'bilibili'
     const STYLE_ID = 'dsh-plugin-cicd-styles'
 
     const BASE = '/api/dsh-cicd'
@@ -103,7 +113,8 @@ window.__ModuleLoader__.load({
       'panel': 'DSH 插件发布台',
       'title': 'DSH 插件发布台',
       'subtitle': '持续构建与发布（CI/CD）',
-      'settings.label': 'GitHub 账户',
+      'settings.consoleLabel': 'DSH 插件发布台',
+      'settings.segment.github': 'GitHub',
       'settings.title': 'GitHub 账户',
       'settings.subtitle': '发布台用这台机器上的 gh 访问 GitHub，插件自己不保存任何凭据。',
       'action.refresh': '刷新',
@@ -254,9 +265,9 @@ window.__ModuleLoader__.load({
       'npm.package.local': '本地 {version}',
       'npm.package.latest': 'npm 上是 {latest}',
       'npm.credentialPresentShort': '.npmrc 里已经有 {registry} 的凭据，但 whoami 没有确认它——granular token 是包级范围的，whoami 是用户级端点，这很正常。直接推即可，真伪由推送来判。',
-      'npm.moreInSettings': '完整引导与每个包的状态在 设置 → 插件 → npm 凭据。',
+      'npm.moreInSettings': '完整引导与每个包的状态在 设置 → 插件 → DSH 插件发布台 · npm。',
       'npm.ciHint': '要给 CI 自动发布？那不该用这里的 token——npm 支持 trusted publishing（GitHub Actions OIDC），不需要任何长期凭据。',
-      'settings.npmLabel': 'npm 凭据',
+      'settings.segment.npm': 'npm',
       'settings.npmTitle': 'npm 凭据',
       'settings.npmSubtitle': '发布用 Host 自己的包管理器，凭据走 npm 自己读的 ~/.npmrc——插件不保存任何 token。',
       'settings.npmGuideTitle': '从零开始的四步',
@@ -339,7 +350,7 @@ window.__ModuleLoader__.load({
       'picker.reload': '重新载入',
 
       /* -- Bilibili update notes ------------------------------------------- */
-      'bili.settings.label': 'B 站播报',
+      'settings.segment.bilibili': 'Bilibili',
       'bili.settings.title': 'B 站更新播报',
       'bili.settings.subtitle': '插件发版后，在对应视频的评论区自动补一条更新说明；凭据只落在插件自己的目录里，插件不回显它。',
       'bili.credential.title': '登录状态',
@@ -399,7 +410,7 @@ window.__ModuleLoader__.load({
       'bili.state.gave-up': '这条已经失败 {count} 次，先看看原因再手动重试。',
       'bili.state.unbound': '这个仓库还没有绑定 B 站视频。',
       'bili.needCredential': '有仓库绑定了 B 站视频，但还没有可用的 B 站凭据，更新评论发不出去。',
-      'bili.openSettings': '在 设置 → 插件 → B 站播报 里管理',
+      'bili.openSettings': '在 设置 → 插件 → DSH 插件发布台 · Bilibili 里管理',
       'bili.lastSweep': '自动巡检 {time}：{summary}',
       'bili.sweep.none': '还没有需要播报的新版本',
       'bili.sweep.announced': '已播报 {repo} {tag}',
@@ -423,7 +434,8 @@ window.__ModuleLoader__.load({
       'panel': 'DSH Plugin CI/CD',
       'title': 'DSH Plugin CI/CD',
       'subtitle': 'Continuous builds and releases for DSH plugins',
-      'settings.label': 'GitHub account',
+      'settings.consoleLabel': 'DSH Release Console',
+      'settings.segment.github': 'GitHub',
       'settings.title': 'GitHub account',
       'settings.subtitle': 'The console reaches GitHub through the gh CLI on this machine; the plugin stores no credential of its own.',
       'action.refresh': 'Refresh',
@@ -574,9 +586,9 @@ window.__ModuleLoader__.load({
       'npm.package.local': 'local {version}',
       'npm.package.latest': 'npm has {latest}',
       'npm.credentialPresentShort': '.npmrc already carries a credential for {registry}, but whoami would not confirm it — a granular token is scoped to packages while whoami is a user-level endpoint, so that is normal. Just push; the publish decides whether it is real.',
-      'npm.moreInSettings': 'The full guide and every package\'s state live in Settings → Plugins → npm credentials.',
+      'npm.moreInSettings': 'The full guide and every package\'s state live in Settings → Plugins → DSH Release Console · npm.',
       'npm.ciHint': 'Publishing from CI? This token is not the way — npm supports trusted publishing (GitHub Actions OIDC), which needs no long-lived credential at all.',
-      'settings.npmLabel': 'npm credentials',
+      'settings.segment.npm': 'npm',
       'settings.npmTitle': 'npm credentials',
       'settings.npmSubtitle': 'Publishing uses the Host\'s own package manager, and the credential comes from the ~/.npmrc npm itself reads — this plugin stores no token.',
       'settings.npmGuideTitle': 'Four steps, from nothing',
@@ -659,7 +671,7 @@ window.__ModuleLoader__.load({
       'picker.reload': 'Reload',
 
       /* -- Bilibili update notes ------------------------------------------- */
-      'bili.settings.label': 'Bilibili notes',
+      'settings.segment.bilibili': 'Bilibili',
       'bili.settings.title': 'Bilibili update notes',
       'bili.settings.subtitle': 'When a plugin is released, one short note is added to the comment section of the video that introduces it. The credential lives only in this plugin\'s own directory, and is never echoed back.',
       'bili.credential.title': 'Sign-in',
@@ -719,7 +731,7 @@ window.__ModuleLoader__.load({
       'bili.state.gave-up': 'This one has failed {count} times; read why before retrying by hand.',
       'bili.state.unbound': 'This repository has no video bound.',
       'bili.needCredential': 'A repository is bound to a video, but there is no usable Bilibili credential, so update notes cannot be posted.',
-      'bili.openSettings': 'Manage under Settings → Plugins → Bilibili notes',
+      'bili.openSettings': 'Manage under Settings → Plugins → DSH Release Console · Bilibili',
       'bili.lastSweep': 'Sweep {time}: {summary}',
       'bili.sweep.none': 'nothing new to announce',
       'bili.sweep.announced': 'announced {repo} {tag}',
@@ -816,6 +828,13 @@ window.__ModuleLoader__.load({
 /* A line that only points somewhere else: quieter than a warning, and never a
    control, so it cannot be mistaken for one. */
 .dsc-quiet { font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
+/* The console's own segment strip, inside its one Plugins tab. Left-aligned and with a
+   rule under it, so it reads as "which part of this page" rather than as a second set
+   of tabs floating in the middle: the dsc-bar rule alone would spread three buttons
+   across the full width. No backticks in here — this whole sheet is one template
+   literal, and a backtick ends it. */
+.dsc-segments { justify-content: flex-start; gap: 6px; padding-bottom: var(--dsc-gap); border-bottom: 1px solid var(--dsw-alias-border-l1); margin-bottom: var(--dsc-gap); }
+.dsc-settings { display: flex; flex-direction: column; gap: var(--dsc-gap); }
 
 .dsc-notice, .dsc-warn, .dsc-error {
   padding: 6px 10px; border-radius: var(--dsc-ctl-r); font-size: var(--dsc-fs-md); line-height: 1.5;
@@ -3509,6 +3528,52 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * The console's settings page: three credentials, one page.
+     *
+     * One segment mounts at a time, and that is deliberate twice over. It keeps the
+     * page from probing all three credential systems the moment someone opens it —
+     * each segment asks its own Host route when it mounts, as it did as a page of its
+     * own. And it keeps a failure local: the Bilibili half parses a ledger and a cookie
+     * file, and a malformed one takes down the segment it is in, not the GitHub token
+     * state someone opened this page to read.
+     *
+     * The segments render here rather than in the slot because `settings.plugins.tab`
+     * is a flat list — the platform gives one strip of tabs and no nesting — so the
+     * inner strip is ours. `order` in that outer strip is one row per plugin; inside,
+     * the order is the workflow: release, distribute on npm, then announce.
+     */
+    function ConsoleSettingsPage(props) {
+      const t = typeof props?.t === 'function' ? props.t : (key) => key
+      const [segment, setSegment] = React.useState(SEGMENT_GITHUB)
+      const segments = [
+        { key: SEGMENT_GITHUB, label: 'settings.segment.github', page: AccountPage },
+        { key: SEGMENT_NPM, label: 'settings.segment.npm', page: NpmCredentialsPage },
+        { key: SEGMENT_BILIBILI, label: 'settings.segment.bilibili', page: BilibiliPage },
+      ]
+      const active = segments.find((entry) => entry.key === segment) ?? segments[0]
+      return h(
+        'div',
+        { className: 'dsc-settings', 'data-segment': active.key },
+        h(
+          'div',
+          { className: 'dsc-bar dsc-segments' },
+          ...segments.map((entry) => h(
+            Btn,
+            {
+              key: entry.key,
+              kind: entry.key === active.key ? 'primary' : 'quiet',
+              'data-segment': entry.key,
+              title: t(entry.label),
+              onClick: () => setSegment(entry.key),
+            },
+            t(entry.label),
+          )),
+        ),
+        h(active.page, { t }),
+      )
+    }
+
     return {
       name: 'dsh-cicd-client',
       inject: ['slots', 'locale'],
@@ -3535,48 +3600,32 @@ window.__ModuleLoader__.load({
             ),
           ),
           /*
-           * These three pages live in the Plugins section, not as top-level sections.
+           * ONE page, in the Plugins section, holding the three credentials.
            *
-           * `settings.section` is a FLAT list — one page per entry, no grouping and no
-           * sub-navigation — so three sections from one plugin took 3 of the 13 rows in
-           * a nav that is shared with every other plugin and with DSH's own settings,
-           * and took them above 通用 / 模型 / 插件. Every other third-party plugin here
-           * occupies exactly one row. `settings.plugins.tab` is the seat the platform
-           * keeps for a plugin's own pages ("One page inside the Plugins settings
-           * section"), so this is where a plugin's configuration belongs: the tabs are
-           * rendered by the Plugins section itself, as tabs.
+           * Two shares of a shared surface were given back here. The top-level nav
+           * (`settings.section`) is a FLAT list — one page per entry, no grouping, no
+           * sub-navigation — and this plugin was taking 3 of its 13 rows, all of them
+           * above 通用 / 模型 / 插件, while every other third-party plugin on this machine
+           * takes exactly one. `settings.plugins.tab` is the seat the platform keeps for
+           * a plugin's own pages ("One page inside the Plugins settings section"), so the
+           * configuration belongs there — but three tabs in that strip would be the same
+           * unfair share one level down: a strip shared with every plugin, three of its
+           * rows belonging to this one. So the three are segments inside one page, and
+           * the strip is one row per plugin.
            *
-           * `order` 20/21/22 puts them after the inventory (`all`, 10) and before the
-           * marketplace (60): they configure an installed plugin, which is closer to the
-           * inventory than to a shop. The relative order is the workflow — release,
-           * distribute on npm, then announce — so the tabs read in the order the job is
-           * done.
+           * `order` 20 puts it after the inventory (`all`, 10) and before the marketplace
+           * (60): it configures an installed plugin, which is closer to the inventory than
+           * to a shop.
            *
-           * Each keeps its own id, and a fresh one: reusing a shipped id would REPLACE
-           * that page instead of adding one. The `locale` option is what supplies the
-           * `t` prop (`PropsLocale`), and it is the registration's own option rather than
-           * anything the slot owner gives, so these pages translate exactly as they did
-           * as sections.
+           * A fresh id is required — reusing a shipped id would REPLACE that page instead
+           * of adding one. The `locale` option is what supplies the `t` prop
+           * (`PropsLocale`), and it is the registration's own option rather than anything
+           * the slot owner gives, so the page translates exactly as the sections did.
            */
           ctx.slots.inject('settings.plugins.tab', () =>
             ctx.slots.register(
-              { name: 'settings.plugins.tab', id: SETTINGS_ID, order: 20, label: () => t('settings.label'), locale: NS },
-              AccountPage,
-            ),
-          ),
-          // The npm credential is its own page rather than a block on the GitHub one:
-          // they are two credential systems with two failures and two fixes.
-          ctx.slots.inject('settings.plugins.tab', () =>
-            ctx.slots.register(
-              { name: 'settings.plugins.tab', id: NPM_SETTINGS_ID, order: 21, label: () => t('settings.npmLabel'), locale: NS },
-              NpmCredentialsPage,
-            ),
-          ),
-          // And the third credential system: Bilibili's.
-          ctx.slots.inject('settings.plugins.tab', () =>
-            ctx.slots.register(
-              { name: 'settings.plugins.tab', id: BILIBILI_SETTINGS_ID, order: 22, label: () => t('bili.settings.label'), locale: NS },
-              BilibiliPage,
+              { name: 'settings.plugins.tab', id: SETTINGS_ID, order: 20, label: () => t('settings.consoleLabel'), locale: NS },
+              ConsoleSettingsPage,
             ),
           ),
         ]

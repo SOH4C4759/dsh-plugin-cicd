@@ -293,11 +293,17 @@ sandbox.__load.apply({
   },
   slots: {
     inject: (name, fn) => fn(),
-    /* Key by `id` where there is one: one plugin may contribute several entries to one
-       slot, and keying by name made the second silently replace the first — which is
-       exactly how a missing settings page passes a whole suite. */
+    /* Keyed by slot AND cell, which is what the runtime keys by.
+       Keying by `id` alone lost registrations two ways: one plugin contributing several
+       entries to one slot had its second silently replace the first (how a missing
+       settings page passed a whole suite), and the same id in two DIFFERENT slots —
+       which the runtime treats as two unrelated cells, and this plugin does use
+       (`dsh-cicd` is both its sidebar entry and its settings tab) — collided. */
     register: (meta, component) => {
-      const key = typeof meta.id === 'string' && meta.id !== '' ? meta.id : meta.name
+      const cell = typeof meta.id === 'string' && meta.id !== ''
+        ? meta.id
+        : (typeof meta.key === 'string' && meta.key !== '' ? meta.key : '')
+      const key = `${String(meta.name)}#${cell}`
       registered.set(key, component)
       registrationMeta.set(key, meta)
       return () => {
@@ -314,28 +320,41 @@ function translate(key, params) {
   return params === undefined ? template : template.replace(/\{(\w+)\}/g, (whole, name) => (name in params ? String(params[name]) : whole))
 }
 
-check('the main view is registered', typeof registered.get('main') === 'function')
-check('the theme is injected once', styleElements.length === 1)
-check('the GitHub page is registered', typeof registered.get('github-account') === 'function')
-/* The npm guide is a configuration page, not a paragraph in the panel — so it has to
-   be a registration of its own, beside the GitHub one rather than replacing it. */
-check('npm credentials get a page of their own', typeof registered.get('npm-credentials') === 'function')
-/*
- * The three pages are tabs inside the Plugins section, not sections of their own.
- * `settings.section` is a flat list shared with every other plugin: three rows from
- * one plugin took 3 of 13 and took them above 通用 / 模型 / 插件, while every other
- * third-party plugin here takes exactly one. Nothing else in the suite can tell the
- * two homes apart, so this is the check that pins the move.
- */
-check('the GitHub page is a tab inside the Plugins section', registrationMeta.get('github-account')?.name === 'settings.plugins.tab', String(registrationMeta.get('github-account')?.name))
-check('the npm page is a tab inside the Plugins section', registrationMeta.get('npm-credentials')?.name === 'settings.plugins.tab', String(registrationMeta.get('npm-credentials')?.name))
-check('the Bilibili page is a tab inside the Plugins section', registrationMeta.get('bilibili-announce')?.name === 'settings.plugins.tab', String(registrationMeta.get('bilibili-announce')?.name))
-check('the console takes no top-level settings section at all', [...registrationMeta.values()].every((meta) => meta.name !== 'settings.section'), [...registrationMeta.values()].map((meta) => meta.name).join(','))
-check('the tabs keep the order the job is done in', Number(registrationMeta.get('github-account')?.order) < Number(registrationMeta.get('npm-credentials')?.order) && Number(registrationMeta.get('npm-credentials')?.order) < Number(registrationMeta.get('bilibili-announce')?.order), [registrationMeta.get('github-account')?.order, registrationMeta.get('npm-credentials')?.order, registrationMeta.get('bilibili-announce')?.order].join(' < '))
-check('the tabs stay inside the Plugins section, before the marketplace', Number(registrationMeta.get('bilibili-announce')?.order) < 60, String(registrationMeta.get('bilibili-announce')?.order))
+/** One registration, by the slot it went into and its cell id. */
+function slotEntry(name, cell) {
+  return registered.get(`${name}#${cell}`)
+}
 
-const ConsolePage = registered.get('main')
-const NpmCredentialsPage = registered.get('npm-credentials')
+/** What a registration asked for, same addressing. */
+function slotMeta(name, cell) {
+  return registrationMeta.get(`${name}#${cell}`)
+}
+
+check('the main view is registered', typeof slotEntry('main', 'dsh-cicd') === 'function')
+check('the theme is injected once', styleElements.length === 1)
+check('the settings page is registered', typeof slotEntry('settings.plugins.tab', 'dsh-cicd') === 'function')
+/*
+ * ONE page for the whole console, one row of the Plugins strip.
+ *
+ * Both shared surfaces here are flat lists — the top-level nav (`settings.section`)
+ * and the strip inside Plugins (`settings.plugins.tab`) — and this plugin's share of
+ * each is one row. It was three of thirteen nav rows before, all of them above
+ * 通用 / 模型 / 插件, while every other third-party plugin on this machine takes
+ * exactly one. Nothing else in the suite can tell those homes apart, so these are the
+ * checks that pin it.
+ */
+check('the settings page is a tab inside the Plugins section', slotMeta('settings.plugins.tab', 'dsh-cicd')?.name === 'settings.plugins.tab', String(slotMeta('settings.plugins.tab', 'dsh-cicd')?.name))
+check('the console takes no top-level settings section at all', [...registrationMeta.values()].every((meta) => meta.name !== 'settings.section'), [...registrationMeta.values()].map((meta) => meta.name).join(','))
+check('the console holds exactly one row of the Plugins strip', [...registrationMeta.values()].filter((meta) => meta.name === 'settings.plugins.tab').length === 1, [...registrationMeta.values()].filter((meta) => meta.name === 'settings.plugins.tab').map((meta) => meta.id).join(','))
+check('the row sits after the inventory and before the marketplace', Number(slotMeta('settings.plugins.tab', 'dsh-cicd')?.order) === 20, String(slotMeta('settings.plugins.tab', 'dsh-cicd')?.order))
+check('the row is named after the console, not after one credential', slotMeta('settings.plugins.tab', 'dsh-cicd')?.label?.() === 'DSH 插件发布台', String(slotMeta('settings.plugins.tab', 'dsh-cicd')?.label?.()))
+/* The sidebar entry and the settings tab answer to the same id in two different slots.
+   The runtime keys by slot, so that is two cells; a harness that keyed by id alone
+   would have one registration quietly replace the other. */
+check('the sidebar entry and the settings tab are two different cells', typeof slotEntry('sidebar.panellist', 'dsh-cicd') === 'function' && typeof slotEntry('settings.plugins.tab', 'dsh-cicd') === 'function' && slotEntry('sidebar.panellist', 'dsh-cicd') !== slotEntry('settings.plugins.tab', 'dsh-cicd'))
+
+const ConsolePage = slotEntry('main', 'dsh-cicd')
+const ConsoleSettingsPage = slotEntry('settings.plugins.tab', 'dsh-cicd')
 
 /** One repository row fixture. */
 function repoFixture(overrides) {
@@ -462,6 +481,27 @@ async function rerender() {
   return render(ConsolePage, { t: translate })
 }
 
+/** Whether the last segment press found its button. */
+let lastSegmentPress = true
+
+/**
+ * Render the console's settings page and land on one of its three segments.
+ *
+ * The segments are the page's own, not the platform's: `settings.plugins.tab` is a
+ * flat list of tabs and the plugin is one of them, so everything below that is a
+ * button inside our page. Reaching the npm page therefore means pressing its segment,
+ * exactly as a person would.
+ */
+async function renderSettings(segment = 'github') {
+  const first = await render(ConsoleSettingsPage, { t: translate })
+  if (segment === 'github') return first
+  const label = segment === 'bilibili' ? 'Bilibili' : 'npm'
+  lastSegmentPress = clickButton(first, label)
+  /* Re-render the same mounted shell: the segment press marked it dirty, so this pass
+     draws the segment that was asked for, with that page's own hooks under it. */
+  return render(ConsoleSettingsPage, { t: translate })
+}
+
 /** Render the npm settings page against one npm-status fixture. */
 async function renderNpmPage(npmValue = npmStatusValue(), extra = {}) {
   const fixtures = { '/status': { ok: true, value: baseStatus.value }, ...extra }
@@ -472,18 +512,45 @@ async function renderNpmPage(npmValue = npmStatusValue(), extra = {}) {
   values.clear()
   effectSlots.clear()
   calls.length = 0
-  return render(NpmCredentialsPage, { t: translate })
+  return renderSettings('npm')
 }
 
 /** Re-render the settings page, keeping its state — after a click, say. */
 async function rerenderNpm() {
-  return render(NpmCredentialsPage, { t: translate })
+  return renderSettings('npm')
 }
 
 /** Expand the first row and return the tree with its detail visible. */
 async function expandFirstRow(tree) {
   const pressed = clickButton(tree, '▾')
   return { pressed, tree: await rerender() }
+}
+
+/* -- 0. One settings page, three segments -----------------------------------
+   The console's settings are ONE tab in the Plugins strip, and everything below that
+   is its own: the platform's strip is a flat list with no nesting, so the segment
+   strip is ours. One segment mounts at a time, which is not only about not probing
+   three credential systems on open — the Bilibili half reads a ledger and a cookie
+   file, and a malformed one must not take down the GitHub state someone opened this
+   page to read. */
+{
+  fixture = {
+    '/status': { ok: true, value: baseStatus.value },
+    '/auth-state': { ok: true, value: { available: true, authenticated: true, account: 'octocat', scopes: ['repo'], missingScopes: [] } },
+  }
+  values.clear()
+  effectSlots.clear()
+  calls.length = 0
+  const opened = await renderSettings('github')
+  check('the page names the three credentials as segments', hasButton(opened, 'GitHub') && hasButton(opened, 'npm') && hasButton(opened, 'Bilibili'), textOf(opened).replace(/\s+/g, ' ').slice(0, 160))
+  check('it opens on GitHub rather than on whichever page loaded last', calls.includes('/status') === true)
+  check('opening it probes no other credential system', calls.includes('/npm-status') === false && calls.includes('/bilibili-status') === false, calls.join(','))
+
+  fixture['/npm-status'] = { ok: true, value: npmStatusValue() }
+  const onNpm = await renderSettings('npm')
+  check('a segment press finds its button', lastSegmentPress === true)
+  check('the pressed segment draws that credential\'s page', hasButton(onNpm, '写入并验证'), textOf(onNpm).replace(/\s+/g, ' ').slice(0, 200))
+  check('the npm probe happens only once its segment is opened', calls.includes('/npm-status') === true, calls.join(','))
 }
 
 /* -- 1. A version taken by another commit offers the bump ------------------- */
@@ -773,10 +840,11 @@ async function expandFirstRow(tree) {
   check('the row offers no push while unauthenticated', hasButton(panel, '推送到 npm') === false)
   /* The panel is the operational view: it carries the control, not the course. The
      four steps moved to their own settings page, and the panel says where. */
-  /* The path names all three hops, because the page moved: it is a tab inside Plugins
-     now, and a hint that stopped at 设置 would send someone to a nav row that is not
-     there any more. */
-  check('the panel points at the settings guide, by its real path', text.includes('设置 → 插件 → npm 凭据'), text.replace(/\s+/g, ' ').slice(0, 240))
+  /* The path names all three hops, and the segment, because the page moved twice: it is
+     a tab inside Plugins, and npm is a segment inside that tab. A hint that stopped at
+     设置 — or at the tab — would send someone to a row that is not there any more, or to
+     a page whose first screen is GitHub. */
+  check('the panel points at the settings guide, by its real path', text.includes('设置 → 插件 → DSH 插件发布台 · npm'), text.replace(/\s+/g, ' ').slice(0, 240))
   check('the panel no longer walks the four steps itself', text.includes('① 还没有 npm 账号？') === false)
 
   const typed = typeInto(panel, 'npm_', 'npm_abcdefghijklmnop')
@@ -990,7 +1058,21 @@ function biliValue(overrides) {
   }
 }
 
-check('Bilibili notes get a page of their own', typeof registered.get('bilibili-announce') === 'function')
+/* The third segment, reached the way a person reaches it. This is also the check that
+   the Bilibili page survives being mounted as a child of the console's shell rather
+   than as a slot occupant: it reads the same `t` prop and nothing else. */
+{
+  fixture = {
+    '/status': { ok: true, value: baseStatus.value },
+    '/bilibili-status': { ok: true, value: biliValue() },
+  }
+  values.clear()
+  effectSlots.clear()
+  calls.length = 0
+  const onBilibili = await renderSettings('bilibili')
+  check('the Bilibili segment draws the update-note page', hasButton(onBilibili, '登录 B 站') || hasButton(onBilibili, '退出 B 站登录'), textOf(onBilibili).replace(/\s+/g, ' ').slice(0, 220))
+  check('the Bilibili probe happens only once its segment is opened', calls.includes('/bilibili-status') === true, calls.join(','))
+}
 
 /**
  * The value of the first input whose placeholder contains this text.
