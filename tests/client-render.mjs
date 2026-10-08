@@ -538,18 +538,22 @@ async function expandFirstRow(tree) {
   check('a missing gh is explained', textOf(tree).includes('没有找到 gh CLI'), textOf(tree).replace(/\s+/g, ' ').slice(0, 140))
 }
 
-/* -- 6. A linked checkout is offered the published artifact ------------------
+/* -- 6. A linked checkout keeps the published artifact out of the row ---------
    The state the version comparison cannot reach: the checkout and the release both
    say 1.0.0, yet only one of them is what someone who downloaded the release runs.
-   So the row must offer the install even though the versions agree. */
+   The capability stays — "does the released artifact install?" is a question this
+   panel exists to answer — but not on the row. A checkout is the normal state on the
+   machine that DEVELOPED the plugin, where the row's button would only replace the
+   code being edited with a tarball. */
 {
   const collapsed = await renderPanel([repoFixture({ install: installFixture({ state: 'checkout' }) })])
-  check('a linked checkout is offered in the row', hasButton(collapsed, '装 Release v1.0.0'))
+  check('a linked checkout is NOT offered on the row', hasButton(collapsed, '装 Release v1.0.0') === false, textOf(collapsed).replace(/\s+/g, ' ').slice(0, 200))
   check('a linked checkout is not marked as behind on the row', textOf(collapsed).includes('可更新') === false)
 
   const { tree } = await expandFirstRow(collapsed)
   const detail = textOf(tree)
-  check('the row says the installed copy is a checkout, not the release', detail.includes('不是发布出去的那份'), detail.replace(/\s+/g, ' ').slice(0, 220))
+  check('the capability is still there, one level down', hasButton(tree, '装 Release v1.0.0'))
+  check('the expansion says the installed copy is a checkout, not the release', detail.includes('不是发布出去的那份'), detail.replace(/\s+/g, ' ').slice(0, 220))
   check('the explanation names the link spec', detail.includes('link:F:\\CodeProj\\dsh-plugin-restart'))
 
   /* Installing rewrites a profile dependency, so it asks first — the same shape as
@@ -557,6 +561,17 @@ async function expandFirstRow(tree) {
   const asked = clickButton(tree, '装 Release v1.0.0')
   const confirm = await rerender()
   check('installing asks before it rewrites the profile', asked === true && textOf(confirm).includes('这会改写该 profile 的依赖条目'), textOf(confirm).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* -- 6b. An "install" that would move BACKWARDS stays off the row ------------
+   The profile holds something newer than the release. Offering that button on the row
+   is offering a downgrade as if it were housekeeping. */
+{
+  const collapsed = await renderPanel([repoFixture({ install: installFixture({ state: 'ahead', installedVersion: '2.0.0', latestTag: 'v1.0.0', latestVersion: '1.0.0' }) })])
+  check('a profile holding something newer is not offered a downgrade on the row', hasButton(collapsed, '装 Release v1.0.0') === false, textOf(collapsed).replace(/\s+/g, ' ').slice(0, 200))
+
+  const { tree } = await expandFirstRow(collapsed)
+  check('the downgrade is still explained where it is offered', hasButton(tree, '装 Release v1.0.0') && textOf(tree).includes('退回到旧版本'))
 }
 
 /* -- 7. An update, then the restart question -------------------------------- */

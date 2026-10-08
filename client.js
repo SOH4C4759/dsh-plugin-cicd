@@ -1363,8 +1363,27 @@ window.__ModuleLoader__.load({
        */
       const install = data.install ?? null
       const installState = install === null ? '' : String(install.state ?? '')
-      /** States where the release artifact can genuinely replace what is installed. */
-      const installable = installState === 'update' || installState === 'checkout' || installState === 'ahead' || installState === 'differs'
+      /**
+       * The one state where installing is the row's business: the profile holds an
+       * older PUBLISHED copy, so the action is the reason the console exists.
+       */
+      const installable = installState === 'update'
+      /**
+       * Installing is possible in three more states, and in none of them does it
+       * belong on the row.
+       *
+       * `checkout` is the normal state on the machine that DEVELOPED the plugin: the
+       * profile points at the working copy, so the row would carry a button whose only
+       * effect is to replace the code being edited with a tarball. The row is for the
+       * work, not for undoing the setup that makes the work possible. `ahead` is worse
+       * than noise — the profile holds something NEWER, so the button offers a
+       * downgrade. `differs` cannot be ordered at all, so it is a shot in the dark.
+       *
+       * They stay in the expansion, as quiet buttons sitting next to the sentence that
+       * says what they would do, because that is still where "does the released
+       * artifact actually install?" gets answered.
+       */
+      const installSecondary = installState === 'checkout' || installState === 'ahead' || installState === 'differs'
       const installLabel = installState === 'update' ? 'action.update' : 'action.installRelease'
       const installExplain = (() => {
         if (install === null) return null
@@ -1583,9 +1602,9 @@ window.__ModuleLoader__.load({
                         : h(Chip, { state: installState === 'current' ? 'success' : installState === 'update' ? 'warn' : 'idle' }, `v${String(install.installedVersion)}`),
                       installState === 'checkout' ? h(Chip, { state: 'warn' }, t('chip.checkout')) : null,
                       h('span', { className: 'dsc-grow', title: String(install.spec ?? '') }, install.present === true ? String(install.spec ?? '') : `— ${String(install.profile ?? '')}`),
-                      installable && install.latestTag
+                      (installable || installSecondary) && install.latestTag
                         ? h(Btn, {
-                            kind: installState === 'update' ? 'primary' : undefined,
+                            kind: installState === 'update' ? 'primary' : 'quiet',
                             disabled: busy !== '',
                             title: installExplain ?? undefined,
                             onClick: () => setUpdating(true),
@@ -1663,7 +1682,10 @@ window.__ModuleLoader__.load({
                   )
                 : null,
 
-              updating && installable && install?.latestTag
+              /* The confirmation has to appear for every button that can be pressed,
+                 including the quiet ones — a secondary action whose confirm dialog was
+                 gated on the row's narrower condition would be a dead button. */
+              updating && (installable || installSecondary) && install?.latestTag
                 ? h(
                     'div',
                     { className: 'dsc-line' },
