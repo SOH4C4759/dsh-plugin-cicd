@@ -120,6 +120,10 @@ window.__ModuleLoader__.load({
       'action.refresh': '刷新',
       'action.manage': '管理仓库',
       'action.close': '收起',
+      'action.commit': '提交',
+      'action.push': '推送',
+      'action.commitConfirm': '确认提交',
+      'action.pushConfirm': '确认推送',
       'action.build': '构建',
       'action.release': '发布',
       'action.bumpRelease': '升版本并发布',
@@ -172,6 +176,15 @@ window.__ModuleLoader__.load({
       'state.dispatched': '已触发 {workflow}（{repo}）。',
       'state.releaseDispatched': '已触发发布流程（{repo}）。它产出的是草稿——但草稿是否真的出现，要看这次运行的结果：失败时展开该行点【日志】就能看到原因（最常见的是版本号没升）。',
       'state.releaseBumped': '已把 {from} 升到 {tag} 并推送 {branch}，发布流程也已触发。产出的是草稿，是否成功看这次运行的结果。',
+      'state.committed': '已提交并推送到 {branch}（{count} 个改动）。现在 构建 与 发布 都能看到它们了。',
+      'state.pushed': '已把 {count} 个本地提交推送到 {branch}。',
+      'commit.noCheckout': '这个仓库没有可用的本地检出，所以没有可提交的东西。',
+      'commit.willCommit': '将提交 {count} 个改动：',
+      'commit.willPush': '工作区干净，有 {count} 个本地提交等着推送——发布构建的是 GitHub 上的提交，不是这台机器上的。',
+      'commit.nothing': '工作区干净，且与上游同步：没有可提交或推送的东西。',
+      'commit.messagePlaceholder': '提交信息',
+      'commit.messageRequired': '提交信息不能为空。',
+      'confirm.push': '把 {count} 个本地提交推送到 {branch}？',
       'state.published': '{tag} 已公开。',
       'state.rerun': '已请求重跑。',
       'state.cancelled': '已请求取消。',
@@ -441,6 +454,10 @@ window.__ModuleLoader__.load({
       'action.refresh': 'Refresh',
       'action.manage': 'Repositories',
       'action.close': 'Done',
+      'action.commit': 'Commit',
+      'action.push': 'Push',
+      'action.commitConfirm': 'Commit',
+      'action.pushConfirm': 'Push',
       'action.build': 'Build',
       'action.release': 'Release',
       'action.bumpRelease': 'Bump and release',
@@ -493,6 +510,15 @@ window.__ModuleLoader__.load({
       'state.dispatched': 'Triggered {workflow} on {repo}.',
       'state.releaseDispatched': 'Release workflow triggered for {repo}. It produces a DRAFT — but whether a draft actually appears depends on that run: if it fails, expand the row and press Logs to see why (a stale version number is the usual reason).',
       'state.releaseBumped': 'Bumped {from} to {tag} and pushed {branch}; the release workflow is triggered. It produces a draft, and whether it succeeds depends on that run.',
+      'state.committed': 'Committed and pushed {branch} ({count} change(s)). Build and Release can see them now.',
+      'state.pushed': 'Pushed {count} local commit(s) to {branch}.',
+      'commit.noCheckout': 'This repository has no usable local checkout, so there is nothing here to commit.',
+      'commit.willCommit': 'This will commit {count} change(s):',
+      'commit.willPush': 'The tree is clean and {count} local commit(s) are waiting to be pushed — a release builds the commit on GitHub, not the one on this disk.',
+      'commit.nothing': 'The tree is clean and in sync with its upstream: nothing to commit or push.',
+      'commit.messagePlaceholder': 'Commit message',
+      'commit.messageRequired': 'A commit needs a message.',
+      'confirm.push': 'Push {count} local commit(s) to {branch}?',
       'state.published': '{tag} is public now.',
       'state.rerun': 'Re-run requested.',
       'state.cancelled': 'Cancellation requested.',
@@ -828,6 +854,9 @@ window.__ModuleLoader__.load({
 /* A line that only points somewhere else: quieter than a warning, and never a
    control, so it cannot be mistaken for one. */
 .dsc-quiet { font-size: var(--dsc-fs-sm); color: var(--dsw-alias-label-secondary); }
+/* The commit confirmation: a sentence, the file list, a message field, then the two
+   buttons. A column, because the list wraps and a row would push the buttons off. */
+.dsc-commit { display: flex; flex-direction: column; gap: var(--dsc-gap); padding: var(--dsc-gap) 0; font-size: var(--dsc-fs-sm); }
 /* The console's own segment strip, inside its one Plugins tab. Left-aligned and with a
    rule under it, so it reads as "which part of this page" rather than as a second set
    of tabs floating in the middle: the dsc-bar rule alone would spread three buttons
@@ -1354,7 +1383,7 @@ window.__ModuleLoader__.load({
 
     /** One repository row, expandable into path, releases, runs and logs. */
     function RepoRow(props) {
-      const { t, data, busy, onAction, onBump, onPublish, onUpdate, npm, onNpmPublish, bili, onBiliBind, onBiliPreview, onBiliAnnounce, logs, onLogs } = props
+      const { t, data, busy, onAction, onBump, onCommit, onPublish, onUpdate, npm, onNpmPublish, bili, onBiliBind, onBiliPreview, onBiliAnnounce, logs, onLogs } = props
       const [open, setOpen] = React.useState(false)
       /**
        * A draft release is the panel's one invisible outcome: it exists, it is not
@@ -1370,6 +1399,9 @@ window.__ModuleLoader__.load({
       const [confirming, setConfirming] = React.useState(null)
       /** The bump confirmation is inline, like publishing a draft: it creates a commit. */
       const [bumping, setBumping] = React.useState(false)
+      /** 提交 asks first, and asks for a message: it writes a commit on this disk. */
+      const [committing, setCommitting] = React.useState(false)
+      const [commitMessage, setCommitMessage] = React.useState('')
       /** Installing a release rewrites a profile dependency, so it asks first too. */
       const [updating, setUpdating] = React.useState(false)
       /** A publish cannot be undone, so it asks first — and 2FA needs somewhere to type. */
@@ -1377,6 +1409,26 @@ window.__ModuleLoader__.load({
       const [otp, setOtp] = React.useState('')
       const run = data.latestRun
       const local = data.local ?? { available: false }
+      const dirty = Number.isFinite(local.dirty) ? local.dirty : null
+      const ahead = Number.isFinite(local.ahead) ? local.ahead : null
+      /*
+       * 提交 is two actions in one button, because they are one trap: a release builds
+       * the PUSHED commit, so work that never left the working tree and work that never
+       * left the machine are equally absent from the released package. Changes → commit
+       * and push. Clean but ahead → push. Neither → nothing to do, and the button says
+       * so instead of offering a call that could only fail.
+       */
+      const canCommit = local.available === true && dirty !== null && dirty > 0
+      const canPush = local.available === true && dirty === 0 && ahead !== null && ahead > 0
+      const commitLabel = canPush ? 'action.push' : 'action.commit'
+      const branchName = typeof local.branch === 'string' && local.branch !== '' ? local.branch : 'main'
+      const commitExplain = local.available !== true
+        ? t('commit.noCheckout')
+        : canCommit
+          ? t('commit.willCommit', { count: String(dirty) })
+          : canPush
+            ? t('commit.willPush', { count: String(ahead) })
+            : t('commit.nothing')
       /**
        * What this profile has installed for this repository's package.
        *
@@ -1530,6 +1582,20 @@ window.__ModuleLoader__.load({
           h(
             'div',
             { className: 'dsc-right' },
+            /* 提交, 构建, 发布 — the order the work happens in. 提交 first because the
+               other two act on what is on GitHub: a release builds the pushed commit, and
+               a build runs the pushed commit, so neither can see work that is still only
+               on this disk. It is never primary: it is the step, not the goal. */
+            local.available === true
+              ? h(Btn, {
+                  disabled: busy !== '' || (!canCommit && !canPush),
+                  title: commitExplain,
+                  onClick: () => {
+                    setOpen(true)
+                    setCommitting(true)
+                  },
+                }, busy === `commit:${data.repo}` ? '…' : t(commitLabel))
+              : null,
             data.hasBuildWorkflow ? h(Btn, { disabled: busy !== '', title: t('action.build'), onClick: () => onAction('build', data) }, busy === `build:${data.repo}` ? '…' : t('action.build')) : null,
             data.hasReleaseWorkflow
               ? blocked && typeof check.nextTag === 'string' && check.nextTag !== ''
@@ -1603,6 +1669,48 @@ window.__ModuleLoader__.load({
                       },
                     }, t('action.bumpRelease')),
                     h(Btn, { kind: 'quiet', onClick: () => setBumping(false) }, t('confirm.cancel')),
+                  )
+                : null,
+              /*
+               * 提交 asks first, and asks for a message — it writes a commit on this disk
+               * and pushes it. `git add -A` is the one action in this panel that can
+               * sweep in a file the author never meant to publish, so the list is on
+               * screen above the button: the count alone ("7 changes") could be the three
+               * you meant and four you have never seen.
+               */
+              committing && (canCommit || canPush)
+                ? h(
+                    'div',
+                    { className: 'dsc-commit' },
+                    canCommit ? h('span', null, t('commit.willCommit', { count: String(dirty) })) : null,
+                    canCommit && Array.isArray(local.files) && local.files.length > 0
+                      ? h('span', { className: 'dsc-mono dsc-quiet' }, `${local.files.join('  ·  ')}${dirty > local.files.length ? `  …+${String(dirty - local.files.length)}` : ''}`)
+                      : null,
+                    canCommit
+                      ? h('input', {
+                          className: 'dsc-input',
+                          type: 'text',
+                          value: commitMessage,
+                          placeholder: t('commit.messagePlaceholder'),
+                          onChange: (event) => setCommitMessage(String(event?.target?.value ?? '')),
+                        })
+                      : h('span', null, t('confirm.push', { count: String(ahead), branch: branchName })),
+                    h(
+                      'div',
+                      { className: 'dsc-line' },
+                      h(Btn, {
+                        kind: 'danger',
+                        disabled: busy !== '' || (canCommit && commitMessage.trim() === ''),
+                        title: canCommit && commitMessage.trim() === '' ? t('commit.messageRequired') : undefined,
+                        onClick: () => {
+                          const message = canCommit ? commitMessage.trim() : ''
+                          setCommitting(false)
+                          setCommitMessage('')
+                          onCommit(data, message)
+                        },
+                      }, t(canCommit ? 'action.commitConfirm' : 'action.pushConfirm')),
+                      h(Btn, { kind: 'quiet', onClick: () => setCommitting(false) }, t('confirm.cancel')),
+                    ),
                   )
                 : null,
 
@@ -2100,6 +2208,40 @@ window.__ModuleLoader__.load({
           await loadOverview({ force: true })
         },
         [loadOverview, setError, status, t],
+      )
+
+      /**
+       * Commit the working tree, and push it.
+       *
+       * The step 构建 and 发布 both depend on and neither can substitute for: a workflow
+       * runs the pushed commit, so work that is still only on this disk is invisible to
+       * both of them. `message === ''` means "push what is already committed".
+       */
+      const onCommit = React.useCallback(
+        async (data, message) => {
+          const key = `commit:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson('/commit', { repo: data.repo, message }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError('timeout')
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            await loadOverview({ force: true })
+            return
+          }
+          const value = result.payload.value ?? {}
+          const branch = String(value.branch ?? '')
+          setNotice(value.committed === true
+            ? t('state.committed', { count: String(Array.isArray(value.files) ? value.files.length : 0), branch })
+            : t('state.pushed', { count: String(value.carried ?? 0), branch }))
+          await loadOverview({ force: true })
+        },
+        [loadOverview, setError, t],
       )
 
       /**
@@ -2631,6 +2773,7 @@ window.__ModuleLoader__.load({
                 busy,
                 onAction,
                 onBump: () => onBump(data),
+                onCommit: (row, message) => { void onCommit(row, message) },
                 onPublish: (tag) => onPublish(data.repo, tag),
                 onUpdate: () => { void onUpdate(data) },
                 npm: npmByRepo.get(data.repo) ?? null,
@@ -2651,6 +2794,7 @@ window.__ModuleLoader__.load({
                 busy,
                 onAction,
                 onBump: () => {},
+                onCommit: () => {},
                 onPublish: () => {},
                 logs: null,
                 onLogs: async () => {},

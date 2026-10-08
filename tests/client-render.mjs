@@ -1164,5 +1164,104 @@ function previewFixture(overrides) {
   check('the sign-in is offered right there', hasButton(panel, '登录 B 站'))
 }
 
+/* -- 18. 提交, 构建, 发布 — the row in the order the work happens -------------
+   Both of the other two act on what is on GitHub: a release builds the pushed commit
+   and a build runs it, so neither can see work that is still only on this disk. 提交
+   is the step that makes the other two able to see it, which is why it comes first and
+   why it is never the primary button. */
+{
+  /** The button labels of a tree, in the order they are drawn. */
+  function buttonTexts(node, out = []) {
+    if (node === null || typeof node !== 'object') return out
+    if (Array.isArray(node)) {
+      for (const child of node) buttonTexts(child, out)
+      return out
+    }
+    if (node.type === 'button') out.push(textOf(node).trim())
+    buttonTexts(node.children, out)
+    return out
+  }
+
+  /** The first button carrying this label, so its props can be read. */
+  function findButton(node, label) {
+    if (node === null || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = findButton(child, label)
+        if (found !== null) return found
+      }
+      return null
+    }
+    if (node.type === 'button' && textOf(node).includes(label)) return node
+    return findButton(node.children, label)
+  }
+
+  /* A checkout with two changes waiting: the state the button exists for. */
+  const dirtyPanel = await renderPanel([repoFixture({ local: { ...repoFixture().local, dirty: 2, ahead: 0, files: ['package.json', 'README.md'] } })])
+  const labels = buttonTexts(dirtyPanel)
+  const at = (label) => labels.findIndex((text) => text.includes(label))
+  check('the row offers 提交', at('提交') !== -1, labels.join(' | '))
+  check('提交 comes before 构建', at('提交') !== -1 && at('构建') !== -1 && at('提交') < at('构建'), labels.join(' | '))
+  check('构建 comes before 发布', at('构建') !== -1 && at('发布') !== -1 && at('构建') < at('发布'), labels.join(' | '))
+  check('提交 is not the primary button', findButton(dirtyPanel, '提交')?.props?.kind === undefined, String(findButton(dirtyPanel, '提交')?.props?.kind))
+
+  const { tree: dirtyOpen } = await expandFirstRow(dirtyPanel)
+  check('the row explains what 提交 would commit', findButton(dirtyOpen, '提交')?.props?.title === '将提交 2 个改动：', String(findButton(dirtyOpen, '提交')?.props?.title))
+  const asked = clickButton(dirtyOpen, '提交')
+  const confirm = await rerender()
+  /* `git add -A` is the one action here that can sweep in a file the author never meant
+     to publish, so the names are on screen before the button, not after it. */
+  check('the confirmation names the files that would be committed', textOf(confirm).includes('package.json') && textOf(confirm).includes('README.md'), textOf(confirm).replace(/\s+/g, ' ').slice(-260))
+  /* Found by its placeholder: a placeholder is a prop, not text, so the message field
+     is invisible to every text assertion in this file. */
+  check('the confirmation asks for a message', inputValue(confirm, '提交信息') === '', String(inputValue(confirm, '提交信息')))
+  check('the commit button is held until there is a message', findButton(confirm, '确认提交')?.props?.disabled === true, String(findButton(confirm, '确认提交')?.props?.disabled))
+  check('asking to commit found its button', asked === true)
+
+  typeInto(confirm, '提交信息', 'feat: notes')
+  const typed = await rerender()
+  check('a message releases the commit button', findButton(typed, '确认提交')?.props?.disabled === false, String(findButton(typed, '确认提交')?.props?.disabled))
+
+  fixture['/commit'] = { ok: true, value: { repo: 'dsh-plugin-restart', branch: 'main', committed: true, commit: 'a'.repeat(40), files: ['package.json', 'README.md'], carried: 0 } }
+  clickButton(typed, '确认提交')
+  const afterCommit = await rerender()
+  check('the commit is sent to the Host', calls.includes('/commit'), calls.join(','))
+  check('the panel says what it committed, and where', textOf(afterCommit).includes('已提交并推送到 main'), textOf(afterCommit).replace(/\s+/g, ' ').slice(-240))
+}
+
+/* The other half of the same trap: the work is committed and has never left this
+   machine, which a release cannot see either. The button becomes 推送. */
+{
+  const aheadPanel = await renderPanel([repoFixture({ local: { ...repoFixture().local, dirty: 0, ahead: 3 } })])
+  check('a clean but unpushed branch offers 推送 instead', hasButton(aheadPanel, '推送') === true, textOf(aheadPanel).replace(/\s+/g, ' ').slice(0, 200))
+
+  const { tree } = await expandFirstRow(aheadPanel)
+  clickButton(tree, '推送')
+  const confirm = await rerender()
+  check('the push confirmation counts the commits and names the branch', textOf(confirm).includes('把 3 个本地提交推送到 main？'), textOf(confirm).replace(/\s+/g, ' ').slice(-200))
+  check('pushing needs no message', hasButton(confirm, '确认推送') === true)
+}
+
+/* Nothing to do: the button is there, disabled, and says why — rather than offering a
+   call whose only outcome is a refusal. */
+{
+  const cleanPanel = await renderPanel([repoFixture({ local: { ...repoFixture().local, dirty: 0, ahead: 0 } })])
+  const button = (function find(node) {
+    if (node === null || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = find(child)
+        if (found !== null) return found
+      }
+      return null
+    }
+    if (node.type === 'button' && textOf(node).includes('提交')) return node
+    return find(node.children)
+  })(cleanPanel)
+
+  check('a clean, in-sync checkout cannot be committed', button?.props?.disabled === true, String(button?.props?.disabled))
+  check('and the button says why', String(button?.props?.title ?? '').includes('没有可提交或推送的东西'), String(button?.props?.title))
+}
+
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
 if (failed > 0) process.exit(1)

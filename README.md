@@ -14,7 +14,11 @@
 
 也就是说：**一个包，两条分发渠道**。GitHub Release 给人下载与审阅，npm 让 `dsh plugin add <名字>` 一条命令装完。
 
-面板上能直接做的动作：`构建`（触发 `ci.yml`）、`发布`（触发 `release.yml`，默认产出草稿）、`升版本并发布`、`公开发布草稿`、`推送到 npm vX`（+ 在面板里写 npm token）、`装 Release vX` / `更新到 vX`、`重跑`、`取消`、`看失败日志`，以及更新之后的 `立即重启 DSH`。
+面板上能直接做的动作，**行上的顺序就是工作的顺序**：`提交`（`git add -A` + commit + push）、`构建`（触发 `ci.yml`）、`发布`（触发 `release.yml`，默认产出草稿）、`升版本并发布`、`公开发布草稿`、`推送到 npm vX`（+ 在面板里写 npm token）、`装 Release vX` / `更新到 vX`、`重跑`、`取消`、`看失败日志`，以及更新之后的 `立即重启 DSH`。
+
+**`提交` 为什么排在最前面**：`构建` 和 `发布` 都作用于 **GitHub 上的那个提交**——workflow 跑的是推送上去的 commit。所以只存在于工作区、或只存在于本机的改动，它们**都看不见**。面板一直在警告这件事（脏工作区那行、`↑N` 那个 chip），在这之前唯一的出路是开终端。它**永远不是主按钮**：它是步骤，不是目的。
+
+`提交` 一个按钮两种含义，因为两者是同一个陷阱的两半：**有改动** → 提交并推送；**工作区干净但领先上游** → 只推送（按钮此时显示`推送`）；**两者皆无** → 按钮禁用并写明原因。`git add -A` 是刻意的（发布也需要新增文件），所以确认框会把**待提交的文件名列出来**——"7 个改动"可能是你要的 3 个加上你没见过的 4 个。提交信息为空时确认按钮保持禁用。
 
 ## 安装
 
@@ -280,8 +284,9 @@ npm 这一侧是同一条原则的两个面：**包管理器**复用 Host 自己
 ## 安全边界
 
 - 所有路由都是 **POST + 仅回环 + 同源**（`isTrustedRequest`），与宿主设置桥对自家回环路由的信任策略一致：只有「来自本机」且「来自这个 Host 服务的文档」的请求能过。这些路由以本机 GitHub 凭据行事，所以不能只按端口放行。
-- 只读部分：状态、概览、运行、日志、npm 状态。**有副作用的是八条**：`dispatch`、`run-action`、`release-action`、`version-bump`、`update`、`restart`、`npm-login`、`npm-publish`。
-- `version-bump` 是唯一会**写本地检出**的路由：只改 `package.json` 的版本行，然后 `git commit` 只提交这一个文件并推送当前分支。工作区不干净、分支没有上游、或落后于上游时它直接拒绝，不做任何写入。
+- 只读部分：状态、概览、运行、日志、npm 状态。**有副作用的是九条**：`dispatch`、`run-action`、`release-action`、`version-bump`、`commit`、`update`、`restart`、`npm-login`、`npm-publish`。
+- `version-bump` 只改 `package.json` 的版本行，然后 `git commit` **只提交这一个文件**并推送当前分支。工作区不干净、分支没有上游、或落后于上游时它直接拒绝，不做任何写入。
+- `commit` 是**唯一会提交整个工作区**的路由（`git add -A` + commit + push）。工作区干净且与上游同步时回 `409 nothing-to-commit`；`message` 为空且确实有改动时回 `400 message-required`（先拒绝，不写任何东西）；分支没有上游时回 `409 no-upstream`——发布构建的是 GitHub 上的提交，推不上去就等于没提交。**提交信息为空但工作区干净**是合法用法，含义是「把已经提交的推上去」。
 - `update` 是唯一会**改 profile 依赖**的路由：下载 Release 里的 tgz，再交给 Host 的插件管理器安装；失败时由管理器还原 `package.json` 与 lockfile。
 - `restart` 自己不重启任何东西：它把请求转发到同一个 Host 上的 `/api/dsh-restart/restart`，由 `dsh-plugin-restart` 决定停哪个进程、用什么命令拉起来。没有那个插件就回 `501 restart-unavailable`。
 - `npm-login` 是唯一会**写用户级配置**的路由：把 token 合并进 `~/.npmrc`（其他行原样保留，旧版本留 `.bak`）。token **绝不出现在任何响应、日志或状态里**——`npm-status` 只回答"有没有那一行"，不回答"那行是什么"。

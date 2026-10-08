@@ -73,6 +73,9 @@ const EXPECTED = [
   // that belongs to another commit, so the console has to be able to move the
   // version forward itself.
   '/api/dsh-cicd/version-bump',
+  // The step before 构建 and 发布: a release builds the PUSHED commit, so the console
+  // that can cut a release has to be able to get the work onto GitHub first.
+  '/api/dsh-cicd/commit',
   '/api/dsh-cicd/logs',
   // Taking the release, not only cutting it: the artifact is installed into the
   // profile through the Host's own plugin manager, and the restart is forwarded to

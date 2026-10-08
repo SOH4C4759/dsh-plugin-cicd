@@ -664,6 +664,31 @@ function firstLine(value) {
   return ''
 }
 
+/** How many changed file names the overview carries; the count is carried in full. */
+const LOCAL_FILE_LIMIT = 20
+
+/**
+ * The path out of one `git status --porcelain` line.
+ *
+ * V1 format is `XY <path>`, quoted when the name holds unusual bytes, and a rename
+ * reads `XY <old> -> <new>`. Both are passed through rather than prettified: this list
+ * exists so a person recognises what is about to be committed, and a path this code
+ * rewrote is one they would not recognise.
+ *
+ * @param {string} line - one trimmed porcelain line.
+ * @returns {string} what to show.
+ */
+export function statusPath(line) {
+  /*
+   * No leading trim. Porcelain v1 is `XY <path>`, and for an unstaged modification X is
+   * a SPACE — ` M package.json`. Trimming first turns that into `M package.json`, whose
+   * first three characters then eat the `p` of the path: the list promised to help
+   * someone recognise what they are about to commit would read `ackage.json`.
+   */
+  const raw = String(line).replace(/\r$/, '')
+  return raw.length <= 3 ? raw.trim() : raw.slice(3).trim()
+}
+
 /**
  * The one line of a failed command's output that explains it.
  *
@@ -1125,11 +1150,26 @@ export async function readLocalState(localPath, timeoutMs) {
     }
   }
 
+  /* `\r` only: a leading space is the X half of `XY`, so trimming here would throw
+     away the status of every unstaged change (see `statusPath`). */
+  const lines = typeof status === 'string'
+    ? status.split('\n').map((line) => line.replace(/\r$/, '')).filter((line) => line.trim() !== '')
+    : null
+
   return {
     available: true,
     branch: branch ?? null,
     head: typeof head === 'string' && head !== '' ? head : null,
-    dirty: typeof status === 'string' ? status.split('\n').filter((line) => line.trim() !== '').length : null,
+    dirty: lines === null ? null : lines.length,
+    /*
+     * The names, not just the count.
+     *
+     * 提交 commits the working tree with `git add -A`, and a count is not enough to
+     * press that button honestly — "7 changes" could be the three files you meant and
+     * four you have never seen. Capped, because this rides in the overview the panel
+     * polls: the count is the number that matters, these are the ones that fit.
+     */
+    files: lines === null ? null : lines.slice(0, LOCAL_FILE_LIMIT).map(statusPath),
     ahead,
     behind,
     upstreamKnown: ahead !== null,
@@ -2702,6 +2742,125 @@ export function apply(ctx, rawConfig) {
         pushed: true,
         /** Local commits that this push also delivered, so the panel can say so. */
         carried: Number.isInteger(state.ahead) ? state.ahead : 0,
+      },
+    })
+  }
+
+  /**
+   * Commit the working tree, and push it.
+   *
+   * This is the way out of the trap the panel spends a lot of words on: a release
+   * builds the PUSHED commit, so work that is only in the working tree — or only on
+   * this machine — is silently absent from the released package. The console could
+   * already tell you that; until now the way to fix it was a terminal.
+   *
+   * `git add -A` on purpose: a release needs new files too, and the panel lists them
+   * before the button is pressed (`local.files`), so this is not a blind sweep. An
+   * empty message means "push what is already committed", which is the other half of
+   * the same trap — a commit that never left the machine is equally absent.
+   *
+   * The order is commit first, push second, and a push that fails still reports what
+   * was committed, because "your work is safe locally" and "the push failed" are two
+   * different things to be told.
+   */
+  const commitHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const target = findEntry(live(), body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const localPath = target.entry.localPath
+    if (localPath === '') {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'no-checkout',
+        message: 'this repository has no local checkout, so there is nothing here to commit',
+        value: { repo: target.entry.repo },
+      })
+      return
+    }
+    const state = await readLocalState(localPath, config.requestTimeoutMs)
+    if (state.available !== true) {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'no-checkout',
+        message: `cannot commit from here: ${state.reason ?? 'the local checkout is unusable'}`,
+        value: { repo: target.entry.repo },
+      })
+      return
+    }
+    const dirty = Number.isInteger(state.dirty) ? state.dirty : 0
+    const ahead = Number.isInteger(state.ahead) ? state.ahead : 0
+    if (dirty === 0 && ahead === 0) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'nothing-to-commit',
+        message: 'the checkout is clean and in sync with its upstream; there is nothing to commit or push',
+        value: { repo: target.entry.repo, dirty, ahead },
+      })
+      return
+    }
+    if (state.upstreamKnown !== true || typeof state.branch !== 'string' || state.branch === '') {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'no-upstream',
+        message: `branch ${state.branch ?? '(unknown)'} has no upstream, so nothing could be pushed — the release builds what is on GitHub, not what is on this disk`,
+        value: { repo: target.entry.repo, branch: state.branch ?? null },
+      })
+      return
+    }
+    const message = text(body?.message).trim()
+    if (dirty > 0 && message === '') {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'message-required',
+        message: 'a commit needs a message',
+        value: { repo: target.entry.repo },
+      })
+      return
+    }
+
+    const git = (args) => runTool('git', ['-C', localPath, ...args], config.requestTimeoutMs)
+    const files = Array.isArray(state.files) ? state.files : []
+    if (dirty > 0) {
+      const staged = await git(['add', '-A'])
+      if (staged.ok !== true) {
+        writeJson(res, 502, { ok: false, code: 'git-failed', message: commandFailureLine(staged, 'git add failed') })
+        return
+      }
+      const committed = await git(['commit', '-m', message])
+      if (committed.ok !== true) {
+        writeJson(res, 502, { ok: false, code: 'git-failed', message: commandFailureLine(committed, 'git commit failed') })
+        return
+      }
+    }
+    const head = await git(['rev-parse', 'HEAD'])
+    const pushed = await git(['push', 'origin', state.branch])
+    cache = null
+    if (pushed.ok !== true) {
+      writeJson(res, 502, {
+        ok: false,
+        code: 'push-failed',
+        message: dirty > 0
+          ? `committed locally, but the push failed: ${commandFailureLine(pushed, 'git push failed')}`
+          : `the push failed: ${commandFailureLine(pushed, 'git push failed')}`,
+        value: { repo: target.entry.repo, branch: state.branch, committed: dirty > 0, files },
+      })
+      return
+    }
+    writeJson(res, 200, {
+      ok: true,
+      value: {
+        repo: target.entry.repo,
+        branch: state.branch,
+        committed: dirty > 0,
+        commit: head.ok === true ? head.stdout.trim() : null,
+        /** What was committed, so the panel can name it rather than say "done". */
+        files,
+        /** Local commits this push also delivered — the ones a release was missing. */
+        carried: ahead,
       },
     })
   }
@@ -4413,6 +4572,9 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/run-action`, runActionHandler],
     [`${ROUTE_PREFIX}/release-action`, releaseActionHandler],
     [`${ROUTE_PREFIX}/version-bump`, versionBumpHandler],
+    // The step before 构建 and 发布: a release builds the pushed commit, so the console
+    // that can cut a release should be able to get the work to GitHub in the first place.
+    [`${ROUTE_PREFIX}/commit`, commitHandler],
     [`${ROUTE_PREFIX}/logs`, logsHandler],
     // Taking the release, not just cutting it: the artifact is fetched and handed
     // to the Host's own plugin manager, and the restart is left to the plugin that

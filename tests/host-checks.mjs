@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, packumentUrl, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
+import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, packumentUrl, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, statusPath, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -452,6 +452,15 @@ check('empty output is unknown, not a crash', classifyPublishFailure('') === 'un
    minutes after a successful publish the panel still described the previous state and
    kept offering a push the registry would refuse. */
 check('the packument is read from the origin, not a five-minute-old CDN copy', packumentUrl('https://registry.npmjs.org/', 'dsh-plugin-restart') === 'https://registry.npmjs.org/dsh-plugin-restart?write=true')
+
+/* The names a 提交 would carry, read out of `git status --porcelain`. This list is what
+   makes `git add -A` an informed action rather than a blind sweep, so the two shapes
+   that actually occur — a status prefix, and a rename — have to come out readable. */
+check('a modified file keeps only its path', statusPath(' M package.json') === 'package.json')
+check('an untracked file keeps only its path', statusPath('?? notes.md') === 'notes.md')
+check('a staged file keeps only its path', statusPath('A  src/new.js') === 'src/new.js')
+check('a rename is passed through as git spelled it', statusPath('R  old.md -> new.md') === 'old.md -> new.md')
+check('a line too short to hold a path is not sliced into nonsense', statusPath('??') === '??')
 check('a registry that already carries a query keeps the name out of it', packumentUrl('https://r.example/npm/?a=1', 'x') === 'https://r.example/npm/x?a=1&write=true')
 
 /* The line the panel shows. Captured from a real `pnpm publish` of an

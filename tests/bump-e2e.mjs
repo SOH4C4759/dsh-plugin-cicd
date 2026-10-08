@@ -255,6 +255,98 @@ async function callRoutes(routes, path, body) {
   check('an unreadable preflight does not block the dispatch', answer.payload?.code !== 'version-taken', `${String(answer.status)} ${String(answer.payload?.code ?? answer.payload?.message ?? '')}`)
 }
 
+/* -- 8. 提交: the step 构建 and 发布 cannot do without ------------------------ */
+/*
+ * A release builds the PUSHED commit, so work that is only in the working tree — or
+ * only on this machine — is silently absent from the released package. That is what
+ * this route exists to fix, and it is the only action in the plugin that commits
+ * everything, so both halves are checked against a real origin.
+ */
+{
+  const checkout = makeCheckout()
+  writeFileSync(join(checkout.work, 'notes.md'), 'a file nobody tracked before\n', 'utf8')
+  writeFileSync(checkout.manifest, manifestFor('1.0.1'), 'utf8')
+  const routes = mountFor(checkout)
+  const answer = await callRoutes(routes, '/api/dsh-cicd/commit', { repo: 'octocat/fixture', message: 'docs: a note' })
+
+  check('a dirty checkout commits and pushes', answer.status === 200 && answer.payload?.ok === true, JSON.stringify(answer.payload?.value ?? answer.payload))
+  check('the commit reached the origin', git(checkout.work, ['log', '-1', '--pretty=%s', 'origin/main']) === 'docs: a note', git(checkout.work, ['log', '-1', '--pretty=%s', 'origin/main']))
+  check('the working tree is clean afterwards', git(checkout.work, ['status', '--porcelain']) === '')
+  /* `add -A`, not `add -u`: a release needs the new files too, and a commit that
+     quietly left one behind is the same trap one level down. */
+  check('an untracked file is included, not left behind', git(checkout.work, ['ls-tree', '-r', '--name-only', 'HEAD']).includes('notes.md'))
+  check('the edit to a tracked file is included', git(checkout.work, ['show', 'HEAD:package.json']).includes('1.0.1'))
+  check('the answer lists what was committed', Array.isArray(answer.payload?.value?.files) && answer.payload.value.files.length === 2, JSON.stringify(answer.payload?.value?.files))
+  check('the answer names the branch it pushed', answer.payload?.value?.branch === 'main', String(answer.payload?.value?.branch))
+}
+
+/* The message is the one thing this route cannot invent: an empty one is refused
+   before anything is written, and the changes stay where they were. */
+{
+  const checkout = makeCheckout()
+  writeFileSync(join(checkout.work, 'notes.md'), 'x\n', 'utf8')
+  const routes = mountFor(checkout)
+  const answer = await callRoutes(routes, '/api/dsh-cicd/commit', { repo: 'octocat/fixture', message: '   ' })
+
+  check('a commit with no message is refused', answer.status === 400 && answer.payload?.code === 'message-required', `${String(answer.status)} ${String(answer.payload?.code)}`)
+  check('the refusal created no commit', git(checkout.work, ['log', '-1', '--pretty=%s']) === 'init')
+  check('the refusal left the change in place', git(checkout.work, ['status', '--porcelain']) !== '')
+}
+
+/* Clean and in sync: there is nothing to do, and the route says that rather than
+   creating an empty commit or pushing nothing. */
+{
+  const checkout = makeCheckout()
+  const routes = mountFor(checkout)
+  const answer = await callRoutes(routes, '/api/dsh-cicd/commit', { repo: 'octocat/fixture', message: 'nothing to say' })
+
+  check('a clean, in-sync checkout has nothing to commit', answer.status === 409 && answer.payload?.code === 'nothing-to-commit', `${String(answer.status)} ${String(answer.payload?.code)}`)
+  check('nothing was committed for it', git(checkout.work, ['log', '-1', '--pretty=%s']) === 'init')
+}
+
+/* The other half of the same trap: the work IS committed, and it has never left this
+   machine — which a release cannot see either. An empty message means exactly that. */
+{
+  const checkout = makeCheckout()
+  writeFileSync(join(checkout.work, 'notes.md'), 'x\n', 'utf8')
+  git(checkout.work, ['add', '-A'])
+  git(checkout.work, ['commit', '-m', 'local only'])
+  const routes = mountFor(checkout)
+  const answer = await callRoutes(routes, '/api/dsh-cicd/commit', { repo: 'octocat/fixture', message: '' })
+
+  check('a clean but unpushed branch is pushed', answer.status === 200 && answer.payload?.ok === true, JSON.stringify(answer.payload?.value ?? answer.payload))
+  check('it reports that it committed nothing new', answer.payload?.value?.committed === false)
+  check('it says how many local commits it carried', answer.payload?.value?.carried === 1, String(answer.payload?.value?.carried))
+  check('the local commit reached the origin', git(checkout.work, ['log', '-1', '--pretty=%s', 'origin/main']) === 'local only')
+}
+
+/* No upstream: the push could only fail, so the refusal names the reason instead. */
+{
+  const checkout = makeCheckout()
+  git(checkout.work, ['checkout', '-b', 'solo'])
+  writeFileSync(join(checkout.work, 'notes.md'), 'x\n', 'utf8')
+  const routes = mountFor(checkout)
+  const answer = await callRoutes(routes, '/api/dsh-cicd/commit', { repo: 'octocat/fixture', message: 'solo work' })
+
+  check('a branch with no upstream is refused', answer.status === 409 && answer.payload?.code === 'no-upstream', `${String(answer.status)} ${String(answer.payload?.code)}`)
+  check('the refusal created no commit', git(checkout.work, ['log', '-1', '--pretty=%s']) === 'init')
+}
+
+/* No checkout at all, the same shape as the bump refusal above. */
+{
+  const configFile = join(scratch, 'repos-nolocal-commit.json')
+  writeFileSync(configFile, JSON.stringify({ owner: 'octocat', repos: [{ repo: 'octocat/fixture' }] }), 'utf8')
+  const routes = new Map()
+  module.apply({
+    effect: (fn) => fn,
+    logger: { info: () => {} },
+    webServer: { register: ({ path, handler }) => { routes.set(path, handler); return () => {} } },
+  }, { owner: 'octocat', configFile })
+  const answer = await callRoutes(routes, '/api/dsh-cicd/commit', { repo: 'octocat/fixture', message: 'x' })
+
+  check('a repository with no checkout is refused here too', answer.status === 400 && answer.payload?.code === 'no-checkout', `${String(answer.status)} ${String(answer.payload?.code)}`)
+}
+
 await new Promise((settle) => { rmSync(scratch, { recursive: true, force: true }); settle() })
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
 if (failed > 0) process.exit(1)
