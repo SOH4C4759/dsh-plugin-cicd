@@ -1302,12 +1302,42 @@ function previewFixture(overrides) {
 
   const rowText = (grid, index) => Array.from(grid[index]).join('')
 
+  /* Signed in — which the fixture is by default. Every control that exists to OBTAIN a
+     credential must be gone: the page said 已登录：<name> and then, directly under it,
+     invited the reader to sign in again. The block was gated on "is a sign-in running"
+     and never on the credential, so a successful sign-in changed the status line and
+     nothing else. */
+  fixture = {
+    '/status': { ok: true, value: baseStatus.value },
+    '/bilibili-status': { ok: true, value: biliValue() },
+  }
+  values.clear()
+  effectSlots.clear()
+  calls.length = 0
+  const signedIn = await renderSettings('bilibili')
+  check('a signed-in page says who is signed in', textOf(signedIn).includes('已登录 白衣为卿曲'), textOf(signedIn).replace(/\s+/g, ' ').slice(0, 200))
+  check('and offers no sign-in prompt', hasButton(signedIn, '登录 B 站') === false, textOf(signedIn).replace(/\s+/g, ' ').slice(0, 240))
+  check('and no hint inviting a scan', textOf(signedIn).includes('点一下会生成一个二维码') === false)
+  check('and no paste field, which is another way to obtain one', inputValue(signedIn, 'SESSDATA') === null && hasButton(signedIn, '保存并验证') === false)
+  check('the one action left is to stop being signed in', hasButton(signedIn, '退出 B 站登录'))
+
   const url = 'https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&qrcode_key=fda852ed16a061fae96dd764c797168f&from='
+  const signedOut = {
+    ...biliValue().credential,
+    state: 'none',
+    account: null,
+    hasSession: false,
+    hasCsrf: false,
+    message: '',
+  }
   fixture = {
     '/status': { ok: true, value: baseStatus.value },
     '/bilibili-status': {
       ok: true,
-      value: biliValue({ login: { state: 'waiting', url, startedAt: '2026-10-08T01:00:00Z', expiresAt: '2026-10-08T01:03:00Z', scanned: false, message: '' } }),
+      value: biliValue({
+        credential: signedOut,
+        login: { state: 'waiting', url, startedAt: '2026-10-08T01:00:00Z', expiresAt: '2026-10-08T01:03:00Z', scanned: false, message: '' },
+      }),
     },
   }
   values.clear()
@@ -1341,7 +1371,10 @@ function previewFixture(overrides) {
      code that encodes something else. */
   fixture['/bilibili-status'] = {
     ok: true,
-    value: biliValue({ login: { state: 'waiting', url: `https://example.com/${'a'.repeat(260)}`, startedAt: '2026-10-08T01:00:00Z', expiresAt: '2026-10-08T01:03:00Z', scanned: false, message: '' } }),
+    value: biliValue({
+      credential: signedOut,
+      login: { state: 'waiting', url: `https://example.com/${'a'.repeat(260)}`, startedAt: '2026-10-08T01:00:00Z', expiresAt: '2026-10-08T01:03:00Z', scanned: false, message: '' },
+    }),
   }
   values.clear()
   effectSlots.clear()

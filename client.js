@@ -3190,6 +3190,13 @@ window.__ModuleLoader__.load({
 
       if (credential === null) return null
       const state = String(credential.state ?? 'none')
+      /**
+       * A credential that answered the account endpoint. Everything below that exists
+       * to GET one — the scan prompt, the paste field and their hints — is pointless
+       * once there is one, and showing it anyway makes the page argue with its own
+       * status line. The only action left is to stop being signed in.
+       */
+      const ready = state === 'ready'
       const stateText = (() => {
         if (state === 'ready') {
           return credential.account?.uname
@@ -3224,45 +3231,57 @@ window.__ModuleLoader__.load({
             ? h('span', { className: 'dsc-quiet' }, t('bili.credential.external', { path: String(credential.configuredPath ?? '') }))
             : null,
 
-          running
-            ? h(
-                React.Fragment,
-                null,
-                /*
-                 * The code itself. The sign-in hands back a URL whose whole purpose is to
-                 * be SCANNED — and the panel used to answer that with a link, while its
-                 * own hint told the reader to scan something. Drawing it here is what
-                 * makes "scan it with the phone" true; the link stays beside it for the
-                 * browser that is already signed in, which is the other way through.
-                 */
-                qr === null
-                  ? h('span', { className: 'dsc-quiet' }, login.url ? t('bili.qrTooLong') : null)
-                  : h(
-                      'div',
-                      { className: 'dsc-scan' },
-                      h(QrCode, { code: qr, label: t('bili.qrLabel') }),
-                      h('span', { className: 'dsc-quiet' }, t('bili.qrHint')),
-                    ),
-                h(
+          /*
+           * The ways to OBTAIN a credential are for not having one, and a signed-in page
+           * that still says 登录 B 站 — directly under 已登录：<name> — is the panel
+           * contradicting itself. It did exactly that: this block was gated on "is a
+           * sign-in running", never on the credential, so a fresh sign-in left the
+           * invitation to sign in again on screen as if nothing had happened.
+           *
+           * `running` still wins, because a sign-in that is mid-flight should show its
+           * code even in the instant before the credential lands.
+           */
+          ready
+            ? null
+            : running
+              ? h(
+                  React.Fragment,
+                  null,
+                  /*
+                   * The code itself. The sign-in hands back a URL whose whole purpose is
+                   * to be SCANNED, and drawing it here is what makes "scan it with the
+                   * phone" true rather than merely stated.
+                   */
+                  qr === null
+                    ? h('span', { className: 'dsc-quiet' }, login.url ? t('bili.qrTooLong') : null)
+                    : h(
+                        'div',
+                        { className: 'dsc-scan' },
+                        h(QrCode, { code: qr, label: t('bili.qrLabel') }),
+                        h('span', { className: 'dsc-quiet' }, t('bili.qrHint')),
+                      ),
+                  h(
+                    'div',
+                    { className: 'dsc-setup-line' },
+                    h('span', { className: 'dsc-grow' }, login.state === 'scanned' ? t('bili.waitingScanned') : t('bili.waiting')),
+                    /*
+                     * No "open the sign-in page" button. That URL is the H5 page for a
+                     * PHONE, and opening it in a desktop browser offers the Bilibili app's
+                     * APK instead of a sign-in — a download, not a login. The code above is
+                     * the way through; the paste route below is the fallback.
+                     */
+                    h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void cancel() } }, t('bili.cancelSignIn')),
+                  ),
+                )
+              : h(
                   'div',
                   { className: 'dsc-setup-line' },
-                  h('span', { className: 'dsc-grow' }, login.state === 'scanned' ? t('bili.waitingScanned') : t('bili.waiting')),
-                  /*
-                   * No "open the sign-in page" button. That URL is the H5 page for a
-                   * PHONE, and opening it in a desktop browser offers the Bilibili app's
-                   * APK instead of a sign-in — a download, not a login. The code above is
-                   * the way through; the paste route below it is the fallback.
-                   */
-                  h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void cancel() } }, t('bili.cancelSignIn')),
+                  h(Btn, { kind: 'primary', disabled: busy !== '', onClick: () => { void start() } }, busy === 'bili-login' ? '…' : t('bili.signIn')),
+                  h('span', { className: 'dsc-quiet' }, t('bili.signIn.hint')),
                 ),
-              )
-            : h(
-                'div',
-                { className: 'dsc-setup-line' },
-                h(Btn, { kind: 'primary', disabled: busy !== '', onClick: () => { void start() } }, busy === 'bili-login' ? '…' : t('bili.signIn')),
-                h('span', { className: 'dsc-quiet' }, t('bili.signIn.hint')),
-              ),
-          state === 'ready'
+          /* Signed in: the one action left is to stop being signed in, which is also how
+             someone switches accounts. */
+          ready
             ? h(
                 'div',
                 { className: 'dsc-setup-line' },
@@ -3270,37 +3289,45 @@ window.__ModuleLoader__.load({
               )
             : null,
 
-          h('span', { className: 'dsc-setup-strong' }, t('bili.paste.title')),
-          h('span', { className: 'dsc-quiet' }, t('bili.paste.hint')),
-          h(
-            'div',
-            { className: 'dsc-setup-line' },
-            h('input', {
-              className: 'dsc-input',
-              type: 'password',
-              autoComplete: 'off',
-              spellCheck: 'false',
-              placeholder: t('bili.paste.sessdata'),
-              'aria-label': t('bili.paste.sessdata'),
-              value: sessdata,
-              onChange: (event) => setSessdata(String(event?.target?.value ?? '')),
-            }),
-            h('input', {
-              className: 'dsc-input',
-              type: 'password',
-              autoComplete: 'off',
-              spellCheck: 'false',
-              placeholder: t('bili.paste.csrf'),
-              'aria-label': t('bili.paste.csrf'),
-              value: csrf,
-              onChange: (event) => setCsrf(String(event?.target?.value ?? '')),
-            }),
-            h(Btn, {
-              kind: 'primary',
-              disabled: busy !== '' || sessdata.trim() === '' || csrf.trim() === '',
-              onClick: () => { void save() },
-            }, busy === 'bili-paste' ? '…' : t('bili.paste.save')),
-          ),
+          ready
+            ? null
+            : h(
+                React.Fragment,
+                null,
+                h('span', { className: 'dsc-setup-strong' }, t('bili.paste.title')),
+                h('span', { className: 'dsc-quiet' }, t('bili.paste.hint')),
+              ),
+          ready
+            ? null
+            : h(
+                'div',
+                { className: 'dsc-setup-line' },
+                h('input', {
+                  className: 'dsc-input',
+                  type: 'password',
+                  autoComplete: 'off',
+                  spellCheck: 'false',
+                  placeholder: t('bili.paste.sessdata'),
+                  'aria-label': t('bili.paste.sessdata'),
+                  value: sessdata,
+                  onChange: (event) => setSessdata(String(event?.target?.value ?? '')),
+                }),
+                h('input', {
+                  className: 'dsc-input',
+                  type: 'password',
+                  autoComplete: 'off',
+                  spellCheck: 'false',
+                  placeholder: t('bili.paste.csrf'),
+                  'aria-label': t('bili.paste.csrf'),
+                  value: csrf,
+                  onChange: (event) => setCsrf(String(event?.target?.value ?? '')),
+                }),
+                h(Btn, {
+                  kind: 'primary',
+                  disabled: busy !== '' || sessdata.trim() === '' || csrf.trim() === '',
+                  onClick: () => { void save() },
+                }, busy === 'bili-paste' ? '…' : t('bili.paste.save')),
+              ),
         ),
       )
     }
