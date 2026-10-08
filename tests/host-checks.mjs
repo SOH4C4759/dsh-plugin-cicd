@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, packumentUrl, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, statusPath, updateState, upsertAuthToken, versionFromTag } from '../index.js'
+import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, defaultCloneUrl, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, packumentUrl, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, statusPath, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -462,6 +462,15 @@ check('a staged file keeps only its path', statusPath('A  src/new.js') === 'src/
 check('a rename is passed through as git spelled it', statusPath('R  old.md -> new.md') === 'old.md -> new.md')
 check('a line too short to hold a path is not sliced into nonsense', statusPath('??') === '??')
 check('a registry that already carries a query keeps the name out of it', packumentUrl('https://r.example/npm/?a=1', 'x') === 'https://r.example/npm/x?a=1&write=true')
+
+/* The address a 克隆 would use, derived rather than demanded: being asked to paste the
+   clone URL of a repository the Host can already name is exactly the kind of step this
+   console exists to remove. */
+check('an owner/repo id gives its own address', defaultCloneUrl('', 'SOH4C4759/dsh-ui-sound') === 'https://github.com/SOH4C4759/dsh-ui-sound.git')
+check('a bare name uses the configured owner', defaultCloneUrl('octocat', 'Hello-World') === 'https://github.com/octocat/Hello-World.git')
+check('a bare name with no owner has no address to guess at', defaultCloneUrl('', 'Hello-World') === '')
+check('no repository, no address', defaultCloneUrl('octocat', '') === '' && defaultCloneUrl(undefined, undefined) === '')
+check('a stray slash is tidied rather than doubled', defaultCloneUrl('', '/octocat/Hello-World/') === 'https://github.com/octocat/Hello-World.git')
 
 /* The line the panel shows. Captured from a real `pnpm publish` of an
    already-published version: every byte goes to STDOUT (measured: stderr = 0), the

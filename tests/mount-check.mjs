@@ -87,6 +87,9 @@ const EXPECTED = [
   '/api/dsh-cicd/npm-status',
   '/api/dsh-cicd/npm-login',
   '/api/dsh-cicd/npm-publish',
+  // A registered repository with no working tree cannot be released from here, so the
+  // console fetches one: the address is derivable from the name it already has.
+  '/api/dsh-cicd/clone',
   // Setup without a terminal: the browser sign-in and the repository list are
   // routes, not instructions to go and run something elsewhere.
   '/api/dsh-cicd/auth-start',

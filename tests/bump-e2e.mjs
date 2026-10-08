@@ -347,6 +347,85 @@ async function callRoutes(routes, path, body) {
   check('a repository with no checkout is refused here too', answer.status === 400 && answer.payload?.code === 'no-checkout', `${String(answer.status)} ${String(answer.payload?.code)}`)
 }
 
+/* -- 9. 克隆: a registered repository with no working tree ------------------- */
+/*
+ * Cloned from the fixture's own bare origin, so this is a real `git clone` with no
+ * network involved. It is the step that makes a registered repository usable at all:
+ * every action the console offers needs a working tree, and the address is derived
+ * rather than demanded.
+ */
+{
+  const checkout = makeCheckout()
+  const root = mkdtempSync(join(scratch, 'projects-'))
+  const configFile = join(scratch, 'repos-clone.json')
+  writeFileSync(configFile, JSON.stringify({
+    owner: 'octocat',
+    projectsRoot: root,
+    repos: [{ repo: 'octocat/fixture' }],
+  }), 'utf8')
+  const routes = new Map()
+  module.apply({
+    effect: (fn) => fn,
+    logger: { info: () => {} },
+    webServer: { register: ({ path, handler }) => { routes.set(path, handler); return () => {} } },
+    /* `projectsRoot` is ROW config, not a key of the managed file: writing it into
+       repos.json would look right and be ignored. */
+  }, { owner: 'octocat', configFile, projectsRoot: root })
+
+  const target = join(root, 'fixture')
+  const answer = await callRoutes(routes, '/api/dsh-cicd/clone', { repo: 'octocat/fixture', url: checkout.origin })
+  check('a repository with no checkout can be cloned', answer.status === 200 && answer.payload?.ok === true, JSON.stringify(answer.payload?.value ?? answer.payload))
+  check('it lands where the console looks for a checkout next', answer.payload?.value?.path === target, String(answer.payload?.value?.path))
+  check('the working tree really is a checkout', readFileSync(join(target, 'package.json'), 'utf8').includes('"fixture"'))
+  check('and the branch came with it', git(target, ['rev-parse', '--abbrev-ref', 'HEAD']) === 'main')
+  check('the config now records where it is', JSON.parse(readFileSync(configFile, 'utf8')).repos[0].localPath === target)
+
+  /* Idempotence matters more than it looks: this button sits next to 提交, and a second
+     press must not make a second copy of the repository somewhere else. */
+  const again = await callRoutes(routes, '/api/dsh-cicd/clone', { repo: 'octocat/fixture', url: checkout.origin })
+  check('cloning over an existing checkout is refused', again.status === 409 && again.payload?.code === 'already-cloned', `${String(again.status)} ${String(again.payload?.code)}`)
+
+  /* A second repository, never cloned, for the refusals that only make sense before a
+     working tree exists — `already-cloned` wins over everything else by design, since
+     with a checkout in place the rest of the request is moot. */
+  const configFile2 = join(scratch, 'repos-clone2.json')
+  writeFileSync(configFile2, JSON.stringify({ owner: 'octocat', repos: [{ repo: 'octocat/other' }] }), 'utf8')
+  const routes2 = new Map()
+  module.apply({
+    effect: (fn) => fn,
+    logger: { info: () => {} },
+    webServer: { register: ({ path, handler }) => { routes2.set(path, handler); return () => {} } },
+  }, { owner: 'octocat', configFile: configFile2, projectsRoot: root })
+
+  /* An address that is not an address is refused by name — before git is asked to fetch
+     something that could never be a repository. */
+  const nonsense = await callRoutes(routes2, '/api/dsh-cicd/clone', { repo: 'octocat/other', url: 'not a url' })
+  check('a nonsense address is refused by name', nonsense.status === 400 && nonsense.payload?.code === 'bad-url', `${String(nonsense.status)} ${String(nonsense.payload?.code)}`)
+
+  /* A clone that fails reports git's own reason and the address it tried. A local path
+     that does not exist, on purpose: the alternative is a test that reaches for
+     github.com, which would make CI depend on the network and on a repository that is
+     not this one. */
+  const missing = await callRoutes(routes2, '/api/dsh-cicd/clone', { repo: 'octocat/other', url: join(scratch, 'no-such-origin.git') })
+  check('a clone that fails says so, with git\'s own words', missing.status === 502 && missing.payload?.code === 'clone-failed', `${String(missing.status)} ${String(missing.payload?.code)}`)
+  check('and names the address it tried', String(missing.payload?.value?.url ?? '').includes('no-such-origin.git'), String(missing.payload?.value?.url))
+  check('nothing was recorded for a clone that did not happen', JSON.parse(readFileSync(configFile2, 'utf8')).repos[0].localPath === undefined)
+}
+
+/* A repository with nowhere to land says so, rather than failing obscurely. */
+{
+  const configFile = join(scratch, 'repos-clone3.json')
+  writeFileSync(configFile, JSON.stringify({ owner: 'octocat', repos: [{ repo: 'octocat/fixture' }] }), 'utf8')
+  const routes = new Map()
+  module.apply({
+    effect: (fn) => fn,
+    logger: { info: () => {} },
+    webServer: { register: ({ path, handler }) => { routes.set(path, handler); return () => {} } },
+  }, { owner: 'octocat', configFile })
+  const answer = await callRoutes(routes, '/api/dsh-cicd/clone', { repo: 'octocat/fixture' })
+  check('no projectsRoot is a named refusal, not a mystery', answer.status === 409 && answer.payload?.code === 'no-projects-root', `${String(answer.status)} ${String(answer.payload?.code)}`)
+}
+
 await new Promise((settle) => { rmSync(scratch, { recursive: true, force: true }); settle() })
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
 if (failed > 0) process.exit(1)

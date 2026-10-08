@@ -250,7 +250,7 @@ patch 里仍可用的选项（每个都有默认值）：
 | `owner` | `''` | 裸 `repo` 名用的 GitHub 账号；配置文件里的同名值优先 |
 | `repos` | `[]` | 手写兜底；配置文件存在时以文件为准 |
 | `configFile` | `<DSH_HOME>\dsh-plugin-cicd\repos.json` | 受管列表的位置 |
-| `projectsRoot` | `''` | 本地检出所在根目录；面板添加仓库时据此自动填 `localPath`（按各目录 `package.json` 的 `name` 匹配，所以目录名与仓库名不同也能找到） |
+| `projectsRoot` | `''` | 本地检出所在根目录；面板添加仓库时据此自动填 `localPath`（按各目录 `package.json` 的 `name` 匹配，所以目录名与仓库名不同也能找到），克隆【克隆】的落点也是这里。**这是行配置（`cordis.patch.yml`），不是 `repos.json` 的键**——写进后者会被忽略 |
 | `defaultBranch` | `main` | 面板触发 workflow 用的 ref |
 | `buildWorkflow` | `ci.yml` | `构建` 按钮触发的 workflow |
 | `releaseWorkflow` | `release.yml` | `发布` 按钮触发的 workflow |
@@ -288,7 +288,8 @@ npm 这一侧是同一条原则的两个面：**包管理器**复用 Host 自己
 ## 安全边界
 
 - 所有路由都是 **POST + 仅回环 + 同源**（`isTrustedRequest`），与宿主设置桥对自家回环路由的信任策略一致：只有「来自本机」且「来自这个 Host 服务的文档」的请求能过。这些路由以本机 GitHub 凭据行事，所以不能只按端口放行。
-- 只读部分：状态、概览、运行、日志、npm 状态。**有副作用的是九条**：`dispatch`、`run-action`、`release-action`、`version-bump`、`commit`、`update`、`restart`、`npm-login`、`npm-publish`。
+- 只读部分：状态、概览、运行、日志、npm 状态。**有副作用的是十条**：`dispatch`、`run-action`、`release-action`、`version-bump`、`commit`、`clone`、`update`、`restart`、`npm-login`、`npm-publish`。
+- `clone` 是唯一会**从网络拉一个新目录**的路由，服务"仓库已登记但没有本地检出"这个状态——那种状态下本页每个动作都用不了（提交没东西可提交，构建与发布作用于 GitHub 上的提交而不是这份磁盘）。地址由仓库名**推导**（`owner/repo` 自带，裸名用配置里的 `owner`），面板把它预填好、可改（fork、私有远端都是真实需求）；落点是 `projectsRoot/<仓库名>`，也就是 `findLocalCheckout` 之后会去找的地方。已有可用检出回 `409 already-cloned`，目标目录非空回 `409 target-exists`，没有 `projectsRoot` 回 `409 no-projects-root`（并点名这个配置键）。
 - `version-bump` 只改 `package.json` 的版本行，然后 `git commit` **只提交这一个文件**并推送当前分支。工作区不干净、分支没有上游、或落后于上游时它直接拒绝，不做任何写入。
 - `commit` 是**唯一会提交整个工作区**的路由（`git add -A` + commit + push）。工作区干净且与上游同步时回 `409 nothing-to-commit`；`message` 为空且确实有改动时回 `400 message-required`（先拒绝，不写任何东西）；分支没有上游时回 `409 no-upstream`——发布构建的是 GitHub 上的提交，推不上去就等于没提交。**提交信息为空但工作区干净**是合法用法，含义是「把已经提交的推上去」。
 - `update` 是唯一会**改 profile 依赖**的路由：下载 Release 里的 tgz，再交给 Host 的插件管理器安装；失败时由管理器还原 `package.json` 与 lockfile。

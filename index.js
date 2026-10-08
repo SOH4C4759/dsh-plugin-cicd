@@ -667,6 +667,28 @@ function firstLine(value) {
 /** How many changed file names the overview carries; the count is carried in full. */
 const LOCAL_FILE_LIMIT = 20
 
+/** A clone moves a repository, not a request: give it minutes, not seconds. */
+const CLONE_TIMEOUT_MS = 180_000
+
+/**
+ * The address `git clone` would use for a repository, when nothing better was given.
+ *
+ * Derived rather than demanded — the panel exists to remove steps, and "paste the clone
+ * URL of the repository you already registered" is one of them. A bare name needs
+ * `owner` from the config; a name written `owner/repo` does not.
+ *
+ * @param {string} owner - the configured owner, possibly ''.
+ * @param {string} repo - the repository id as configured.
+ * @returns {string} an https URL, or '' when there is nothing to derive it from.
+ */
+export function defaultCloneUrl(owner, repo) {
+  const name = text(repo).trim()
+  if (name === '') return ''
+  if (name.includes('/')) return `https://github.com/${name.replace(/^\/+|\/+$/g, '')}.git`
+  const login = text(owner).trim()
+  return login === '' ? '' : `https://github.com/${login}/${name}.git`
+}
+
 /**
  * The path out of one `git status --porcelain` line.
  *
@@ -1834,6 +1856,13 @@ export async function collectRepo({ config, ghPath, entry }) {
     slug,
     label: entry.label !== '' ? entry.label : entry.repo,
     localPath: entry.localPath,
+    /*
+     * What a 克隆 would use, and where it would land. Sent with the overview so the
+     * panel can offer the address pre-filled instead of asking someone to type a URL
+     * the Host can already derive from the repository name.
+     */
+    cloneUrl: defaultCloneUrl(config.owner, entry.repo),
+    checkoutRoot: config.projectsRoot,
     problems: [],
   }
   if (slug === null) {
@@ -3700,8 +3729,15 @@ export function apply(ctx, rawConfig) {
       return
     }
     const outcome = mutateConfig(current, (draft) => {
-      const entry = { repo, ...(localPath !== '' ? { localPath } : {}), label: '' }
       const index = draft.repos.findIndex((candidate) => candidate.repo === repo)
+      /* Merged into whatever is already there, not written over it: this route is also
+         how a path gets set, and rebuilding the entry from scratch would drop the
+         Bilibili binding — a video unbound as a side effect of editing a directory. */
+      const entry = {
+        ...(index === -1 ? {} : draft.repos[index]),
+        repo,
+        ...(localPath !== '' ? { localPath } : {}),
+      }
       if (index === -1) draft.repos.push(entry)
       else draft.repos[index] = entry
       return { ok: true, owner: draft.owner, repos: draft.repos }
@@ -3711,6 +3747,132 @@ export function apply(ctx, rawConfig) {
       return
     }
     writeJson(res, 200, { ok: true, value: { repo, localPath, registered: outcome.count, file: current.configFile } })
+  }
+
+  /**
+   * Clone a registered repository into the checkout root, and record where it landed.
+   *
+   * The missing step for a repository that is registered but has no working tree:
+   * everything the console does with one — the dirty chip, 提交, 构建, 发布 — needs it,
+   * and until now the answer was "go and clone it yourself".
+   *
+   * The address is derived from the repository name unless one is given, and the panel
+   * shows that same derivation pre-filled (`cloneUrl` in the overview), because being
+   * asked to paste the clone URL of a repository the Host can already name is exactly
+   * the kind of step this console exists to remove. The destination is
+   * `projectsRoot/<name>`, which is where `findLocalCheckout` would look for it next.
+   */
+  const cloneHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const entry = target.entry
+
+    /* Already there: say so rather than making a second copy beside the first. */
+    if (entry.localPath !== '') {
+      const existing = await readLocalState(entry.localPath, current.requestTimeoutMs)
+      if (existing.available === true) {
+        writeJson(res, 409, {
+          ok: false,
+          code: 'already-cloned',
+          message: `这个仓库已经有本地检出了：${entry.localPath}`,
+          value: { repo: entry.repo, path: entry.localPath },
+        })
+        return
+      }
+    }
+
+    const requestedUrl = text(body?.url).trim()
+    const url = requestedUrl !== '' ? requestedUrl : defaultCloneUrl(current.owner, entry.repo)
+    if (url === '') {
+      writeJson(res, 400, {
+        ok: false,
+        code: 'no-url',
+        message: '没有可用的仓库地址：填一个，或者把行配置写成 "owner/repo"',
+        value: { repo: entry.repo },
+      })
+      return
+    }
+    /* A shell is never involved, so this is not about injection: it is about not asking
+       git to fetch something that is not a repository address at all. */
+    if (!/^(https?:\/\/|git@|ssh:\/\/|file:\/\/|\/|[A-Za-z]:[\\/])/.test(url)) {
+      writeJson(res, 400, { ok: false, code: 'bad-url', message: `不像是 git 地址：${JSON.stringify(url)}`, value: { repo: entry.repo } })
+      return
+    }
+
+    const requestedDirectory = text(body?.directory).trim()
+    if (requestedDirectory !== '' && !isAbsolute(requestedDirectory)) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: 'directory must be absolute', value: { repo: entry.repo } })
+      return
+    }
+    const directory = requestedDirectory !== ''
+      ? requestedDirectory
+      : (current.projectsRoot === '' ? '' : join(current.projectsRoot, bareRepoName(entry.repo)))
+    if (directory === '') {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'no-projects-root',
+        message: '`projectsRoot` 还没设置，所以不知道该克隆到哪里：在 profile 的 cordis.patch.yml 里给它一个绝对路径，或者指定一个目录。',
+        value: { repo: entry.repo },
+      })
+      return
+    }
+    if (existsSync(directory)) {
+      let occupied = true
+      try {
+        occupied = readdirSync(directory).length > 0
+      } catch {
+        /* Unreadable counts as occupied: cloning into it could destroy something. */
+        occupied = true
+      }
+      if (occupied === true) {
+        writeJson(res, 409, {
+          ok: false,
+          code: 'target-exists',
+          message: `${directory} 已经存在且不是空的；换一个目录，或者先把它移走。`,
+          value: { repo: entry.repo, path: directory },
+        })
+        return
+      }
+    }
+
+    const cloned = await runTool('git', ['clone', '--', url, directory], CLONE_TIMEOUT_MS)
+    if (cloned.ok !== true) {
+      writeJson(res, 502, {
+        ok: false,
+        code: 'clone-failed',
+        message: commandFailureLine(cloned, 'git clone failed'),
+        value: { repo: entry.repo, url, path: directory },
+      })
+      return
+    }
+    const outcome = mutateConfig(current, (draft) => {
+      const index = draft.repos.findIndex((candidate) => candidate.repo === entry.repo)
+      if (index === -1) return { ok: false, message: `not registered: ${entry.repo}` }
+      /* The rest of the entry is kept. A clone is about where the working tree is, and
+         rebuilding the entry without its `bilibili` would unbind a video as a side
+         effect of pointing the console at a checkout. */
+      draft.repos[index] = { ...draft.repos[index], localPath: directory }
+      return { ok: true, owner: draft.owner, repos: draft.repos }
+    })
+    cache = null
+    if (outcome.ok !== true) {
+      /* The clone is on disk; only the bookkeeping failed. Saying which is the
+         difference between "clone it again" and "fix the config". */
+      writeJson(res, 502, {
+        ok: false,
+        code: 'config-failed',
+        message: `已克隆到 ${directory}，但写不进配置：${outcome.message}`,
+        value: { repo: entry.repo, path: directory, url },
+      })
+      return
+    }
+    writeJson(res, 200, { ok: true, value: { repo: entry.repo, path: directory, url, branch: null } })
   }
 
   /** Unregister a repository. */
@@ -4631,6 +4793,10 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/auth-cancel`, authCancelHandler],
     [`${ROUTE_PREFIX}/auth-logout`, authLogoutHandler],
     [`${ROUTE_PREFIX}/repos-available`, reposAvailableHandler],
+    // A registered repository with no working tree cannot be released from here, so the
+    // console can fetch one: the address is derivable, and the destination is the root
+    // the rest of the panel already looks in.
+    [`${ROUTE_PREFIX}/clone`, cloneHandler],
     [`${ROUTE_PREFIX}/config-add`, configAddHandler],
     [`${ROUTE_PREFIX}/config-remove`, configRemoveHandler],
     // The third channel: an update note under the video that introduces the

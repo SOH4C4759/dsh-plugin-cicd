@@ -200,6 +200,14 @@ window.__ModuleLoader__.load({
       'meta.version': '本地',
       'meta.expectedTag': '期望 tag {tag}',
       'meta.noLocal': '未配置本地路径，无法对比本地状态',
+      'clone.title': '本地检出',
+      'clone.why.none': '还没有本地检出。克隆下来之后，提交 / 构建 / 发布才有东西可作用于它——这些动作都需要一份工作区。',
+      'clone.why.broken': '配置的路径不可用（{path}）：{reason}',
+      'clone.urlPlaceholder': '仓库地址，如 https://github.com/owner/repo.git',
+      'clone.action': '克隆',
+      'clone.target': '将克隆到 {path}',
+      'clone.noRoot': '还没设置检出根目录：请在 profile 的 cordis.patch.yml 里给 `projectsRoot` 一个绝对路径，否则不知道该克隆到哪里。',
+      'clone.done': '已克隆到 {path}。',
       'meta.assets': '{count} 个资产',
       'meta.path': '路径',
       'meta.scopes': '权限',
@@ -537,6 +545,14 @@ window.__ModuleLoader__.load({
       'meta.version': 'local',
       'meta.expectedTag': 'expected tag {tag}',
       'meta.noLocal': 'no local path, so local state cannot be compared',
+      'clone.title': 'Local checkout',
+      'clone.why.none': 'There is no local checkout yet. Cloning one is what gives 提交, 构建 and 发布 something to act on — all three need a working tree.',
+      'clone.why.broken': 'The configured path is unusable ({path}): {reason}',
+      'clone.urlPlaceholder': 'Repository address, e.g. https://github.com/owner/repo.git',
+      'clone.action': 'Clone',
+      'clone.target': 'Will clone into {path}',
+      'clone.noRoot': 'No checkout root is set: give `projectsRoot` an absolute path in the profile\'s cordis.patch.yml, or there is nowhere to clone into.',
+      'clone.done': 'Cloned into {path}.',
       'meta.assets': '{count} assets',
       'meta.path': 'Path',
       'meta.scopes': 'Scopes',
@@ -1399,7 +1415,7 @@ window.__ModuleLoader__.load({
 
     /** One repository row, expandable into path, releases, runs and logs. */
     function RepoRow(props) {
-      const { t, data, busy, onAction, onBump, onCommit, onPublish, onUpdate, npm, onNpmPublish, bili, onBiliBind, onBiliPreview, onBiliAnnounce, logs, onLogs } = props
+      const { t, data, busy, onAction, onBump, onCommit, onClone, onPublish, onUpdate, npm, onNpmPublish, bili, onBiliBind, onBiliPreview, onBiliAnnounce, logs, onLogs } = props
       const [open, setOpen] = React.useState(false)
       /**
        * A draft release is the panel's one invisible outcome: it exists, it is not
@@ -1648,9 +1664,18 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'dsc-detail' },
-              data.localPath === ''
-                ? h('span', null, t('meta.noLocal'))
-                : h('span', { className: 'dsc-mono' }, `${t('meta.path')} ${data.localPath}`),
+              /* No usable working tree: say where one would go and offer to fetch it.
+                 Everything else on this page — 提交, 构建, 发布, the dirty chip — acts on
+                 a checkout, so this is the step that makes the rest of the row real. */
+              local.available === true
+                ? h('span', { className: 'dsc-mono' }, `${t('meta.path')} ${data.localPath}`)
+                : h(CloneCheckout, {
+                    t,
+                    data,
+                    local,
+                    busy,
+                    onClone: (repo, url) => { void onClone(repo, url) },
+                  }),
               data.problems.length > 0 ? h('div', { className: 'dsc-warn' }, data.problems.join(' · ')) : null,
 
               /* Why 发布 cannot work, and what would make it work. Both notes are
@@ -2261,6 +2286,35 @@ window.__ModuleLoader__.load({
       )
 
       /**
+       * Fetch a working tree for a repository that has none.
+       *
+       * The address is whatever the field holds — the Host derives one when the panel
+       * opens, and a person may have replaced it with a fork or a private remote.
+       */
+      const onClone = React.useCallback(
+        async (data, url) => {
+          const key = `clone:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson('/clone', { repo: data.repo, url }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError('timeout')
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            await loadOverview({ force: true })
+            return
+          }
+          setNotice(t('clone.done', { path: String(result.payload.value?.path ?? '') }))
+          await loadOverview({ force: true })
+        },
+        [loadOverview, setError, t],
+      )
+
+      /**
        * Install the release into this profile, then ask about the restart.
        *
        * Deliberately not routed through `run`: that helper reports success with one
@@ -2790,6 +2844,7 @@ window.__ModuleLoader__.load({
                 onAction,
                 onBump: () => onBump(data),
                 onCommit: (row, message) => { void onCommit(row, message) },
+                onClone: (row, url) => { void onClone(row, url) },
                 onPublish: (tag) => onPublish(data.repo, tag),
                 onUpdate: () => { void onUpdate(data) },
                 npm: npmByRepo.get(data.repo) ?? null,
@@ -2811,6 +2866,7 @@ window.__ModuleLoader__.load({
                 onAction,
                 onBump: () => {},
                 onCommit: () => {},
+                onClone: () => {},
                 onPublish: () => {},
                 logs: null,
                 onLogs: async () => {},
@@ -3331,6 +3387,68 @@ window.__ModuleLoader__.load({
                 }, busy === 'bili-paste' ? '…' : t('bili.paste.save')),
               ),
         ),
+      )
+    }
+
+    /**
+     * Where a working tree would go, and the button that fetches one.
+     *
+     * A repository can be registered without being cloned, and then every action this
+     * console offers is unavailable for it — 提交 has nothing to commit, 构建 and 发布
+     * act on what is on GitHub rather than on this disk, and the whole local column
+     * reads as broken. So the panel answers the one question that unblocks all of that:
+     * where is it, and shall I fetch it.
+     *
+     * The address comes pre-filled from the Host, which derives it from the repository
+     * name (`cloneUrl`) — being asked to paste the clone URL of a repository the Host
+     * can already name is exactly the kind of step this console exists to remove. It
+     * stays editable, because the derivation is a convenience and not a fact: a fork, a
+     * private remote or a second remote is a real thing.
+     */
+    function CloneCheckout(props) {
+      const { t, data, local, busy, onClone } = props
+      const [url, setUrl] = React.useState(String(data.cloneUrl ?? ''))
+      React.useEffect(() => {
+        setUrl(String(data.cloneUrl ?? ''))
+      }, [data.cloneUrl])
+
+      const root = String(data.checkoutRoot ?? '')
+      const name = String(data.repo ?? '').split('/').pop()
+      const separator = root.endsWith('/') || root.endsWith('\\') ? '' : '\\'
+      const target = root === '' ? '' : `${root}${separator}${name}`
+      const why = data.localPath === ''
+        ? t('clone.why.none')
+        : t('clone.why.broken', { path: String(data.localPath), reason: String(local?.reason ?? '') })
+
+      return h(
+        'div',
+        { className: 'dsc-sub' },
+        h('span', { className: 'dsc-setup-strong' }, t('clone.title')),
+        h('span', { className: 'dsc-quiet' }, why),
+        h(
+          'div',
+          { className: 'dsc-line' },
+          h('input', {
+            className: 'dsc-input',
+            type: 'text',
+            spellCheck: 'false',
+            placeholder: t('clone.urlPlaceholder'),
+            'aria-label': t('clone.urlPlaceholder'),
+            value: url,
+            onChange: (event) => setUrl(String(event?.target?.value ?? '').trim()),
+          }),
+          h(Btn, {
+            kind: 'primary',
+            disabled: busy !== '' || url === '' || root === '',
+            onClick: () => onClone(data, url),
+          }, busy === `clone:${data.repo}` ? '…' : t('clone.action')),
+        ),
+        /* Set where it will land, or say what is missing to be able to answer that at
+           all. A clone that silently picks a directory is a clone someone has to go and
+           find afterwards. */
+        root === ''
+          ? h('span', { className: 'dsc-warn' }, t('clone.noRoot'))
+          : h('span', { className: 'dsc-quiet dsc-mono' }, t('clone.target', { path: target })),
       )
     }
 

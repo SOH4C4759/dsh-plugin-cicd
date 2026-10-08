@@ -1392,5 +1392,41 @@ function previewFixture(overrides) {
   check('the fallback offered is the paste field, not a browser page', hasButton(tooLong, '保存并验证') && hasButton(tooLong, '打开登录页面') === false, textOf(tooLong).replace(/\s+/g, ' ').slice(-260))
 }
 
+/* -- 20. A repository with no working tree can fetch one ----------------------
+   Registered but not cloned, every action on this page is unavailable: 提交 has nothing
+   to commit, 构建 and 发布 act on what is on GitHub rather than on this disk, and the
+   local column reads as broken. The panel answers the one question that unblocks all of
+   it — where is it, and shall I fetch it — with the address already filled in, because
+   the Host can derive it from the name it already has. */
+{
+  const cloneFixture = (overrides) => repoFixture({
+    localPath: '',
+    cloneUrl: 'https://github.com/SOH4C4759/dsh-plugin-restart.git',
+    checkoutRoot: 'F:\\CodeProj',
+    local: { available: false, reason: 'no localPath configured' },
+    ...overrides,
+  })
+
+  const panel = await renderPanel([cloneFixture({})])
+  const { tree } = await expandFirstRow(panel)
+  check('a repository with no checkout says so', textOf(tree).includes('还没有本地检出'), textOf(tree).replace(/\s+/g, ' ').slice(0, 200))
+  check('and offers the address already filled in', inputValue(tree, '仓库地址') === 'https://github.com/SOH4C4759/dsh-plugin-restart.git', String(inputValue(tree, '仓库地址')))
+  check('and says where it would land', textOf(tree).includes('将克隆到 F:\\CodeProj\\dsh-plugin-restart'), textOf(tree).replace(/\s+/g, ' ').slice(-200))
+  check('with a clone button', hasButton(tree, '克隆'))
+
+  fixture['/clone'] = { ok: true, value: { repo: 'dsh-plugin-restart', path: 'F:\\CodeProj\\dsh-plugin-restart', url: 'https://github.com/SOH4C4759/dsh-plugin-restart.git' } }
+  const asked = clickButton(tree, '克隆')
+  const after = await rerender()
+  check('the clone is sent to the Host', asked === true && calls.includes('/clone'), calls.join(','))
+  check('and the panel says where it landed', textOf(after).includes('已克隆到 F:\\CodeProj\\dsh-plugin-restart'), textOf(after).replace(/\s+/g, ' ').slice(-200))
+
+  /* Nowhere to put it: a named refusal with the key that fixes it, rather than a button
+     whose only outcome is a refusal in English from the Host. */
+  const noRoot = await renderPanel([cloneFixture({ checkoutRoot: '' })])
+  const { tree: noRootTree } = await expandFirstRow(noRoot)
+  check('nowhere to clone into is explained', textOf(noRootTree).includes('还没设置检出根目录'), textOf(noRootTree).replace(/\s+/g, ' ').slice(-220))
+  check('and the key that fixes it is named', textOf(noRootTree).includes('projectsRoot'))
+}
+
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
 if (failed > 0) process.exit(1)
