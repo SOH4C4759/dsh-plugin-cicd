@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyPublishFailure, classifySpec, collectRepo, compareVersions, describeInstall, effectiveConfig, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
+import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -446,6 +446,32 @@ check('a registry 5xx is not blamed on the user', classifyPublishFailure('npm ER
 check('a network failure is recognised', classifyPublishFailure('request to https://registry.npmjs.org failed, reason: getaddrinfo ENOTFOUND') === 'network')
 check('unrecognised output is named unknown rather than guessed at', classifyPublishFailure('something else entirely') === 'unknown')
 check('empty output is unknown, not a crash', classifyPublishFailure('') === 'unknown' && classifyPublishFailure(undefined) === 'unknown')
+
+/* The line the panel shows. Captured from a real `pnpm publish` of an
+   already-published version: every byte goes to STDOUT (measured: stderr = 0), the
+   first line is the progress line, the rest is a stack trace, and node's own
+   `Command failed: <the whole command>` is what a naive "first line" picks up. */
+const realConflictOutput = [
+  '📦 dsh-plugin-restart@1.0.1 → https://registry.npmjs.org/',
+  '[E403] 403 Forbidden - PUT https://registry.npmjs.org/dsh-plugin-restart - You cannot publish over the previously published versions: 1.0.1.',
+  '',
+  'pnpm: 403 Forbidden - PUT https://registry.npmjs.org/dsh-plugin-restart - You cannot publish over the previously published versions: 1.0.1.',
+  '    at file:///C:/Users/Administrator/AppData/Local/Programs/DeepSeek%20Harness/resources/runtime/pnpm/dist/pnpm.mjs:257427:17',
+  '    at async publish3 (file:///C:/Users/Administrator/AppData/Local/Programs/DeepSeek%20Harness/resources/runtime/pnpm/dist/pnpm.mjs:281124:19)',
+].join('\n')
+const shown = firstMeaningfulLine(realConflictOutput, 'the publish failed')
+check('the reason is shown, not the progress line', shown.startsWith('[E403] 403 Forbidden'), shown)
+check('the shown line carries the actual reason', shown.includes('cannot publish over the previously published versions'))
+check('the progress line is not mistaken for the error', shown.startsWith('📦') === false)
+check('a stack frame is never the answer', /^\s*at /.test(shown) === false)
+check('node\'s command-line wrapper never reaches the panel', shown.startsWith('Command failed:') === false)
+check('pnpm\'s own sentence is used when there is no coded line', firstMeaningfulLine('📦 x@1.0.0 → reg\n\npnpm: something went wrong\n    at x.js:1:1').startsWith('pnpm: something went wrong'))
+check('the wrapper is skipped when it is all there is', firstMeaningfulLine('Command failed: pnpm publish', 'the publish failed') === 'the publish failed')
+check('nothing usable answers with the caller\'s sentence', firstMeaningfulLine('', 'the publish failed') === 'the publish failed')
+check('stdout is searched at all, so an empty stderr cannot hide the reason', firstMeaningfulLine('[ERR_PNPM_WHOAMI_UNAUTHORIZED] You must be logged in to use whoami', 'x').startsWith('[ERR_PNPM_WHOAMI_UNAUTHORIZED]'))
+check('a failed result is read across both streams', commandFailureLine({ stdout: realConflictOutput, stderr: '', error: 'Command failed: <the whole command>' }, 'the publish failed').startsWith('[E403]'))
+check('the child-process error is the last resort, not the first line', commandFailureLine({ stdout: '', stderr: '', error: 'Command failed: pnpm publish' }, 'the publish failed') === 'Command failed: pnpm publish')
+check('a spawn failure with no message still says something', commandFailureLine({}, 'the publish failed') === 'the publish failed')
 
 /* -- 11. Live checks (opt-in) ----------------------------------------------- */
 if (process.env.DSH_CICD_LIVE === '1') {

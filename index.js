@@ -665,6 +665,60 @@ function firstLine(value) {
 }
 
 /**
+ * The one line of a failed command's output that explains it.
+ *
+ * A failed `pnpm publish` writes EVERY byte to STDOUT — measured, stderr is 0 bytes —
+ * and its first line is the progress line (`📦 pkg@1.0.0 → registry`) while its last
+ * few hundred are a stack trace. Node then adds `Command failed: <the whole command>`
+ * as the child-process error's message. So "the first line of stderr" is the progress
+ * bar, the wrapper, or nothing at all: the sentence that says WHY sits in the middle
+ * and is the only part worth putting on screen.
+ *
+ * Preference: a line carrying an error code (`[E403]`, `npm ERR!`, `ERR_PNPM_…`) →
+ * a `pnpm: ` sentence → the first line that is not noise. Noise is the progress line,
+ * the wrapper, stack frames, blank lines.
+ *
+ * @param {unknown} output - combined stdout and stderr.
+ * @param {string} [fallback] - what to answer when nothing meaningful is there.
+ * @returns {string} the line to show.
+ */
+export function firstMeaningfulLine(output, fallback = '') {
+  const lines = String(output ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+  const isNoise = (line) => line.startsWith('📦')
+    || line.startsWith('Command failed:')
+    || line.startsWith('at ')
+    || line.startsWith('throw ')
+    || line === '^'
+    || line.startsWith('node:internal')
+    || /^Progress: /.test(line)
+  for (const line of lines) {
+    if (/^\[(?:E[A-Z0-9_]+|ERR_[A-Z0-9_]+)\]/.test(line) || line.startsWith('npm ERR!') || /ERR_PNPM_[A-Z_]+/.test(line)) return line
+  }
+  for (const line of lines) {
+    if (line.startsWith('pnpm: ')) return line
+  }
+  for (const line of lines) {
+    if (!isNoise(line)) return line
+  }
+  return fallback
+}
+
+/**
+ * `firstMeaningfulLine` for a `runTool`/`runSpawn` result: both streams, then the
+ * child-process error as the last resort.
+ *
+ * @param {object} result - a failed spawn result.
+ * @param {string} fallback - the sentence for "it failed and said nothing usable".
+ * @returns {string} the line to show.
+ */
+export function commandFailureLine(result, fallback) {
+  return firstMeaningfulLine(`${result?.stdout ?? ''}\n${result?.stderr ?? ''}`, result?.error || fallback)
+}
+
+/**
  * The file name of a workflow reference, lowercased.
  *
  * `release.yml`, `./.github/workflows/release.yml` and a Windows-spelled path all
@@ -721,7 +775,15 @@ async function runSpawn(executable, argv, { cwd = undefined, timeoutMs, env = {}
     return {
       ok: false,
       stdout: typeof error?.stdout === 'string' ? error.stdout : '',
-      stderr: typeof error?.stderr === 'string' && error.stderr !== '' ? error.stderr : String(error?.message ?? error),
+      /*
+       * Exactly what the child wrote — an empty stderr is a fact about the child, not
+       * a slot to fill. Node's `Command failed: <the whole command>` goes in `error`
+       * instead, so a caller reaches for it only after the real streams were empty.
+       * Filling `stderr` with it is how a wrapper line came to shadow the reason:
+       * pnpm writes every byte of a failed publish to STDOUT (measured: stderr = 0).
+       */
+      stderr: typeof error?.stderr === 'string' ? error.stderr : '',
+      error: typeof error?.message === 'string' ? error.message : String(error),
       code: Number.isInteger(error?.code) ? error.code : null,
       killed: error?.killed === true,
     }
@@ -764,7 +826,15 @@ export async function runTool(executable, args, timeoutMs) {
     return {
       ok: false,
       stdout: typeof error?.stdout === 'string' ? error.stdout : '',
-      stderr: typeof error?.stderr === 'string' && error.stderr !== '' ? error.stderr : String(error?.message ?? error),
+      /*
+       * Exactly what the child wrote — an empty stderr is a fact about the child, not
+       * a slot to fill. Node's `Command failed: <the whole command>` goes in `error`
+       * instead, so a caller reaches for it only after the real streams were empty.
+       * Filling `stderr` with it is how a wrapper line came to shadow the reason:
+       * pnpm writes every byte of a failed publish to STDOUT (measured: stderr = 0).
+       */
+      stderr: typeof error?.stderr === 'string' ? error.stderr : '',
+      error: typeof error?.message === 'string' ? error.message : String(error),
       code: Number.isInteger(error?.code) ? error.code : null,
       killed: error?.killed === true,
     }
@@ -778,7 +848,7 @@ export async function runTool(executable, args, timeoutMs) {
 export async function ghJson(ghPath, args, timeoutMs) {
   const result = await runTool(ghPath, [...args], timeoutMs)
   if (!result.ok) {
-    return { ok: false, message: result.killed ? `gh timed out after ${timeoutMs} ms` : firstLine(result.stderr) || 'gh failed' }
+    return { ok: false, message: result.killed ? `gh timed out after ${timeoutMs} ms` : commandFailureLine(result, 'gh failed') }
   }
   const raw = result.stdout.trim()
   if (raw === '') return { ok: true, value: null }
@@ -798,7 +868,7 @@ export async function ghRun(ghPath, args, timeoutMs) {
   if (result.ok) return { ok: true, stdout: result.stdout }
   return {
     ok: false,
-    message: result.killed ? `gh timed out after ${timeoutMs} ms` : firstLine(result.stderr) || 'gh failed',
+    message: result.killed ? `gh timed out after ${timeoutMs} ms` : commandFailureLine(result, 'gh failed'),
   }
 }
 
@@ -2563,7 +2633,7 @@ export function apply(ctx, rawConfig) {
     const staged = await git(['add', '--', 'package.json'])
     if (staged.ok !== true) {
       restore()
-      writeJson(res, 502, { ok: false, code: 'git-failed', message: firstLine(staged.stderr) || 'git add failed' })
+      writeJson(res, 502, { ok: false, code: 'git-failed', message: commandFailureLine(staged, 'git add failed') })
       return
     }
     // `-- package.json` is `--only` semantics: the commit contains this one path,
@@ -2574,7 +2644,7 @@ export function apply(ctx, rawConfig) {
       writeJson(res, 502, {
         ok: false,
         code: 'git-failed',
-        message: firstLine(committed.stderr) || firstLine(committed.stdout) || 'git commit failed',
+        message: commandFailureLine(committed, 'git commit failed'),
       })
       return
     }
@@ -2585,7 +2655,7 @@ export function apply(ctx, rawConfig) {
       writeJson(res, 502, {
         ok: false,
         code: 'push-failed',
-        message: `committed ${tag} locally, but the push failed: ${firstLine(pushed.stderr) || firstLine(pushed.stdout) || 'git push failed'}`,
+        message: `committed ${tag} locally, but the push failed: ${commandFailureLine(pushed, 'git push failed')}`,
         value: { repo: target.entry.repo, from: next.from, to: next.to, tag, branch: state.branch, pushed: false },
       })
       return
@@ -2621,7 +2691,7 @@ export function apply(ctx, rawConfig) {
     }
     const result = await runTool(ghPath, ['run', 'view', String(runId), '-R', target.slug, '--log-failed'], config.requestTimeoutMs)
     if (!result.ok && result.stdout.trim() === '') {
-      writeJson(res, 502, { ok: false, code: 'gh-failed', message: result.killed ? `gh timed out after ${config.requestTimeoutMs} ms` : firstLine(result.stderr) })
+      writeJson(res, 502, { ok: false, code: 'gh-failed', message: result.killed ? `gh timed out after ${config.requestTimeoutMs} ms` : commandFailureLine(result, 'gh failed') })
       return
     }
     // The panel shows a tail, not a log viewer: `--log-failed` can be megabytes.
@@ -2732,7 +2802,7 @@ export function apply(ctx, rawConfig) {
         Math.max(current.requestTimeoutMs, 60_000),
       )
       if (!fetched.ok) {
-        writeJson(res, 502, { ok: false, code: 'download-failed', message: firstLine(fetched.stderr) || `gh release download failed for ${latest.asset}` })
+        writeJson(res, 502, { ok: false, code: 'download-failed', message: commandFailureLine(fetched, `gh release download failed for ${latest.asset}`) })
         return
       }
       if (!existsSync(tarball)) {
@@ -2937,7 +3007,7 @@ export function apply(ctx, rawConfig) {
       env: invocation.env,
     })
     if (result.ok !== true) {
-      return { loggedIn: false, account: null, message: firstLine(result.stderr) || firstLine(result.stdout) || 'the package manager refused to answer' }
+      return { loggedIn: false, account: null, message: commandFailureLine(result, 'the package manager refused to answer') }
     }
     const account = firstLine(result.stdout)
     return account === ''
@@ -3218,7 +3288,7 @@ export function apply(ctx, rawConfig) {
           : classifyPublishFailure(`${result.stdout}\n${result.stderr}`)
         const message = result.killed === true
           ? `the publish timed out after ${String(NPM_PUBLISH_TIMEOUT_MS)} ms`
-          : (firstLine(result.stderr) || firstLine(result.stdout) || 'the publish failed')
+          : commandFailureLine(result, 'the publish failed')
         const status = code === 'otp-required' || code === 'not-logged-in' || code === 'forbidden' || code === 'email-unverified'
           ? 401
           : code === 'already-published'
