@@ -20,7 +20,7 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
+import { classifyPublishFailure, classifySpec, collectRepo, commandFailureLine, compareVersions, describeInstall, effectiveConfig, firstMeaningfulLine, fullSha, ghJson, hasNpmToken, nextVersion, normalizeRegistry, normalizeRepoEntry, npmAuthState, npmPackageState, npmPublishVerdict, npmrcAuthKey, packumentUrl, parseAuthStatus, parseReposFile, pickInstallableRelease, readDirtyCount, readLocalState, readLocalVersion, readManifest, readProfileInstall, releasePreflight, resolveConfig, resolveConfigFilePath, resolveGhPath, resolveNpmrcPath, resolvePackageManagerInvocation, resolveProfileDir, resolveSlug, rewriteVersion, runTool, updateState, upsertAuthToken, versionFromTag } from '../index.js'
 
 const results = []
 let failed = 0
@@ -446,6 +446,13 @@ check('a registry 5xx is not blamed on the user', classifyPublishFailure('npm ER
 check('a network failure is recognised', classifyPublishFailure('request to https://registry.npmjs.org failed, reason: getaddrinfo ENOTFOUND') === 'network')
 check('unrecognised output is named unknown rather than guessed at', classifyPublishFailure('something else entirely') === 'unknown')
 check('empty output is unknown, not a crash', classifyPublishFailure('') === 'unknown' && classifyPublishFailure(undefined) === 'unknown')
+
+/* The read that decides whether a version is already on npm goes through a CDN with
+   `max-age=300` — measured, a plain GET came back with `age: 116`, so for up to five
+   minutes after a successful publish the panel still described the previous state and
+   kept offering a push the registry would refuse. */
+check('the packument is read from the origin, not a five-minute-old CDN copy', packumentUrl('https://registry.npmjs.org/', 'dsh-plugin-restart') === 'https://registry.npmjs.org/dsh-plugin-restart?write=true')
+check('a registry that already carries a query keeps the name out of it', packumentUrl('https://r.example/npm/?a=1', 'x') === 'https://r.example/npm/x?a=1&write=true')
 
 /* The line the panel shows. Captured from a real `pnpm publish` of an
    already-published version: every byte goes to STDOUT (measured: stderr = 0), the

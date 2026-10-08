@@ -1543,6 +1543,36 @@ export function npmPackageState(packument, version) {
 }
 
 /**
+ * The URL a packument is read from.
+ *
+ * `?write=true` is how npm's own publish path asks for the document it is about to
+ * write against, and here it is not decoration — it is the difference between the
+ * panel agreeing with a publish and calling it a failure. Measured on this machine
+ * against a package that was just published:
+ *
+ *   GET /<pkg>              cache-control: public, max-age=300, age: 116
+ *   GET /<pkg>?write=true   cache-control: public, max-age=300, age: —   (origin)
+ *
+ * The registry's packument is served through a CDN that may hand back a copy up to
+ * five minutes old, so for five minutes after a successful publish the panel went on
+ * saying "npm 待推 v1.1.1" about a version that was already there — and, worse, kept
+ * offering a push for a version the registry would refuse. A local disk cache has a
+ * TTL and can be cleared; this one belongs to someone else, so the read has to ask
+ * for the origin.
+ *
+ * @param {string} registry - normalized registry base.
+ * @param {string} packageName - the package to ask about.
+ * @returns {string} the URL.
+ */
+export function packumentUrl(registry, packageName) {
+  const base = String(registry)
+  const query = base.indexOf('?')
+  if (query === -1) return `${base}${packageName}?write=true`
+  // A base that already carries a query puts the package name BEFORE it, not inside it.
+  return `${base.slice(0, query)}${packageName}${base.slice(query)}&write=true`
+}
+
+/**
  * Whether this machine can publish, as three states rather than a boolean.
  *
  * `whoami` is the obvious probe and not a sufficient one. It is a user-level
@@ -2976,17 +3006,29 @@ export function apply(ctx, rawConfig) {
    * @returns {Promise<{ok: true, value: object|null}|{ok: false, message: string}>}
    */
   const fetchPackument = async (registry, packageName) => {
-    try {
-      const response = await fetch(`${registry}${packageName}`, {
-        headers: { accept: 'application/json' },
-        signal: AbortSignal.timeout(NPM_STATUS_TIMEOUT_MS),
-      })
-      if (response.status === 404) return { ok: true, value: null }
-      if (!response.ok) return { ok: false, message: `the registry answered HTTP ${String(response.status)}` }
-      return { ok: true, value: await response.json() }
-    } catch (error) {
-      return { ok: false, message: String(error?.message ?? error) }
+    const attempt = async (url) => {
+      try {
+        const response = await fetch(url, {
+          // `no-cache` is the standard half of the same request: it asks any cache in
+          // the path to revalidate rather than answer from its copy.
+          headers: { accept: 'application/json', 'cache-control': 'no-cache' },
+          signal: AbortSignal.timeout(NPM_STATUS_TIMEOUT_MS),
+        })
+        if (response.status === 404) return { ok: true, value: null }
+        if (!response.ok) return { ok: false, message: `the registry answered HTTP ${String(response.status)}` }
+        return { ok: true, value: await response.json() }
+      } catch (error) {
+        return { ok: false, message: String(error?.message ?? error) }
+      }
     }
+    const fresh = await attempt(packumentUrl(registry, packageName))
+    if (fresh.ok === true) return fresh
+    /*
+     * An unknown query parameter is the one thing a different registry may refuse, and
+     * `npmRegistry` is configurable. One retry without it keeps this from turning a
+     * cache fix into a panel that says "unknown" everywhere.
+     */
+    return await attempt(`${registry}${packageName}`)
   }
 
   /**
