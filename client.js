@@ -377,7 +377,10 @@ window.__ModuleLoader__.load({
       'bili.credential.source': '凭据文件 {path}',
       'bili.credential.external': '这份凭据来自配置指定的外部文件（不是面板写入的）：{path}',
       'bili.signIn': '登录 B 站',
-      'bili.signIn.hint': '点一下会生成一个登录链接：用手机 B 站扫码，或在你已经登录 B 站的浏览器里打开并确认。这里会自动继续，不需要终端。',
+      'bili.signIn.hint': '点一下会生成一个二维码：用手机 B 站 App 扫，或者在你已经登录 B 站的浏览器里打开那条链接确认。这里会自动继续，不需要终端。',
+      'bili.qrLabel': 'B 站登录二维码',
+      'bili.qrHint': '用手机 B 站 App 扫码。二维码约 3 分钟后过期，过期就再点一次【登录 B 站】。',
+      'bili.qrTooLong': '这条登录链接太长，画不成二维码——请用【打开登录页面】。',
       'bili.openLogin': '打开登录页面',
       'bili.waiting': '等待扫码…',
       'bili.waitingScanned': '已扫码，请在手机上确认…',
@@ -711,7 +714,10 @@ window.__ModuleLoader__.load({
       'bili.credential.source': 'Credential file {path}',
       'bili.credential.external': 'This credential comes from the external file named in the config, not from this panel: {path}',
       'bili.signIn': 'Sign in to Bilibili',
-      'bili.signIn.hint': 'One click produces a sign-in link: scan it with the Bilibili app, or open it in a browser that is already signed in and confirm. This page continues by itself — no terminal needed.',
+      'bili.signIn.hint': 'One click produces a code to scan with the Bilibili app — or open the link it comes with in a browser that is already signed in and confirm. This page continues by itself, with no terminal.',
+      'bili.qrLabel': 'Bilibili sign-in code',
+      'bili.qrHint': 'Scan this with the Bilibili app. It expires after about three minutes; press 【Sign in to Bilibili】 again if it does.',
+      'bili.qrTooLong': 'This sign-in URL is too long to draw as a code — use 【Open the sign-in page】.',
       'bili.openLogin': 'Open the sign-in page',
       'bili.waiting': 'Waiting to be scanned…',
       'bili.waitingScanned': 'Scanned — confirm it on your phone…',
@@ -857,6 +863,12 @@ window.__ModuleLoader__.load({
 /* The commit confirmation: a sentence, the file list, a message field, then the two
    buttons. A column, because the list wraps and a row would push the buttons off. */
 .dsc-commit { display: flex; flex-direction: column; gap: var(--dsc-gap); padding: var(--dsc-gap) 0; font-size: var(--dsc-fs-sm); }
+/* The sign-in code. White behind, black modules, fixed size whatever the theme is:
+   a QR is read by a camera, so it cannot follow a dark theme's colours the way the
+   rest of this panel does. */
+.dsc-scan { display: flex; flex-direction: column; gap: 6px; padding: var(--dsc-gap) 0; align-items: flex-start; }
+.dsc-qr { width: 176px; height: 176px; background: #fff; padding: 8px; border-radius: 4px; box-sizing: content-box; }
+.dsc-qr rect { fill: #000; }
 /* The console's own segment strip, inside its one Plugins tab. Left-aligned and with a
    rule under it, so it reads as "which part of this page" rather than as a second set
    of tabs floating in the middle: the dsc-bar rule alone would spread three buttons
@@ -3142,6 +3154,12 @@ window.__ModuleLoader__.load({
       }, [confirmingSignOut, onChanged, post, setNotice, t])
 
       const running = login.state === 'waiting' || login.state === 'scanned'
+      /* Encoded once per URL: the panel re-renders on every poll, and building the
+         matrix is the only expensive thing on this screen. */
+      const qr = React.useMemo(
+        () => (typeof login.url === 'string' && login.url !== '' ? qrFor(login.url) : null),
+        [login.url],
+      )
       React.useEffect(() => {
         if (!running) return undefined
         let cancelled = false
@@ -3206,13 +3224,32 @@ window.__ModuleLoader__.load({
 
           running
             ? h(
-                'div',
-                { className: 'dsc-setup-line' },
-                h('span', { className: 'dsc-grow' }, login.state === 'scanned' ? t('bili.waitingScanned') : t('bili.waiting')),
-                login.url
-                  ? h(Btn, { disabled: busy !== '', onClick: () => globalThis.open(String(login.url), '_blank', 'noopener,noreferrer') }, t('bili.openLogin'))
-                  : null,
-                h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void cancel() } }, t('bili.cancelSignIn')),
+                React.Fragment,
+                null,
+                /*
+                 * The code itself. The sign-in hands back a URL whose whole purpose is to
+                 * be SCANNED — and the panel used to answer that with a link, while its
+                 * own hint told the reader to scan something. Drawing it here is what
+                 * makes "scan it with the phone" true; the link stays beside it for the
+                 * browser that is already signed in, which is the other way through.
+                 */
+                qr === null
+                  ? h('span', { className: 'dsc-quiet' }, login.url ? t('bili.qrTooLong') : null)
+                  : h(
+                      'div',
+                      { className: 'dsc-scan' },
+                      h(QrCode, { code: qr, label: t('bili.qrLabel') }),
+                      h('span', { className: 'dsc-quiet' }, t('bili.qrHint')),
+                    ),
+                h(
+                  'div',
+                  { className: 'dsc-setup-line' },
+                  h('span', { className: 'dsc-grow' }, login.state === 'scanned' ? t('bili.waitingScanned') : t('bili.waiting')),
+                  login.url
+                    ? h(Btn, { disabled: busy !== '', onClick: () => globalThis.open(String(login.url), '_blank', 'noopener,noreferrer') }, t('bili.openLogin'))
+                    : null,
+                  h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: () => { void cancel() } }, t('bili.cancelSignIn')),
+                ),
               )
             : h(
                 'div',
@@ -3425,6 +3462,419 @@ window.__ModuleLoader__.load({
      * is configuration plus a public record, and belongs beside the two credential
      * pages that already live here.
      */
+    /* ------------------------------------------------------------- QR code -- */
+    /*
+     * A QR encoder, because the Bilibili sign-in hands over a string a PHONE has to
+     * SCAN, and this half has nothing to draw one with: the client builtins are React,
+     * `ctx`, `host.call`, `styles` and `console`, and this plugin has no dependencies by
+     * design. The two ways out are both worse — an external QR image service would hand
+     * a live sign-in URL to a third party, and adding a package would put a dependency
+     * tree inside a plugin whose install story is "one tgz, no tree".
+     *
+     * Byte mode, error correction M, versions 1-10 (up to 213 bytes): enough for the
+     * ~130-byte login URL with room to spare, and small enough to be checked rather than
+     * trusted. Every table here was read out of a reference implementation instead of
+     * recalled, and `tests/client-render.mjs` compares the modules this produces against
+     * a matrix that reference produced, frozen into the test.
+     *
+     * The encoder is deliberately quiet about failure: a string that does not fit comes
+     * back as `null` and the caller shows the link instead of a wrong code.
+     */
+
+    /** Total codewords (data + EC) per version, 1-10. */
+    const QR_CODEWORDS = [26, 44, 70, 100, 134, 172, 196, 242, 292, 346]
+    /** EC codewords for the whole symbol, level M. */
+    const QR_EC_M = [10, 16, 26, 36, 48, 64, 72, 88, 110, 130]
+    /** Reed-Solomon blocks, level M. */
+    const QR_BLOCKS_M = [1, 1, 1, 2, 2, 4, 4, 4, 5, 5]
+
+    const QR_GF_EXP = new Uint8Array(512)
+    const QR_GF_LOG = new Uint8Array(256)
+    {
+      let value = 1
+      for (let i = 0; i < 255; i += 1) {
+        QR_GF_EXP[i] = value
+        QR_GF_LOG[value] = i
+        value <<= 1
+        if ((value & 0x100) !== 0) value ^= 0x11d
+      }
+      for (let i = 255; i < 512; i += 1) QR_GF_EXP[i] = QR_GF_EXP[i - 255]
+    }
+
+    const qrMultiply = (a, b) => (a === 0 || b === 0 ? 0 : QR_GF_EXP[QR_GF_LOG[a] + QR_GF_LOG[b]])
+
+    /** The generator polynomial of this degree, highest power first. */
+    function qrGenerator(degree) {
+      let poly = [1]
+      for (let i = 0; i < degree; i += 1) {
+        const next = new Array(poly.length + 1).fill(0)
+        for (let j = 0; j < poly.length; j += 1) {
+          next[j] ^= poly[j]
+          next[j + 1] ^= qrMultiply(poly[j], QR_GF_EXP[i])
+        }
+        poly = next
+      }
+      return poly
+    }
+
+    /** The EC codewords for one data block. */
+    function qrEcCodewords(block, ecCount) {
+      const generator = qrGenerator(ecCount)
+      const work = new Uint8Array(block.length + ecCount)
+      work.set(block)
+      for (let i = 0; i < block.length; i += 1) {
+        const factor = work[i]
+        if (factor === 0) continue
+        for (let j = 0; j < generator.length; j += 1) work[i + j] ^= qrMultiply(generator[j], factor)
+      }
+      return work.slice(block.length)
+    }
+
+    /** The smallest version that holds this many bytes, or null. */
+    function qrVersionFor(byteLength) {
+      for (let version = 1; version <= QR_CODEWORDS.length; version += 1) {
+        const countBits = version <= 9 ? 8 : 16
+        const capacityBits = (QR_CODEWORDS[version - 1] - QR_EC_M[version - 1]) * 8
+        if (4 + countBits + byteLength * 8 <= capacityBits) return version
+      }
+      return null
+    }
+
+    /** The final interleaved codeword stream for this text, or null if it does not fit. */
+    function qrCodewords(bytes) {
+      const version = qrVersionFor(bytes.length)
+      if (version === null) return null
+      const countBits = version <= 9 ? 8 : 16
+      const dataCodewords = QR_CODEWORDS[version - 1] - QR_EC_M[version - 1]
+      const dataBits = dataCodewords * 8
+      const bits = []
+      const push = (value, length) => {
+        for (let i = length - 1; i >= 0; i -= 1) bits.push((value >>> i) & 1)
+      }
+      push(0b0100, 4)
+      push(bytes.length, countBits)
+      for (const byte of bytes) push(byte, 8)
+      push(0, Math.min(4, dataBits - bits.length))
+      while (bits.length % 8 !== 0) bits.push(0)
+      let padIndex = 0
+      while (bits.length < dataBits) {
+        push(padIndex % 2 === 0 ? 0xec : 0x11, 8)
+        padIndex += 1
+      }
+      const data = new Uint8Array(dataCodewords)
+      for (let i = 0; i < dataCodewords; i += 1) {
+        let byte = 0
+        for (let b = 0; b < 8; b += 1) byte = (byte << 1) | bits[i * 8 + b]
+        data[i] = byte
+      }
+
+      const total = QR_CODEWORDS[version - 1]
+      const ecTotal = QR_EC_M[version - 1]
+      const blocks = QR_BLOCKS_M[version - 1]
+      const group2 = total % blocks
+      const group1 = blocks - group2
+      const dataInGroup1 = Math.floor(dataCodewords / blocks)
+      const ecCount = Math.floor(total / blocks) - dataInGroup1
+      const dataBlocks = []
+      const ecBlocks = []
+      let offset = 0
+      for (let b = 0; b < blocks; b += 1) {
+        const size = b < group1 ? dataInGroup1 : dataInGroup1 + 1
+        const block = data.slice(offset, offset + size)
+        dataBlocks.push(block)
+        ecBlocks.push(qrEcCodewords(block, ecCount))
+        offset += size
+      }
+      const out = new Uint8Array(total)
+      let index = 0
+      const maxData = dataInGroup1 + (group2 > 0 ? 1 : 0)
+      for (let i = 0; i < maxData; i += 1) {
+        for (const block of dataBlocks) if (i < block.length) out[index++] = block[i]
+      }
+      for (let i = 0; i < ecCount; i += 1) {
+        for (const block of ecBlocks) out[index++] = block[i]
+      }
+      return { version, codewords: out }
+    }
+
+    /** Centre coordinates of the alignment patterns, per the version. */
+    function qrAlignmentPositions(version) {
+      if (version === 1) return []
+      const count = Math.floor(version / 7) + 2
+      const step = version === 32 ? 26 : Math.ceil((version * 4 + 4) / (count * 2 - 2)) * 2
+      const positions = [6]
+      for (let pos = version * 4 + 10; positions.length < count; pos -= step) positions.splice(1, 0, pos)
+      return positions
+    }
+
+    const qrMaskBit = (pattern, row, col) => {
+      switch (pattern) {
+        case 0: return (row + col) % 2 === 0
+        case 1: return row % 2 === 0
+        case 2: return col % 3 === 0
+        case 3: return (row + col) % 3 === 0
+        case 4: return (Math.floor(row / 2) + Math.floor(col / 3)) % 2 === 0
+        case 5: return ((row * col) % 2) + ((row * col) % 3) === 0
+        case 6: return (((row * col) % 2) + ((row * col) % 3)) % 2 === 0
+        default: return (((row + col) % 2) + ((row * col) % 3)) % 2 === 0
+      }
+    }
+
+    /** The 15 format bits for level M and this mask, BCH-protected and XORed. */
+    function qrFormatBits(maskPattern) {
+      const data = (0b00 << 3) | maskPattern
+      let remainder = data << 10
+      for (let i = 14; i >= 10; i -= 1) {
+        if (((remainder >>> i) & 1) === 1) remainder ^= 0b10100110111 << (i - 10)
+      }
+      return ((data << 10) | remainder) ^ 0b101010000010010
+    }
+
+    /** The 18 version bits for version 7 and up. */
+    function qrVersionBits(version) {
+      let remainder = version << 12
+      for (let i = 17; i >= 12; i -= 1) {
+        if (((remainder >>> i) & 1) === 1) remainder ^= 0b1111100100101 << (i - 12)
+      }
+      return (version << 12) | remainder
+    }
+
+    /** One complete symbol, masked and with its format bits written. */
+    function qrBuildMatrix(codewords, version, maskPattern) {
+      const size = version * 4 + 17
+      const modules = Array.from({ length: size }, () => new Uint8Array(size))
+      const reserved = Array.from({ length: size }, () => new Uint8Array(size))
+      const put = (row, col, dark) => {
+        modules[row][col] = dark === true ? 1 : 0
+        reserved[row][col] = 1
+      }
+
+      const finder = (top, left) => {
+        for (let r = -1; r <= 7; r += 1) {
+          for (let c = -1; c <= 7; c += 1) {
+            const row = top + r
+            const col = left + c
+            if (row < 0 || row >= size || col < 0 || col >= size) continue
+            const ring = (r === 0 || r === 6) && c >= 0 && c <= 6
+            const side = (c === 0 || c === 6) && r >= 0 && r <= 6
+            const core = r >= 2 && r <= 4 && c >= 2 && c <= 4
+            put(row, col, ring || side || core)
+          }
+        }
+      }
+      finder(0, 0)
+      finder(0, size - 7)
+      finder(size - 7, 0)
+
+      for (let i = 8; i < size - 8; i += 1) {
+        put(6, i, i % 2 === 0)
+        put(i, 6, i % 2 === 0)
+      }
+
+      const alignment = qrAlignmentPositions(version)
+      for (const row of alignment) {
+        for (const col of alignment) {
+          const overlapsFinder = (row === 6 && col === 6) || (row === 6 && col === size - 7) || (row === size - 7 && col === 6)
+          if (overlapsFinder) continue
+          for (let r = -2; r <= 2; r += 1) {
+            for (let c = -2; c <= 2; c += 1) put(row + r, col + c, Math.max(Math.abs(r), Math.abs(c)) !== 1)
+          }
+        }
+      }
+
+      /* Reserve the format and version areas before the data goes in, so the data
+         placement skips them and the mask never touches them. */
+      for (let i = 0; i <= 8; i += 1) {
+        if (i !== 6) {
+          reserved[8][i] = 1
+          reserved[i][8] = 1
+        }
+      }
+      reserved[8][8] = 1
+      for (let i = 0; i < 8; i += 1) {
+        reserved[8][size - 1 - i] = 1
+        reserved[size - 1 - i][8] = 1
+      }
+      put(size - 8, 8, true)
+      if (version >= 7) {
+        for (let i = 0; i < 18; i += 1) {
+          const row = Math.floor(i / 3)
+          const col = size - 11 + (i % 3)
+          reserved[row][col] = 1
+          reserved[col][row] = 1
+        }
+      }
+
+      const totalBits = codewords.length * 8
+      let bitIndex = 0
+      let upward = true
+      for (let col = size - 1; col > 0; col -= 2) {
+        if (col === 6) col -= 1
+        for (let i = 0; i < size; i += 1) {
+          const row = upward ? size - 1 - i : i
+          for (const c of [col, col - 1]) {
+            if (reserved[row][c] === 1) continue
+            const bit = bitIndex < totalBits ? (codewords[bitIndex >> 3] >>> (7 - (bitIndex & 7))) & 1 : 0
+            modules[row][c] = bit
+            bitIndex += 1
+          }
+        }
+        upward = !upward
+      }
+
+      for (let row = 0; row < size; row += 1) {
+        for (let col = 0; col < size; col += 1) {
+          if (reserved[row][col] === 0 && qrMaskBit(maskPattern, row, col)) modules[row][col] ^= 1
+        }
+      }
+
+      /*
+       * The two format strips, and which bit goes where. They are not two copies laid
+       * out the same way: the strip beside the TOP-LEFT finder is the VERTICAL one
+       * (column 8, bits 0-7 climbing the corner then bits 8-14 up the bottom-left), and
+       * the other is the HORIZONTAL one (row 8, bits 0-7 running left from the
+       * bottom-right corner, then bit 8 and bits 9-14 back toward the corner). Getting
+       * this backwards produces a perfectly ordinary-looking symbol that no scanner
+       * reads — which is why it is checked against a reference matrix, not by eye.
+       */
+      const format = qrFormatBits(maskPattern)
+      for (let i = 0; i < 15; i += 1) {
+        const bit = ((format >>> i) & 1) === 1
+        if (i < 6) modules[i][8] = bit ? 1 : 0
+        else if (i < 8) modules[i + 1][8] = bit ? 1 : 0
+        else modules[size - 15 + i][8] = bit ? 1 : 0
+        if (i < 8) modules[8][size - i - 1] = bit ? 1 : 0
+        else if (i < 9) modules[8][7] = bit ? 1 : 0
+        else modules[8][14 - i] = bit ? 1 : 0
+      }
+      if (version >= 7) {
+        const info = qrVersionBits(version)
+        for (let i = 0; i < 18; i += 1) {
+          const bit = ((info >>> i) & 1) === 1 ? 1 : 0
+          const row = Math.floor(i / 3)
+          const col = size - 11 + (i % 3)
+          modules[row][col] = bit
+          modules[col][row] = bit
+        }
+      }
+      return { modules, size }
+    }
+
+    /** The spec's four penalty rules, used to pick the least confusing mask. */
+    function qrPenalty(modules, size) {
+      let penalty = 0
+      const at = (row, col) => modules[row][col]
+      for (let i = 0; i < size; i += 1) {
+        for (const vertical of [false, true]) {
+          let run = 1
+          for (let j = 1; j < size; j += 1) {
+            const previous = vertical ? at(j - 1, i) : at(i, j - 1)
+            const current = vertical ? at(j, i) : at(i, j)
+            if (current === previous) {
+              run += 1
+            } else {
+              if (run >= 5) penalty += 3 + (run - 5)
+              run = 1
+            }
+          }
+          if (run >= 5) penalty += 3 + (run - 5)
+        }
+      }
+      for (let row = 0; row < size - 1; row += 1) {
+        for (let col = 0; col < size - 1; col += 1) {
+          const first = at(row, col)
+          if (first === at(row, col + 1) && first === at(row + 1, col) && first === at(row + 1, col + 1)) penalty += 3
+        }
+      }
+      const patternA = [1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0]
+      const patternB = [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1]
+      for (let i = 0; i < size; i += 1) {
+        for (let j = 0; j + 11 <= size; j += 1) {
+          for (const vertical of [false, true]) {
+            let matchesA = true
+            let matchesB = true
+            for (let k = 0; k < 11; k += 1) {
+              const value = vertical ? at(j + k, i) : at(i, j + k)
+              if (value !== patternA[k]) matchesA = false
+              if (value !== patternB[k]) matchesB = false
+            }
+            if (matchesA) penalty += 40
+            if (matchesB) penalty += 40
+          }
+        }
+      }
+      let dark = 0
+      for (let row = 0; row < size; row += 1) {
+        for (let col = 0; col < size; col += 1) dark += at(row, col) === 1 ? 1 : 0
+      }
+      const percent = (dark * 100) / (size * size)
+      penalty += Math.floor(Math.abs(percent - 50) / 5) * 10
+      return penalty
+    }
+
+    /** UTF-8 bytes without a dependency on `TextEncoder`, which a sandbox may not have. */
+    function qrUtf8(text) {
+      const bytes = []
+      for (const character of String(text)) {
+        const code = character.codePointAt(0)
+        if (code < 0x80) bytes.push(code)
+        else if (code < 0x800) bytes.push(0xc0 | (code >> 6), 0x80 | (code & 0x3f))
+        else if (code < 0x10000) bytes.push(0xe0 | (code >> 12), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f))
+        else bytes.push(0xf0 | (code >> 18), 0x80 | ((code >> 12) & 0x3f), 0x80 | ((code >> 6) & 0x3f), 0x80 | (code & 0x3f))
+      }
+      return bytes
+    }
+
+    /**
+     * A QR code for this text, as horizontal runs of dark modules.
+     *
+     * Runs rather than one rect per module: a version-8 symbol has ~1000 dark modules
+     * and ~250 runs, and the panel redraws on every poll.
+     *
+     * @param {string} text - what the phone should read.
+     * @returns {{size: number, runs: Array<{row: number, col: number, width: number}>}|null}
+     */
+    function qrFor(text) {
+      const encoded = qrCodewords(qrUtf8(text))
+      if (encoded === null) return null
+      let best = null
+      for (let mask = 0; mask < 8; mask += 1) {
+        const candidate = qrBuildMatrix(encoded.codewords, encoded.version, mask)
+        const score = qrPenalty(candidate.modules, candidate.size)
+        if (best === null || score < best.score) best = { score, ...candidate }
+      }
+      const runs = []
+      for (let row = 0; row < best.size; row += 1) {
+        let col = 0
+        while (col < best.size) {
+          if (best.modules[row][col] === 0) {
+            col += 1
+            continue
+          }
+          let width = 1
+          while (col + width < best.size && best.modules[row][col + width] === 1) width += 1
+          runs.push({ row, col, width })
+          col += width
+        }
+      }
+      return { size: best.size, runs }
+    }
+
+    function QrCode(props) {
+      const code = props.code
+      return h(
+        'svg',
+        {
+          className: 'dsc-qr',
+          viewBox: `0 0 ${code.size} ${code.size}`,
+          role: 'img',
+          'aria-label': props.label,
+          shapeRendering: 'crispEdges',
+        },
+        ...code.runs.map((run, index) => h('rect', { key: `r${index}`, x: run.col, y: run.row, width: run.width, height: 1 })),
+      )
+    }
+
     function BilibiliPage(props) {
       const t = typeof props?.t === 'function' ? props.t : (key) => key
       const { bili, error, setError, loadBili } = useConsoleState()

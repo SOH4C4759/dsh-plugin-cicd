@@ -1263,5 +1263,88 @@ function previewFixture(overrides) {
   check('and the button says why', String(button?.props?.title ?? '').includes('没有可提交或推送的东西'), String(button?.props?.title))
 }
 
+/* -- 19. The sign-in code is drawn, not merely linked -------------------------
+   The URL the sign-in hands back exists to be SCANNED, and the panel used to answer it
+   with a link while its own hint said "scan it with the phone" — nothing on screen to
+   scan. So the encoder that draws it is checked module for module against a matrix a
+   reference implementation produced, frozen here as a hash and one full row. A single
+   flipped module changes both: a code that looks right and does not scan is worse than
+   no code, because the person holding the phone is the one who finds out.
+   (The reference — `qrcode`, which another package in this profile happens to depend
+   on — is NOT a dependency of this plugin: it was the oracle while the encoder was
+   written, and what it produced is what is frozen below.) */
+{
+  /** The first `<svg>` in a tree, which is the code. */
+  function findSvg(node) {
+    if (node === null || typeof node !== 'object') return null
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = findSvg(child)
+        if (found !== null) return found
+      }
+      return null
+    }
+    if (node.type === 'svg') return node
+    return findSvg(node.children)
+  }
+
+  /** FNV-1a over the modules, row by row. */
+  function moduleHash(grid) {
+    let hash = 0x811c9dc5
+    for (const row of grid) {
+      for (const value of row) {
+        hash ^= value === 1 ? 49 : 48
+        hash = Math.imul(hash, 0x01000193) >>> 0
+      }
+    }
+    return hash
+  }
+
+  const rowText = (grid, index) => Array.from(grid[index]).join('')
+
+  const url = 'https://account.bilibili.com/h5/account-h5/auth/scan-web?navhide=1&callback=close&qrcode_key=fda852ed16a061fae96dd764c797168f&from='
+  fixture = {
+    '/status': { ok: true, value: baseStatus.value },
+    '/bilibili-status': {
+      ok: true,
+      value: biliValue({ login: { state: 'waiting', url, startedAt: '2026-10-08T01:00:00Z', expiresAt: '2026-10-08T01:03:00Z', scanned: false, message: '' } }),
+    },
+  }
+  values.clear()
+  effectSlots.clear()
+  calls.length = 0
+  const waiting = await renderSettings('bilibili')
+  const svg = findSvg(waiting)
+
+  check('a waiting sign-in draws something to scan', svg !== null, textOf(waiting).replace(/\s+/g, ' ').slice(0, 200))
+  if (svg !== null) {
+    const size = Number(String(svg.props?.viewBox ?? '').split(' ')[2])
+    const grid = Array.from({ length: size }, () => new Uint8Array(size))
+    for (const rect of svg.children ?? []) {
+      const x = Number(rect.props?.x)
+      const y = Number(rect.props?.y)
+      const width = Number(rect.props?.width)
+      for (let k = 0; k < width; k += 1) grid[y][x + k] = 1
+    }
+    check('the code is the version the reference chose', size === 49, String(size))
+    check('every module matches the reference', moduleHash(grid) === 2409592449, String(moduleHash(grid)))
+    check('the first row matches as well, so a hash collision cannot hide a difference', rowText(grid, 0) === '1111111000101110111010010111110011011100101111111', rowText(grid, 0))
+    check('the code is announced as an image, for a screen reader', svg.props?.role === 'img' && svg.props?.['aria-label'] === 'B 站登录二维码', String(svg.props?.['aria-label']))
+  }
+
+  /* Longer than version 10 holds. The panel shows the link and says why, never a code
+     that encodes something else. */
+  fixture['/bilibili-status'] = {
+    ok: true,
+    value: biliValue({ login: { state: 'waiting', url: `https://example.com/${'a'.repeat(260)}`, startedAt: '2026-10-08T01:00:00Z', expiresAt: '2026-10-08T01:03:00Z', scanned: false, message: '' } }),
+  }
+  values.clear()
+  effectSlots.clear()
+  const tooLong = await renderSettings('bilibili')
+  check('a URL too long to encode draws no code', findSvg(tooLong) === null)
+  check('and says so, instead of drawing something wrong', textOf(tooLong).includes('画不成二维码'), textOf(tooLong).replace(/\s+/g, ' ').slice(-200))
+  check('the link is still there, which is the other way through', hasButton(tooLong, '打开登录页面'))
+}
+
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
 if (failed > 0) process.exit(1)
