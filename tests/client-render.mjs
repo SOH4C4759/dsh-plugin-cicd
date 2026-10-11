@@ -170,6 +170,31 @@ function hasButton(node, label) {
   return own || hasButton(node.children, label)
 }
 
+/** Every button label in a rendered tree, in order. */
+function buttonLabels(node, out = []) {
+  if (node === null || typeof node !== 'object') return out
+  if (Array.isArray(node)) {
+    for (const child of node) buttonLabels(child, out)
+    return out
+  }
+  if (node.type === 'button') out.push(textOf(node).trim())
+  return buttonLabels(node.children, out)
+}
+
+/** The first button node whose label contains this text, or null. */
+function findButton(node, label) {
+  if (node === null || typeof node !== 'object') return null
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const found = findButton(child, label)
+      if (found !== null) return found
+    }
+    return null
+  }
+  if (node.type === 'button' && textOf(node).includes(label)) return node
+  return findButton(node.children, label)
+}
+
 /**
  * Press the first button whose text contains this label, as a user would.
  *
@@ -222,9 +247,25 @@ const document = {
 
 let fixture = {}
 const calls = []
-async function fetchStub(url) {
+/**
+ * What each request carried, beside its path.
+ *
+ * The path alone was enough while every action had one shape. 发布同台's two calls
+ * take the two things only a person knows — a commit message and a one-time
+ * password — so a test that only saw "/release-all was called" could not tell a
+ * press that carried the message from one that dropped it.
+ */
+const bodies = []
+async function fetchStub(url, init) {
   const path = String(url).slice(String(url).indexOf('/api/dsh-cicd') + '/api/dsh-cicd'.length)
   calls.push(path)
+  let parsed = null
+  try {
+    parsed = typeof init?.body === 'string' ? JSON.parse(init.body) : null
+  } catch {
+    parsed = null
+  }
+  bodies.push({ path, body: parsed })
   const body = fixture[path] ?? { ok: false, code: 'not-found', message: `no fixture for ${path}` }
   return {
     ok: body.__status === undefined || (body.__status >= 200 && body.__status < 300),
@@ -1477,6 +1518,174 @@ function previewFixture(overrides) {
   clickButton(previewed, '仍然发送')
   const afterPost = await rerender()
   check('a post that does not read back says so', textOf(afterPost).includes('但公开列表里读不到'), textOf(afterPost).replace(/\s+/g, ' ').slice(-260))
+}
+
+/* -- 发布同台: one press of 发布 that is the code push, the Release and npm ----
+   The state this replaces is the one the panel used to leave behind: 发布 dispatched
+   a workflow that creates a DRAFT, npm was a separate button on purpose, and the
+   code push was a third. Three presses, three half-finished states that all look
+   like success from the row. So these checks are about the ORDER being visible
+   before the press (npm before the Release is made public), about the record coming
+   back afterwards (a held pipeline is not a failure), and about the flag turning the
+   whole thing off again. */
+
+/** One stage of a pipeline record, exactly as the Host sends it. */
+function stageFixture(id, status, detail = '') {
+  return { id, status, detail, at: '2026-10-11T00:00:00.000Z' }
+}
+
+/** One pipeline record, exactly as the Host sends it. */
+function pipelineFixture(overrides = {}) {
+  return {
+    id: 'pl-1',
+    repo: 'dsh-plugin-restart',
+    slug: 'SOH4C4759/dsh-plugin-restart',
+    tag: 'v1.0.1',
+    version: '1.0.1',
+    headSha: 'b'.repeat(40),
+    startedAt: '2026-10-11T00:00:00.000Z',
+    updatedAt: '2026-10-11T00:00:00.000Z',
+    status: 'running',
+    message: '',
+    blockedCode: null,
+    runId: 42,
+    runUrl: 'https://github.com/SOH4C4759/dsh-plugin-restart/actions/runs/42',
+    runConclusion: null,
+    skipNpm: false,
+    stages: [
+      stageFixture('push', 'done'),
+      stageFixture('version', 'done'),
+      stageFixture('dispatch', 'done'),
+      stageFixture('build', 'active'),
+      stageFixture('npm', 'pending'),
+      stageFixture('release', 'pending'),
+      stageFixture('announce', 'pending'),
+    ],
+    ...overrides,
+  }
+}
+
+/** The same configuration, with 发布说 becoming the whole pipeline. */
+const oneClickStatus = {
+  ...baseStatus.value,
+  config: { ...baseStatus.value.config, oneClickRelease: true },
+}
+
+{
+  const started = pipelineFixture({
+    stages: [
+      stageFixture('push', 'done'), stageFixture('version', 'done'), stageFixture('dispatch', 'done'),
+      stageFixture('build', 'active'), stageFixture('npm', 'pending'), stageFixture('release', 'pending'), stageFixture('announce', 'pending'),
+    ],
+  })
+  const collapsed = await renderPanel([repoFixture({
+    local: { available: true, branch: 'main', head: 'b'.repeat(40), dirty: 3, ahead: 0, behind: 0, upstreamKnown: true, files: ['package.json', 'client.js', 'index.js'] },
+  })], oneClickStatus, { '/release-all': { ok: true, value: { pipeline: started } } })
+  const rowLabels = buttonLabels(collapsed)
+  check('发布同台 turns 发布 into one press', rowLabels.includes('一键发布'), rowLabels.join(','))
+  check('the one press replaces the bare dispatch rather than sitting beside it', rowLabels.includes('发布') === false, rowLabels.join(','))
+  check('and it replaces the bump step, which the pipeline does itself', rowLabels.includes('升版本并发布') === false, rowLabels.join(','))
+
+  const asked = clickButton(collapsed, '一键发布')
+  const confirm = await rerender()
+  const confirmText = textOf(confirm)
+  check('the press asks before it writes anything', asked === true && confirmText.includes('顺序是有理由的'), confirmText.replace(/\s+/g, ' ').slice(0, 160))
+  const order = ['代码推送', '版本号', '触发构建', '等待构建', 'npm 推送', '公开 Release', 'B 站播报']
+  check('the confirmation names every stage of the pipeline', order.every((label) => confirmText.includes(label)), order.filter((label) => !confirmText.includes(label)).join(','))
+  check('npm is listed before the Release is made public', confirmText.lastIndexOf('npm 推送') < confirmText.lastIndexOf('公开 Release'))
+  check('a dirty tree is named before it is committed', confirmText.includes('将提交 3 个改动'), confirmText.replace(/\s+/g, ' ').slice(0, 200))
+  check('a press with a dirty tree and no message cannot be confirmed', findButton(confirm, '确认发布')?.props?.disabled === true)
+
+  typeInto(confirm, '这次改了什么', 'feat: one press')
+  const typed = await rerender()
+  check('typing a message arms the confirmation', findButton(typed, '确认发布')?.props?.disabled === false)
+  typeInto(typed, '账号开了 2FA 才填', '123456')
+  const filled = await rerender()
+  const pressed = clickButton(filled, '确认发布')
+  const after = await rerender()
+  const sent = bodies.filter((entry) => entry.path === '/release-all').pop() ?? null
+  check('confirming starts the pipeline on the Host', pressed === true && sent !== null, calls.join(','))
+  check('the press carries the commit message the person typed', sent?.body?.message === 'feat: one press', JSON.stringify(sent?.body ?? null))
+  check('the press carries the one-time password when one was given', sent?.body?.otp === '123456', JSON.stringify(sent?.body ?? null))
+  check('the panel reports the press as started, not as finished', textOf(after).includes('发布流水线已启动'), textOf(after).replace(/\s+/g, ' ').slice(0, 200))
+}
+
+/* A pipeline waiting on CI: every stage visible, none of them invented. */
+{
+  const tree = await renderPanel([repoFixture({ pipeline: pipelineFixture() })], oneClickStatus)
+  const { tree: opened } = await expandFirstRow(tree)
+  const text = textOf(opened)
+  check('a running pipeline says what it is waiting for', text.includes('进行中'), text.replace(/\s+/g, ' ').slice(0, 200))
+  check('every stage of the pipeline is on screen', ['代码推送', '版本号', '触发构建', '等待构建', 'npm 推送', '公开 Release', 'B 站播报'].every((label) => text.includes(label)))
+  check('the finished stages are told apart from the pending ones', text.includes('完成') && text.includes('待做'))
+  check('the run on GitHub is one press away', hasButton(opened, '看这次运行'))
+  check('a running pipeline can be abandoned', hasButton(opened, '不再跟进'))
+  check('a running pipeline is not offered a one-time password', hasButton(opened, '继续') === false)
+}
+
+/* A pipeline npm held at the draft: the release is still unpublished, and the panel
+   has to say so and offer both ways out — including "publish it without npm". */
+{
+  const held = pipelineFixture({
+    status: 'blocked',
+    blockedCode: 'otp-required',
+    message: 'EOTP — this operation requires a one-time password',
+    stages: [
+      stageFixture('push', 'done'),
+      stageFixture('version', 'done'),
+      stageFixture('dispatch', 'done'),
+      stageFixture('build', 'done'),
+      stageFixture('npm', 'blocked', 'EOTP — this operation requires a one-time password'),
+      stageFixture('release', 'pending'),
+      stageFixture('announce', 'pending'),
+    ],
+  })
+  const tree = await renderPanel([repoFixture({ pipeline: held })], oneClickStatus)
+  const { tree: opened } = await expandFirstRow(tree)
+  const text = textOf(opened)
+  check('a held pipeline names the reason npm refused', text.includes('npm 要求一次性密码'), text.replace(/\s+/g, ' ').slice(0, 240))
+  check('it offers the one-time password to continue with', hasButton(opened, '继续'))
+  check('it offers to publish the Release without npm', hasButton(opened, '跳过 npm 并公开 Release'))
+  check('the npm stage is shown as held rather than failed', text.includes('停住'))
+
+  typeInto(opened, '账号开了 2FA 才填', '654321')
+  const typed = await rerender()
+  clickButton(typed, '继续')
+  const sent = bodies.filter((entry) => entry.path === '/release-all-resume').pop() ?? null
+  check('continuing posts the fresh one-time password', sent?.body?.otp === '654321' && sent?.body?.skipNpm === false, JSON.stringify(sent?.body ?? null))
+
+  const again = await renderPanel([repoFixture({ pipeline: held })], oneClickStatus)
+  const { tree: reopened } = await expandFirstRow(again)
+  clickButton(reopened, '跳过 npm 并公开 Release')
+  const skipped = bodies.filter((entry) => entry.path === '/release-all-resume').pop() ?? null
+  check('publishing without npm says so rather than pretending npm was fine', skipped?.body?.skipNpm === true, JSON.stringify(skipped?.body ?? null))
+}
+
+/* A finished pipeline says which of the three pushes actually happened. */
+{
+  const done = pipelineFixture({
+    status: 'done',
+    stages: [
+      stageFixture('push', 'done'), stageFixture('version', 'done'), stageFixture('dispatch', 'done'),
+      stageFixture('build', 'done'), stageFixture('npm', 'done'), stageFixture('release', 'done'), stageFixture('announce', 'done'),
+    ],
+  })
+  const tree = await renderPanel([repoFixture({ pipeline: done })], oneClickStatus)
+  const { tree: opened } = await expandFirstRow(tree)
+  check('a finished pipeline says all three pushes happened', textOf(opened).includes('代码已推送、Release 已公开、npm 已推送'), textOf(opened).replace(/\s+/g, ' ').slice(0, 240))
+
+  const skipped = pipelineFixture({ ...done, stages: done.stages.map((stage) => (stage.id === 'npm' ? stageFixture('npm', 'skipped', '"private": true') : stage)) })
+  const skippedTree = await renderPanel([repoFixture({ pipeline: skipped })], oneClickStatus)
+  const { tree: skippedOpen } = await expandFirstRow(skippedTree)
+  check('a release published without npm is not described as if npm had it', textOf(skippedOpen).includes('npm 这一步按原因跳过'), textOf(skippedOpen).replace(/\s+/g, ' ').slice(0, 240))
+}
+
+/* With the flag off, 发布 is what it always was: the dispatch, and nothing else. */
+{
+  const tree = await renderPanel([repoFixture()])
+  const labels = buttonLabels(tree)
+  check('with 发布同台 off the old 发布 button is back', labels.includes('发布'), labels.join(','))
+  check('and no one-press button is offered', labels.includes('一键发布') === false, labels.join(','))
 }
 
 console.log(`\n${results.length - failed}/${results.length} checks passed`)

@@ -40,10 +40,12 @@ dsh plugin --profile desktop add "link:F:\CodeProj\dsh-plugin-cicd"
 | 补齐权限 | 同一处的「补齐权限」，走同样的浏览器流程 | **不需要** |
 | 添加仓库 | 「管理仓库」→ 从你的仓库列表勾选（本地检出自动匹配） | **不需要** |
 | 移除仓库 | 取消勾选 | **不需要** |
-| 触发构建 / 发布出草稿 | 仓库那一行的「构建」「发布」 | **不需要** |
-| 公开草稿 | 展开行 →「公开草稿」→「确认公开？」（两次点击） | **不需要** |
+| 触发构建 | 仓库那一行的「构建」 | **不需要** |
+| 发布（一键：代码推送 + Release + npm） | 仓库那一行的「一键发布」→ 确认框（脏工作区就填提交信息，2FA 就填一次性密码）→「确认发布」 | **不需要**（Host 起一条流水线，跟着 CI 走完：升版本、推 npm、公开 Release、B 站播报都由它自己接着做） |
+| 只出草稿（不要一键） | 配置里关掉 `oneClickRelease`，「发布」回到只触发构建 | **不需要** |
+| 公开草稿（手动路径） | 展开行 →「公开草稿」→「确认公开？」（两次点击） | **不需要** |
 | 给 npm 一个 token | 面板顶部（未登录时才出现）粘贴 Access Token →「写入并验证」 | **不需要**（Host 写进 npm 自己读的 `~/.npmrc`，插件不保存 token） |
-| 推送到 npm | 展开行 →「推送到 npm vX」→「确认推送」（两次点击；开了 2FA 就在同一行填一次性密码） | **不需要**（Host 用 DSH 自带的 pnpm 发布，复用同一个包管理器） |
+| 单独推送到 npm（手动路径） | 展开行 →「推送到 npm vX」→「确认推送」（两次点击；开了 2FA 就在同一行填一次性密码） | **不需要**（Host 用 DSH 自带的 pnpm 发布，复用同一个包管理器） |
 | 更新已装的那份 | 行上的「更新到 vX」（**只有 profile 装的是更旧的发布包时才有**；`link:` 检出与"装它会降级"两种情况的按钮在展开处）→ 展开处「确认更新」 | **不需要**（Host 把 tgz 交给 DSH 自己的插件管理器安装） |
 | 让新版生效 | 更新后面板直接问「现在重启？」→「立即重启 DSH」 | **不需要**（转发给 `dsh-plugin-restart`；没装它会明确说） |
 | 看失败日志 / 重跑 / 取消 | 展开行里的对应按钮 | **不需要** |
@@ -52,7 +54,9 @@ dsh plugin --profile desktop add "link:F:\CodeProj\dsh-plugin-cicd"
 **仍然需要命令行的两件事**，如实列出，不假装不需要：
 
 1. **安装这个插件本身**（一次性）——见下一节。
-2. **改版本号并打 tag**——版本号写在 `package.json`，tag 指向提交，这是"发布的到底是什么"的唯一来源；面板不去改你的源码。面板的「发布」按**当前**版本号出包，要在同一版本上重发就再点一次（会替换资产）。
+2. **打 tag**（只有想走 tag 触发那条路时）——版本号由【一键发布】自己升（版本已被别的提交占用时），但 `git tag vX && git push origin vX` 仍是**发布之外**的动作，面板不做。
+
+「更新」装完要重启才生效，这一步**面板会主动问**（见下文《更新已安装的插件》）；重启由 `dsh-plugin-restart` 执行，发布台自己不碰进程。
 
 「更新」装完要重启才生效，这一步**面板会主动问**（见下文《更新已安装的插件》）；重启由 `dsh-plugin-restart` 执行，发布台自己不碰进程。
 
@@ -108,9 +112,37 @@ dsh plugin --profile desktop add "file:$PWD\dsh-plugin-cicd-0.1.0.tgz"
 
 **没有装它就没有这部份**：`update` 路由需要 Host 提供 `pluginManager` 服务，没有就回 `501 plugin-manager-missing`，而不是假装装过。
 
+## 发布同台：一次点击 = 代码推送 + Release + npm
+
+**按下「发布」就是三件事一起做完**，因为分开做留下了三种"看起来成功"的半成品：没人公开的草稿、npm 上有版本而 GitHub 上没有 Release、Release 构建的是一个 GitHub 根本没收到过的提交（工作区里的改动、或只提交在本机的改动，两个 workflow 都看不见）。
+
+顺序不是实现细节，是这个功能的全部：
+
+```
+代码推送 → 版本号 → 触发构建 → 等待构建 → npm 推送 → 公开 Release → B 站播报
+```
+
+- **代码推送最前**，因为 `ci.yml` 与 `release.yml` 跑的都是**推上去的那个提交**。有改动就 `git add -A` + commit + push（**需要一条提交信息**，确认框里填；确认框把改动文件名列出来，因为这是面板上唯一能扫进你没打算发布的东西的动作）。工作区干净但有本地提交就只 push，两者都没有就跳过这一格。
+- **版本号第二**，因为它要写一个提交，而升版本拒绝脏工作区——顺序反过来没有意义。这一格做的是「为什么点发布曾经必然失败」那件事：`release.yml` 拒绝复用属于另一个提交的版本，所以流水线**先问**（`releasePreflight`），真被占用就自己升一个补丁号、提交、推送。
+- **触发构建明确要草稿**（`-f draft=true`）。草稿只有作者看得见，这正是后面两格能成立的原因。
+- **npm 在公开 Release 之前**，这是关键：npm 推送**不可逆**（同一版本不能推第二次），而草稿**可以**。所以 npm 失败时——缺一次性密码、token 失效、源连不上——Release 仍然是草稿，对外**全有或全无**，补上原因（或选择「跳过 npm 并公开 Release」）就能继续。反过来先公开就会留下"Release 出来了但 npm 上没有"，那是重试也收拾不干净的中间态。
+- **B 站播报最后**，因为「这个版本上线了」只有在它真的上线之后才成立。
+
+面板上看得见它走到哪一格：七格状态（待做/进行中/完成/跳过/停住/失败/已停止）随 30 秒轮询刷新，`gh run` 的链接就在旁边。**停住不是失败**——那一行会给出两条件路：【继续】（补一次性密码，或修好 token 再来）与【跳过 npm 并公开 Release】（npm 本来就不是这个仓库的渠道，或者它暂时连不上，而 Release 不该因此永远不出门）。
+
+**不需要 npm 的仓库照样能发**：`private: true`、没有 `package.json`、名字没占——这些是"不适用"而不是"坏了"，那一格记【跳过】然后继续公开 Release。版本已经在 npm 上了同理（目标状态已达成）。
+
+**关掉它**：`oneClickRelease: false` 写在 profile 的 `cordis.patch.yml` 那一行（见《配置》），面板的「发布」就回到只触发构建，npm 与公开草稿又是单独的按钮——某个仓库的 Release 必须一直是草稿时，这是那条退路。
+
+流水线的记录落在 `<DSH_HOME>\dsh-plugin-cicd\pipelines.json`，"跑到哪一格"就是这个文件回答的：DSH 在构建期间关掉，重启后它会接着查那次运行、继续推 npm、继续公开 Release。**这个文件读不出来时一键发布会拒绝启动**（而不是覆盖掉一条跑到一半的记录），理由和播报台账一样：那一格里可能有一条已经建好的草稿，丢了就再也没人去公开它。
+
+**它不是什么**：不是 CI 的替代品（门禁仍然在 workflow 里），也不给 npm 带 provenance——需要可验证构建来源的包应该在 CI 里用 trusted publishing 发（见下节）。
+
 ## 推送到 npm（第二条分发渠道）
 
-Release 是给人下载的，npm 是给 `dsh plugin add` 装的。面板把它们并排放：一行上既有 GitHub 的 tag，也有 npm 上的版本。**独立按钮，不和「发布」绑在一起**——推送不可逆，不该搭在另一个动作上顺带发生。
+Release 是给人下载的，npm 是给 `dsh plugin add` 装的。面板把它们并排放：一行上既有 GitHub 的 tag，也有 npm 上的版本。
+
+**没有一键发布时**（`oneClickRelease: false`），npm 是**独立按钮，不和「发布」绑在一起**——推送不可逆，不该搭在另一个动作上顺带发生。一键发布之所以能把它带上，是因为顺序：npm 排在公开 Release **之前**，所以拒一次推送不会留下任何公开的东西。
 
 每一行先说清 npm 现在是什么状态：
 
@@ -261,7 +293,9 @@ patch 里仍可用的选项（每个都有默认值）：
 | `projectsRoot` | `''` | 本地检出所在根目录；面板添加仓库时据此自动填 `localPath`（按各目录 `package.json` 的 `name` 匹配，所以目录名与仓库名不同也能找到），克隆【克隆】的落点也是这里。**这是行配置（`cordis.patch.yml`），不是 `repos.json` 的键**——写进后者会被忽略 |
 | `defaultBranch` | `main` | 面板触发 workflow 用的 ref |
 | `buildWorkflow` | `ci.yml` | `构建` 按钮触发的 workflow |
-| `releaseWorkflow` | `release.yml` | `发布` 按钮触发的 workflow |
+| `releaseWorkflow` | `release.yml` | 一键发布触发的 workflow；关掉一键发布后是 `发布` 按钮触发的那个 |
+| `oneClickRelease` | `true` | **发布同台**：`发布` = 代码推送 + Release + npm 一条流水线。设 `false` 就回到"只触发构建（出草稿）"，npm 与公开草稿各自是独立按钮 |
+| `pipelineWatchSeconds` | `20` | 一键发布流水线的推进间隔（每次最多一次 `gh run list`）；`0` 停掉时钟，只保留按需推进（DSH 重启后的补跑也会停） |
 | `ghPath` | `''` | 空 = 从 PATH 与 `%ProgramFiles%\GitHub CLI\gh.exe` 等位置解析 |
 | `requestTimeoutMs` | `20000` | 单次 `gh` 调用的硬超时 |
 | `overviewTtlMs` | `15000` | 概览缓存窗口；面板轮询会走缓存 |
@@ -304,7 +338,7 @@ npm 这一侧是同一条原则的两个面：**包管理器**复用 Host 自己
 - `restart` 自己不重启任何东西：它把请求转发到同一个 Host 上的 `/api/dsh-restart/restart`，由 `dsh-plugin-restart` 决定停哪个进程、用什么命令拉起来。没有那个插件就回 `501 restart-unavailable`。
 - `npm-login` 是唯一会**写用户级配置**的路由：把 token 合并进 `~/.npmrc`（其他行原样保留，旧版本留 `.bak`）。token **绝不出现在任何响应、日志或状态里**——`npm-status` 只回答"有没有那一行"，不回答"那行是什么"。
 - `npm-publish` 是另一个**不可逆**动作：npm 不允许同一版本推两次，撤回也只在很短的时间内可行。所以它也要两次点击，且推送前逐条拒绝（`private: true`、脏工作区、版本已存在、未登录）。
-- `公开发布草稿`、`npm-publish` 是仅有的两个不可逆动作，两者都要两次点击、中间那一步明说后果。
+- `公开发布草稿` 与 `npm-publish` 仍是仅有的两个**不可逆**动作，各自单独用时都要两次点击、中间那一步明说后果。一键发布把它们放进一条流水线，那一格确认框就是"中间那一步"：它把七格顺序、要提交的文件、以及「npm 通了才公开 Release」写在同一屏上，再让人按下去。
 
 ## HTTP 接口
 
@@ -319,6 +353,9 @@ npm 这一侧是同一条原则的两个面：**包管理器**复用 Host 自己
 | `POST /api/dsh-cicd/run-action` | `{repo, runId, action}`，action ∈ `rerun` / `rerun-failed` / `cancel` |
 | `POST /api/dsh-cicd/release-action` | `{repo, tag, action}`，action ∈ `publish` / `delete`（`delete` 有意不给按钮） |
 | `POST /api/dsh-cicd/version-bump` | `{repo, release?}`，release ∈ `patch`（默认）/ `minor` / `major`：升 `package.json`、提交、推送当前分支 |
+| `POST /api/dsh-cicd/release-all` | `{repo, message?, otp?}`：**一键发布**——代码推送 → 版本号 → 触发构建（草稿）→（流水线自己继续）等 CI → 推 npm → 公开 Release → B 站播报。开工前能本地判定的全部判定完（无检出 / 无上游 / 落后上游 / 脏工作区没给信息 → `400`/`409` 且**一个字节都没写**）；已经开跑的失败用 `200`+`value.pipeline` 如实回报，`status` 是 `blocked` 时 Release 仍是草稿 |
+| `POST /api/dsh-cicd/release-all-resume` | `{repo, otp?, skipNpm?}`：继续一条停在 npm 的流水线。`skipNpm: true` = 不管 npm 了，直接公开 Release。没有停住的流水线回 `409 nothing-to-resume` |
+| `POST /api/dsh-cicd/release-all-cancel` | `{repo}`：不再跟进这条流水线（GitHub 上的运行不会被它停掉） |
 | `POST /api/dsh-cicd/logs` | `{repo, runId}` 失败步骤日志的尾部 |
 | `POST /api/dsh-cicd/update` | `{repo, tag?}`：把该 Release 的 `.tgz` 下载到 `<DSH_HOME>\dsh-plugin-cicd\downloads\` 并装进当前 profile。tag 缺省 = 最新一个**非草稿**且带 tgz 的 Release |
 | `POST /api/dsh-cicd/restart` | 无参数：转发到 `dsh-plugin-restart` 的重启路由；没挂载则 `501 restart-unavailable` |
@@ -339,6 +376,8 @@ npm 这一侧是同一条原则的两个面：**包管理器**复用 Host 自己
 `npm-status` 的每条仓库记录：`{ repo, label, localPath, packageName, version, dirty, privatePackage, state, latest, blockers, canPublish, registryProblem, registry, pageUrl }`。`state` ∈ `unregistered` / `unpublished` / `published` / `unknown`；`blockers` 是**具名原因**（`private-package`、`dirty-tree`、`not-logged-in`、`already-published`、`registry-unreachable`、`no-checkout`、`no-version`、`no-package-name`）——"没有按钮"是最没用的一句话，`private: true` 和"没登录"在屏幕上同样是空白，修法却完全不同。
 
 `overview` 的每一行多一个 `install` 块：`{ profile, profileDir, profileReadable, packageName, present, spec, kind, installedVersion, latestTag, latestVersion, latestAsset, state }`。`state` ∈ `not-installed` / `no-release` / `current` / `update` / `ahead` / `differs` / `checkout`——判决在 Host 上做，所以面板和 `update` 路由不会各说一套。
+
+`overview` 的每一行还多一个 `pipeline` 块（`null` = 这个仓库从没跑过一键发布）：`{ id, repo, slug, tag, version, headSha, startedAt, updatedAt, status, message, blockedCode, runId, runUrl, runConclusion, skipNpm, stages }`。`status` ∈ `running` / `blocked` / `done` / `failed` / `cancelled`；`stages` 是固定七格 `[{ id, status, detail, at }]`，`id` 依次是 `push` / `version` / `dispatch` / `build` / `npm` / `release` / `announce`，`status` ∈ `pending` / `active` / `done` / `skipped` / `blocked` / `failed` / `cancelled`。`blockedCode` 是停住的原因（`otp-required`、`not-logged-in`、`registry-unreachable`、`timeout` …），面板按它给出下一步。`overview` 顶层另有 `pipelineProblem`：记录文件读不出来时**一键发布会拒绝启动**，原因写在这里。
 
 `status` 另外报出 `profile: { name, dir, readable }`：更新写的是哪个 profile，是**报出来**的而不是假设的——「没装」和「面板看错了 profile」是两句不同的话，只有路径能把它们分开。
 

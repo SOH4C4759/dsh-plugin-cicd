@@ -25,6 +25,18 @@
  *   /api/dsh-cicd/update           install this profile's copy from the release's tgz
  *   /api/dsh-cicd/restart          hand a restart to dsh-plugin-restart, if it is mounted
  *
+ * 发布同台 — one press of 发布 that is all three pushes at once:
+ *
+ *   /api/dsh-cicd/release-all         push the code, build the release, push npm, publish
+ *   /api/dsh-cicd/release-all-resume  continue one that npm held at the draft
+ *   /api/dsh-cicd/release-all-cancel  stop following one (the run on GitHub keeps going)
+ *
+ * The order is the feature, not an implementation detail: 代码推送 and 版本号 first
+ * (both workflows build the PUSHED commit, and the bump refuses a dirty tree), then
+ * the dispatch — which asks for a DRAFT — then npm, and only then 公开 Release. npm
+ * is irreversible and a draft is not, so a refusal there leaves a public state that
+ * nothing has to be tidied up. See `lib/pipeline.mjs` for the whole argument.
+ *
  * And the third channel, which is not a package at all: the update note under the
  * video that introduces the plugin.
  *
@@ -82,6 +94,15 @@ import {
   recordLedgerEntry,
   withDeviceIds,
 } from './lib/bilibili.mjs'
+import {
+  PIPELINE_FILE_NAME,
+  createPipelineRunner,
+  emptyPipelines,
+  findPipeline,
+  matchRun,
+  parsePipelines,
+  recordPipeline,
+} from './lib/pipeline.mjs'
 
 /** Plugin name shown in loader logs. */
 export const name = 'dsh-plugin-cicd'
@@ -132,6 +153,17 @@ const BILIBILI_LEDGER_FILE_NAME = 'bilibili-announcements.json'
 /** How often the Host looks for a newly published release, and the ceiling on that. */
 const DEFAULT_BILIBILI_WATCH_SECONDS = 90
 const MAX_BILIBILI_WATCH_SECONDS = 3600
+
+/**
+ * How often a running 发布同台 pipeline is moved along.
+ *
+ * Twenty seconds because each tick costs at most one `gh run list`, a real build
+ * takes minutes, and the panel's own poll is thirty: a faster clock would only
+ * spend API calls to make the same screen arrive. Setup that needs a person (an
+ * OTP) does not wait for this timer at all — the route advances immediately.
+ */
+const DEFAULT_PIPELINE_WATCH_SECONDS = 20
+const MAX_PIPELINE_WATCH_SECONDS = 900
 
 /** How long a credential/video answer is reused before Bilibili is asked again. */
 const DEFAULT_BILIBILI_VERIFY_TTL_MS = 300_000
@@ -449,6 +481,17 @@ export function resolveConfig(raw) {
      * hard-coded the first would be wrong on the second without saying so.
      */
     npmRegistry: normalizeRegistry(raw?.npmRegistry),
+    /**
+     * 发布同台: one press of 发布 means the code push, the Release and npm.
+     *
+     * On by default because that is what the button now says it does, and a switch
+     * rather than a choice at press time because the honest use for it is narrow:
+     * a repository whose release should stay a draft, or a machine where npm is
+     * somebody else's step. Turning it off restores the three separate buttons.
+     */
+    oneClickRelease: raw?.oneClickRelease !== false,
+    /** How often a pipeline waiting on CI is advanced; 0 stops the clock. */
+    pipelineWatchSeconds: clampNumber(raw?.pipelineWatchSeconds, 0, MAX_PIPELINE_WATCH_SECONDS, DEFAULT_PIPELINE_WATCH_SECONDS),
     /**
      * Bilibili update notes: when a repository's release goes public, say so under
      * the video that introduces it.
@@ -1834,6 +1877,15 @@ function normalizeRun(run) {
     conclusion: typeof run.conclusion === 'string' ? run.conclusion : '',
     event: typeof run.event === 'string' ? run.event : '',
     branch: typeof run.headBranch === 'string' ? run.headBranch : '',
+    /**
+     * The commit this run builds.
+     *
+     * Carried because 发布同台 has to find ITS run among all of them, and "the
+     * newest release run" is not the same thing: a press that lands while somebody
+     * else's release is building would otherwise wait for the wrong one and report
+     * its result as this pipeline's.
+     */
+    headSha: typeof run.headSha === 'string' ? run.headSha : '',
     createdAt: typeof run.createdAt === 'string' ? run.createdAt : '',
     updatedAt: typeof run.updatedAt === 'string' ? run.updatedAt : '',
     url: typeof run.url === 'string' ? run.url : '',
@@ -2372,6 +2424,13 @@ export function apply(ctx, rawConfig) {
           pollSeconds: current.pollSeconds,
           overviewTtlMs: current.overviewTtlMs,
           projectsRoot: current.projectsRoot,
+          /**
+           * Whether 发布 is the whole pipeline or only the dispatch. The panel reads
+           * this rather than deciding for itself, so the button and the route can
+           * never disagree about what a press does.
+           */
+          oneClickRelease: current.oneClickRelease,
+          pipelineWatchSeconds: current.pipelineWatchSeconds,
           bilibili: {
             enabled: current.bilibiliEnabled,
             auto: current.bilibiliAuto,
@@ -2460,9 +2519,24 @@ export function apply(ctx, rawConfig) {
           entry,
           releases: value.releases ?? [],
         }),
+        /**
+         * 发布同台's state for this repository, read from the record file rather
+         * than from GitHub: it is this plugin's own bookkeeping, and the row has to
+         * show "waiting on the build" for the minutes before GitHub has anything to
+         * say. `null` means no pipeline has ever run from here.
+         */
+        pipeline: findPipeline(readPipelines(), entry.repo),
       }
     })
-    const value = { fetchedAt: new Date().toISOString(), cached: false, repos, configSource: current.configSource, configProblem: current.configProblem }
+    const value = {
+      fetchedAt: new Date().toISOString(),
+      cached: false,
+      repos,
+      configSource: current.configSource,
+      configProblem: current.configProblem,
+      /** Why the pipeline record could not be read, when it could not. */
+      pipelineProblem,
+    }
     cache = { at: Date.now(), value }
     writeJson(res, 200, { ok: true, value })
   }
@@ -2651,7 +2725,7 @@ export function apply(ctx, rawConfig) {
    * the tag and the uploaded assets disagreeing) — so a console that cannot bump the
    * version cannot release a repository whose tree has moved on.
    *
-   * It is the only route that writes to a checkout, so it is conservative:
+   * It is the only operation that writes to a checkout, so it is conservative:
    *   - a dirty tree is refused rather than warned about, because the release is
    *     built from the commit GitHub has and every uncommitted file would be
    *     silently missing from the published package;
@@ -2665,62 +2739,63 @@ export function apply(ctx, rawConfig) {
    * the intermittent block on `github.com:443` this machine already documents, so
    * the honest answer is "committed locally, not pushed" with the reason — retrying
    * the push is a decision the user can make, and a hidden reset is not.
+   *
+   * It answers `{status, ok, code, message, value}` instead of writing an HTTP
+   * response because it has two callers now: the 发布 button's own route, and the
+   * one-press pipeline, which has to treat the same refusal as a reason to stop.
+   *
+   * @param {object} current - the resolved config this request runs under.
+   * @param {object} target - `{ok: true, entry, slug}` from `findEntry`.
+   * @param {string} kind - `patch` / `minor` / `major`.
+   * @returns {Promise<object>} the outcome.
    */
-  const versionBumpHandler = async (req, res) => {
-    if (!guard(req, res)) return
-    const body = await readJsonBody(req)
-    const target = findEntry(live(), body)
-    if (!target.ok) {
-      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
-      return
-    }
-    const kind = text(body?.release, 'patch')
+  const runVersionBump = async (current, target, kind = 'patch') => {
     const localPath = target.entry.localPath
     if (localPath === '' || !existsSync(join(localPath, 'package.json'))) {
-      writeJson(res, 400, {
+      return {
+        status: 400,
         ok: false,
         code: 'no-checkout',
         message: 'this repository has no local checkout with a package.json to bump',
         value: { repo: target.entry.repo },
-      })
-      return
+      }
     }
-    const state = await readLocalState(localPath, config.requestTimeoutMs)
+    const state = await readLocalState(localPath, current.requestTimeoutMs)
     if (state.available !== true) {
-      writeJson(res, 400, {
+      return {
+        status: 400,
         ok: false,
         code: 'no-checkout',
         message: `cannot bump from here: ${state.reason ?? 'the local checkout is unusable'}`,
         value: { repo: target.entry.repo },
-      })
-      return
+      }
     }
     if (state.dirty !== 0) {
-      writeJson(res, 409, {
+      return {
+        status: 409,
         ok: false,
         code: 'dirty-tree',
         message: `the checkout has ${String(state.dirty)} uncommitted change(s); commit or stash them first — they would not be in the released package`,
         value: { repo: target.entry.repo, dirty: state.dirty },
-      })
-      return
+      }
     }
     if (state.upstreamKnown !== true || typeof state.branch !== 'string' || state.branch === '') {
-      writeJson(res, 409, {
+      return {
+        status: 409,
         ok: false,
         code: 'no-upstream',
         message: `branch ${state.branch ?? '(unknown)'} has no upstream, so a bump could not be pushed`,
         value: { repo: target.entry.repo, branch: state.branch ?? null },
-      })
-      return
+      }
     }
     if (Number.isInteger(state.behind) && state.behind > 0) {
-      writeJson(res, 409, {
+      return {
+        status: 409,
         ok: false,
         code: 'behind',
         message: `the branch is ${String(state.behind)} commit(s) behind its upstream; pull before releasing`,
         value: { repo: target.entry.repo, behind: state.behind },
-      })
-      return
+      }
     }
 
     const manifest = join(localPath, 'package.json')
@@ -2728,21 +2803,18 @@ export function apply(ctx, rawConfig) {
     try {
       source = readFileSync(manifest, 'utf8')
     } catch (error) {
-      writeJson(res, 502, { ok: false, code: 'read-failed', message: String(error?.message ?? error) })
-      return
+      return { status: 502, ok: false, code: 'read-failed', message: String(error?.message ?? error) }
     }
     const next = nextVersion(readLocalVersion(localPath), kind)
     if (next.ok !== true) {
-      writeJson(res, 400, { ok: false, code: 'unusable-version', message: next.message })
-      return
+      return { status: 400, ok: false, code: 'unusable-version', message: next.message }
     }
     const rewritten = rewriteVersion(source, next.to)
     if (rewritten.ok !== true) {
-      writeJson(res, 400, { ok: false, code: 'unusable-manifest', message: rewritten.message })
-      return
+      return { status: 400, ok: false, code: 'unusable-manifest', message: rewritten.message }
     }
 
-    const git = (args) => runTool('git', ['-C', localPath, ...args], config.requestTimeoutMs)
+    const git = (args) => runTool('git', ['-C', localPath, ...args], current.requestTimeoutMs)
     const restore = () => {
       try {
         writeFileSync(manifest, source, 'utf8')
@@ -2754,43 +2826,44 @@ export function apply(ctx, rawConfig) {
     try {
       writeFileSync(manifest, rewritten.text, 'utf8')
     } catch (error) {
-      writeJson(res, 502, { ok: false, code: 'write-failed', message: String(error?.message ?? error) })
-      return
+      return { status: 502, ok: false, code: 'write-failed', message: String(error?.message ?? error) }
     }
 
     const tag = `v${next.to}`
     const staged = await git(['add', '--', 'package.json'])
     if (staged.ok !== true) {
       restore()
-      writeJson(res, 502, { ok: false, code: 'git-failed', message: commandFailureLine(staged, 'git add failed') })
-      return
+      return { status: 502, ok: false, code: 'git-failed', message: commandFailureLine(staged, 'git add failed') }
     }
     // `-- package.json` is `--only` semantics: the commit contains this one path,
     // whatever else the index happens to hold.
     const committed = await git(['commit', '-m', `chore(release): ${tag}`, '--', 'package.json'])
     if (committed.ok !== true) {
       restore()
-      writeJson(res, 502, {
+      return {
+        status: 502,
         ok: false,
         code: 'git-failed',
         message: commandFailureLine(committed, 'git commit failed'),
-      })
-      return
+      }
     }
     const head = await git(['rev-parse', 'HEAD'])
     const pushed = await git(['push', 'origin', state.branch])
     cache = null
     if (pushed.ok !== true) {
-      writeJson(res, 502, {
+      return {
+        status: 502,
         ok: false,
         code: 'push-failed',
         message: `committed ${tag} locally, but the push failed: ${commandFailureLine(pushed, 'git push failed')}`,
         value: { repo: target.entry.repo, from: next.from, to: next.to, tag, branch: state.branch, pushed: false },
-      })
-      return
+      }
     }
-    writeJson(res, 200, {
+    return {
+      status: 200,
       ok: true,
+      code: '',
+      message: '',
       value: {
         repo: target.entry.repo,
         from: next.from,
@@ -2802,6 +2875,28 @@ export function apply(ctx, rawConfig) {
         /** Local commits that this push also delivered, so the panel can say so. */
         carried: Number.isInteger(state.ahead) ? state.ahead : 0,
       },
+    }
+  }
+
+  const versionBumpHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    const result = await runVersionBump(current, target, text(body?.release, 'patch'))
+    if (result.ok === true) {
+      writeJson(res, 200, { ok: true, value: result.value })
+      return
+    }
+    writeJson(res, result.status, {
+      ok: false,
+      code: result.code,
+      message: result.message,
+      ...(result.value === undefined ? {} : { value: result.value }),
     })
   }
 
@@ -3411,15 +3506,11 @@ export function apply(ctx, rawConfig) {
   }
 
   /**
-   * Publish this repository's current version to the npm registry.
+   * The panel's own 【推送到 npm vX】 button.
    *
-   * Every refusal happens before anything is uploaded, because a publish is one of
-   * the two irreversible things this panel can do: npm lets a version be unpublished
-   * only briefly and never lets the same version be published twice. So a dirty tree
-   * is refused (the tarball is packed from the working directory, and the `files`
-   * allow-list does not protect a file that sits inside a listed directory), a
-   * version that is already on the registry is refused, and a missing credential is
-   * refused with what to do about it.
+   * Deliberately a thin wrapper: everything that decides whether a publish may
+   * happen at all lives in `runNpmPublish`, which 发布同台 calls too. Two buttons
+   * that could disagree about a dirty tree would be worse than one.
    */
   const npmPublishHandler = async (req, res) => {
     if (!guard(req, res)) return
@@ -3430,74 +3521,108 @@ export function apply(ctx, rawConfig) {
       writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
       return
     }
+    const result = await runNpmPublish(current, target, { otp: text(body?.otp) })
+    if (result.ok === true) {
+      writeJson(res, 200, { ok: true, value: result.value })
+      return
+    }
+    writeJson(res, result.status, {
+      ok: false,
+      code: result.code,
+      message: result.message,
+      ...(result.value === undefined ? {} : { value: result.value }),
+    })
+  }
+
+  /**
+   * Publish this repository's current version to the npm registry.
+   *
+   * Every refusal happens before anything is uploaded, because a publish is one of
+   * the two irreversible things this panel can do: npm lets a version be unpublished
+   * only briefly and never lets the same version be published twice. So a dirty tree
+   * is refused (the tarball is packed from the working directory, and the `files`
+   * allow-list does not protect a file that sits inside a listed directory), a
+   * version that is already on the registry is refused, and a missing credential is
+   * refused with what to do about it.
+   *
+   * It answers `{status, ok, code, message, value}` rather than writing a response
+   * because 发布同台 calls it too — and the pipeline has to decide from the same
+   * `code` whether the draft may go public. A second copy of "is this refusal fatal"
+   * would eventually disagree with this one, and the disagreement would be a public
+   * release with nothing on npm.
+   *
+   * @param {object} current - the resolved config this request runs under.
+   * @param {object} target - `{ok: true, entry, slug}` from `findEntry`.
+   * @param {object} [options] - `{otp}`: a one-time password, when the account has 2FA.
+   * @returns {Promise<object>} the outcome.
+   */
+  const runNpmPublish = async (current, target, { otp = '' } = {}) => {
     const registry = normalizeRegistry(current.npmRegistry)
     const invocation = resolvePackageManagerInvocation(ctx)
     if (invocation === null) {
-      writeJson(res, 501, { ok: false, code: 'no-package-manager', message: 'this Host has no package manager to publish with' })
-      return
+      return { status: 501, ok: false, code: 'no-package-manager', message: 'this Host has no package manager to publish with' }
     }
     if (npmPublishInFlight) {
-      writeJson(res, 409, { ok: false, code: 'busy', message: 'a publish is already running; wait for it to settle' })
-      return
+      return { status: 409, ok: false, code: 'busy', message: 'a publish is already running; wait for it to settle' }
     }
     const localPath = target.entry.localPath
     const manifest = readManifest(localPath)
     if (manifest === null || manifest.name === '') {
-      writeJson(res, 400, {
+      return {
+        status: 400,
         ok: false,
         code: 'no-checkout',
         message: 'this repository has no local checkout with a package.json to publish',
         value: { repo: target.entry.repo },
-      })
-      return
+      }
     }
     if (manifest.private === true) {
-      writeJson(res, 409, {
+      return {
+        status: 409,
         ok: false,
         code: 'private-package',
         message: `${manifest.name} is marked "private": true, so npm would refuse it. Publishing it is the author's decision to make first.`,
         value: { repo: target.entry.repo, packageName: manifest.name },
-      })
-      return
+      }
     }
     if (manifest.version === null) {
-      writeJson(res, 409, {
+      return {
+        status: 409,
         ok: false,
         code: 'no-version',
         message: `${manifest.name} has no version in its package.json, so there is nothing to publish`,
         value: { repo: target.entry.repo, packageName: manifest.name },
-      })
-      return
+      }
     }
     const dirty = await readDirtyCount(localPath, current.requestTimeoutMs)
     if (Number.isFinite(dirty) && dirty > 0) {
-      writeJson(res, 409, {
+      return {
+        status: 409,
         ok: false,
         code: 'dirty-tree',
         message: `the checkout has ${String(dirty)} uncommitted change(s); a publish packs the working directory, so commit or stash them first`,
         value: { repo: target.entry.repo, dirty },
-      })
-      return
+      }
     }
     const packument = await fetchPackument(registry, manifest.name)
     if (packument.ok !== true) {
-      writeJson(res, 502, {
+      return {
+        status: 502,
         ok: false,
         code: 'registry-unreachable',
         message: `cannot ask ${registry} about ${manifest.name}: ${packument.message}`,
         value: { repo: target.entry.repo, packageName: manifest.name, registry },
-      })
-      return
+      }
     }
     const registryState = npmPackageState(packument.value, manifest.version)
     if (registryState.published === true) {
-      writeJson(res, 409, {
+      return {
+        status: 409,
         ok: false,
         code: 'already-published',
         message: `${manifest.name}@${manifest.version} is already on ${registry}; npm never accepts the same version twice, so bump the version first`,
         value: { repo: target.entry.repo, packageName: manifest.name, version: manifest.version, latest: registryState.latest, registry },
-      })
-      return
+      }
     }
     /*
      * The gate is "is there anything to authenticate WITH", not "did `whoami` answer".
@@ -3509,18 +3634,16 @@ export function apply(ctx, rawConfig) {
     const hasToken = hasNpmToken(readNpmrcText(), registry)
     const auth = await readNpmAuth(invocation, registry)
     if (hasToken !== true && auth.loggedIn !== true) {
-      writeJson(res, 401, {
+      return {
+        status: 401,
         ok: false,
         code: 'not-logged-in',
         message: `${invocation.command} has no credential for ${registry}: ${auth.message ?? 'no account'}`,
         value: { repo: target.entry.repo, packageName: manifest.name, registry, npmrcPath: resolveNpmrcPath() },
-      })
-      return
+      }
     }
-    const otp = text(body?.otp)
     if (otp !== '' && !/^\d{6,8}$/.test(otp)) {
-      writeJson(res, 400, { ok: false, code: 'bad-otp', message: 'the one-time password must be 6 to 8 digits' })
-      return
+      return { status: 400, ok: false, code: 'bad-otp', message: 'the one-time password must be 6 to 8 digits' }
     }
 
     const argv = [...invocation.args, 'publish', '--no-git-checks', '--registry', registry]
@@ -3554,7 +3677,8 @@ export function apply(ctx, rawConfig) {
           : code === 'already-published'
             ? 409
             : 502
-        writeJson(res, status, {
+        return {
+          status,
           ok: false,
           code,
           message,
@@ -3565,11 +3689,13 @@ export function apply(ctx, rawConfig) {
             registry,
             needsOtp: code === 'otp-required',
           },
-        })
-        return
+        }
       }
-      writeJson(res, 200, {
+      return {
+        status: 200,
         ok: true,
+        code: '',
+        message: '',
         value: {
           repo: target.entry.repo,
           packageName: manifest.name,
@@ -3580,7 +3706,7 @@ export function apply(ctx, rawConfig) {
           account: auth.account,
           note: firstLine(result.stdout) || null,
         },
-      })
+      }
     } finally {
       npmPublishInFlight = false
     }
@@ -4397,6 +4523,513 @@ export function apply(ctx, rawConfig) {
     credentialCache = null
   }
 
+  /* ------------------------------------------------------------- 发布同台 -- */
+
+  /**
+   * One press of 发布 = 代码推送 + Release + npm.
+   *
+   * The three pushes existed as three buttons, and the cost of that was not
+   * convenience: 发布 dispatched a workflow that creates a DRAFT, so the only two
+   * things anybody actually wants — a release people can download, and a package
+   * `dsh plugin add` can install — were each one more click and one more thing to
+   * remember. Worse, the states left by doing one and not the others look exactly
+   * like success from the row: a draft nobody publishes, a version on npm with no
+   * release, a release built from a commit GitHub never received.
+   *
+   * The ORDER is the feature. See `lib/pipeline.mjs` for the whole argument; in
+   * one line: 代码推送 and 版本号 must come first because CI builds the pushed
+   * commit, and npm must come before the draft goes public because npm is
+   * irreversible and a draft is not.
+   *
+   * Everything here is wiring. What the pipeline decides lives in that module, and
+   * what it does lives in the four effects below — each one a thin wrapper around
+   * code the separate routes already used.
+   */
+
+  /** The pipeline record: `pipelines.json`, beside the repository list. */
+  const pipelinesPath = () => join(stateDirectory(), PIPELINE_FILE_NAME)
+
+  /**
+   * The record, read once and kept in step with the file.
+   *
+   * This process is the only writer, so a cache is honest here in a way it would
+   * not be for the Bilibili ledger (which an external tool may also touch). What is
+   * NOT tolerated is a file that cannot be parsed: starting a pipeline then would
+   * overwrite the record of one that is halfway through — the draft this whole
+   * feature exists to finish — so an unreadable file refuses to start anything and
+   * says so, exactly as an unreadable ledger refuses to post anything.
+   */
+  let pipelineDoc = null
+  let pipelineProblem = null
+
+  const readPipelines = () => {
+    if (pipelineDoc !== null) return pipelineDoc
+    const file = pipelinesPath()
+    if (!existsSync(file)) {
+      pipelineDoc = emptyPipelines()
+      return pipelineDoc
+    }
+    let raw = ''
+    try {
+      raw = readFileSync(file, 'utf8')
+    } catch (error) {
+      pipelineProblem = `读不到 ${file}：${String(error?.message ?? error)}`
+      pipelineDoc = emptyPipelines()
+      return pipelineDoc
+    }
+    const parsed = parsePipelines(raw)
+    pipelineProblem = parsed.ok === true ? null : `${file}：${parsed.message}`
+    pipelineDoc = parsed.pipelines
+    return pipelineDoc
+  }
+
+  const storePipeline = (pipeline) => {
+    pipelineDoc = recordPipeline(readPipelines(), pipeline)
+    try {
+      writeJsonAtomic(pipelinesPath(), pipelineDoc)
+    } catch (error) {
+      /* The panel reads this from the same cache, so a failed write is reported
+         rather than thrown: the pipeline itself is fine, its record is not. */
+      pipelineProblem = `写不进 ${pipelinesPath()}：${String(error?.message ?? error)}`
+    }
+  }
+
+  /** The status each pre-flight refusal deserves; anything later is a 502. */
+  const PIPELINE_REFUSAL_STATUS = {
+    'bad-request': 400,
+    'no-checkout': 400,
+    'message-required': 400,
+    'unusable-version': 400,
+    'unusable-manifest': 400,
+    'no-upstream': 409,
+    behind: 409,
+    'dirty-tree': 409,
+    busy: 409,
+    'pipeline-blocked': 409,
+    disabled: 409,
+  }
+
+  /** Publish a draft. The one-way step every release action in this file shares. */
+  const publishDraft = async (current, target, tag) => {
+    const result = await ghRun(ghPath, ['release', 'edit', tag, '-R', target.slug, '--draft=false'], current.requestTimeoutMs)
+    if (!result.ok) {
+      return { ok: false, code: 'gh-failed', message: commandFailureLine(result, `gh release edit failed for ${tag}`) }
+    }
+    return { ok: true, detail: firstLine(result.stdout) || `${tag} 已公开` }
+  }
+
+  /**
+   * 代码推送: commit the working tree and push it, or push what is already committed.
+   *
+   * The same two-in-one button the row has (`commit`), because it is the same trap:
+   * work that never left the working tree and work that never left the machine are
+   * equally absent from a release. An empty message with a clean tree means "push",
+   * and a clean tree that is already in sync means this stage has nothing to do —
+   * which is a fact worth saying rather than a failure.
+   */
+  const pipelinePush = async (current, target, message) => {
+    const localPath = target.entry.localPath
+    const state = await readLocalState(localPath, current.requestTimeoutMs)
+    if (state.available !== true) {
+      return { ok: false, code: 'no-checkout', message: `cannot push from here: ${state.reason ?? 'the local checkout is unusable'}` }
+    }
+    if (state.upstreamKnown !== true || typeof state.branch !== 'string' || state.branch === '') {
+      return {
+        ok: false,
+        code: 'no-upstream',
+        message: `branch ${state.branch ?? '(unknown)'} has no upstream, so nothing could be pushed — the release builds what is on GitHub, not what is on this disk`,
+      }
+    }
+    const dirty = Number.isInteger(state.dirty) ? state.dirty : 0
+    const ahead = Number.isInteger(state.ahead) ? state.ahead : 0
+    if (dirty === 0 && ahead === 0) {
+      return { ok: true, sha: state.head ?? null, detail: '工作区干净且与上游同步，没有要推送的东西' }
+    }
+    if (dirty > 0 && text(message) === '') {
+      return { ok: false, code: 'message-required', message: `工作区有 ${String(dirty)} 个改动要提交，所以需要一条提交信息` }
+    }
+
+    const git = (args) => runTool('git', ['-C', localPath, ...args], current.requestTimeoutMs)
+    if (dirty > 0) {
+      const staged = await git(['add', '-A'])
+      if (staged.ok !== true) {
+        return { ok: false, code: 'git-failed', message: commandFailureLine(staged, 'git add failed') }
+      }
+      const committed = await git(['commit', '-m', message])
+      if (committed.ok !== true) {
+        return { ok: false, code: 'git-failed', message: commandFailureLine(committed, 'git commit failed') }
+      }
+    }
+    const head = await git(['rev-parse', 'HEAD'])
+    const pushed = await git(['push', 'origin', state.branch])
+    if (pushed.ok !== true) {
+      return {
+        ok: false,
+        code: 'push-failed',
+        message: dirty > 0
+          ? `已在本地提交，但推送失败：${commandFailureLine(pushed, 'git push failed')}（提交还在本地，重试推送即可）`
+          : `推送失败：${commandFailureLine(pushed, 'git push failed')}`,
+      }
+    }
+    return {
+      ok: true,
+      sha: head.ok === true ? head.stdout.trim() : (state.head ?? null),
+      detail: dirty > 0 ? `已提交并推送 ${String(dirty)} 个改动` : `已推送 ${String(ahead)} 个本地提交`,
+    }
+  }
+
+  /**
+   * 版本号: move the version when the release workflow would refuse it.
+   *
+   * The question is the same one the dispatch route asks (`releasePreflight`), and
+   * it is asked here for the same reason: `release.yml` refuses to reuse a version
+   * that belongs to another commit, so dispatching without this stage is a run that
+   * can only fail — measured four times before the standalone button existed. The
+   * difference is that the pipeline can act on the answer instead of handing the
+   * problem back: 升版本并发布 is a stage, not a second press.
+   */
+  const pipelineVersion = async (current, target) => {
+    const localPath = target.entry.localPath
+    const version = readLocalVersion(localPath)
+    if (version === null) {
+      return { ok: false, code: 'unusable-version', message: '本地读不到可升级的版本号' }
+    }
+    const state = await readLocalState(localPath, current.requestTimeoutMs)
+    if (state.available !== true) {
+      return { ok: false, code: 'no-checkout', message: `cannot read the version from here: ${state.reason ?? 'the local checkout is unusable'}` }
+    }
+    const [headResult, releasesResult] = await Promise.all([
+      runTool(ghPath, ['api', `repos/${target.slug}/commits/${encodeURIComponent(state.branch ?? current.defaultBranch)}`, '--jq', '.sha'], current.requestTimeoutMs),
+      ghJson(ghPath, ['api', `repos/${target.slug}/releases?per_page=5`], current.requestTimeoutMs),
+    ])
+    const releases = releasesResult.ok && Array.isArray(releasesResult.value)
+      ? releasesResult.value.map(normalizeRelease).filter((release) => release !== null)
+      : []
+    const verdict = releasePreflight({
+      version,
+      expectedTag: `v${version}`,
+      releases,
+      builtSha: headResult.ok ? headResult.stdout.trim() : null,
+    })
+    if (verdict.state !== 'blocked') {
+      return {
+        ok: true,
+        tag: `v${version}`,
+        version,
+        sha: state.head ?? null,
+        detail: releasesResult.ok === true ? `${`v${version}`} 没有被别的提交占用` : `${`v${version}`}：读不到 Release 列表，按未占用处理`,
+      }
+    }
+    const bumped = await runVersionBump(current, target, 'patch')
+    if (bumped.ok !== true) {
+      return { ok: false, code: bumped.code, message: bumped.message }
+    }
+    return {
+      ok: true,
+      tag: bumped.value.tag,
+      version: bumped.value.to,
+      sha: bumped.value.commit,
+      detail: `${bumped.value.tag} 已属于另一个提交：版本已升到 ${String(bumped.value.to)} 并推送`,
+    }
+  }
+
+  /**
+   * 触发构建: dispatch the release workflow, and ask for a DRAFT.
+   *
+   * The draft is not a preference here — it is what makes the order possible. The
+   * release stays invisible until npm has taken the version, so a refusal at npm
+   * leaves nothing public to tidy up.
+   */
+  const pipelineDispatch = async (current, target, tag) => {
+    const workflow = current.releaseWorkflow
+    if (!SLUG.test(workflow.replace(/\.ya?ml$/, ''))) {
+      return { ok: false, code: 'bad-request', message: `unusable workflow name: ${workflow}` }
+    }
+    const ref = current.defaultBranch
+    const result = await ghRun(
+      ghPath,
+      ['workflow', 'run', workflow, '-R', target.slug, '--ref', ref, '-f', 'draft=true'],
+      current.requestTimeoutMs,
+    )
+    if (!result.ok) {
+      return { ok: false, code: 'gh-failed', message: commandFailureLine(result, `gh workflow run failed for ${workflow}`) }
+    }
+    return { ok: true, detail: `${workflow} 已触发（草稿），等待构建 ${tag ?? ''}`.trim() }
+  }
+
+  /**
+   * The run this pipeline started, matched on the commit it pushed.
+   *
+   * `missing` is not a failure the first time it is asked: `gh workflow run`
+   * returning success only means the dispatch was accepted, and the run appears a
+   * few seconds later. The runner decides when "not yet" has become "never".
+   */
+  const pipelineFindRun = async (slug, sha) => {
+    const current = live()
+    const result = await ghJson(
+      ghPath,
+      ['run', 'list', '-R', slug, '--limit', '20', '--json',
+        'databaseId,workflowName,displayTitle,status,conclusion,event,headBranch,headSha,createdAt,updatedAt,url'],
+      current.requestTimeoutMs,
+    )
+    if (!result.ok) return { state: 'failed', message: result.message }
+    const runs = (Array.isArray(result.value) ? result.value : []).map(normalizeRun).filter((run) => run !== null)
+    const run = matchRun(runs, sha)
+    return run === null ? { state: 'missing' } : { state: 'found', run }
+  }
+
+  const pipelineEffects = {
+    /**
+     * Everything that must be true before a byte is written.
+     *
+     * Doing this here rather than at the first failure is what makes "one press"
+     * safe to press: a repository with no checkout, a branch behind its upstream,
+     * or a dirty tree with no message to commit it under is refused BEFORE the
+     * first `git add`, so a refused press leaves the machine exactly as it was.
+     */
+    inspect: async ({ repo, message }) => {
+      const current = live()
+      const target = findEntry(current, { repo })
+      if (!target.ok) return { ok: false, code: 'bad-request', message: target.message }
+      const localPath = target.entry.localPath
+      if (localPath === '' || !existsSync(join(localPath, 'package.json'))) {
+        return { ok: false, code: 'no-checkout', message: '这个仓库没有可用的本地检出（找不到 package.json），而一键发布要提交、升版本并打包，所以需要一份工作区' }
+      }
+      const state = await readLocalState(localPath, current.requestTimeoutMs)
+      if (state.available !== true) {
+        return { ok: false, code: 'no-checkout', message: `不能用这个检出发布：${state.reason ?? 'the local checkout is unusable'}` }
+      }
+      if (state.upstreamKnown !== true || typeof state.branch !== 'string' || state.branch === '') {
+        return { ok: false, code: 'no-upstream', message: `分支 ${state.branch ?? '(未知)'} 没有上游：发布构建的是 GitHub 上的提交，推不上去等于没提交` }
+      }
+      if (Number.isInteger(state.behind) && state.behind > 0) {
+        return { ok: false, code: 'behind', message: `分支落后上游 ${String(state.behind)} 个提交，先拉取再发布` }
+      }
+      if (Number.isInteger(state.dirty) && state.dirty > 0 && text(message) === '') {
+        return {
+          ok: false,
+          code: 'message-required',
+          message: `工作区有 ${String(state.dirty)} 个未提交改动：一键发布要把它们提交并推送，所以需要一条提交信息`,
+          value: { files: state.files ?? [] },
+        }
+      }
+      return { ok: true, sha: state.head ?? null }
+    },
+
+    runStage: async ({ stage, repo, tag, message }) => {
+      const current = live()
+      const target = findEntry(current, { repo })
+      if (!target.ok) return { ok: false, code: 'bad-request', message: target.message }
+      if (stage === 'push') return await pipelinePush(current, target, message)
+      if (stage === 'version') return await pipelineVersion(current, target)
+      if (stage === 'dispatch') return await pipelineDispatch(current, target, tag)
+      if (stage === 'release') return await publishDraft(current, target, tag)
+      return { ok: false, code: 'bad-request', message: `未知阶段：${stage}` }
+    },
+
+    findRun: async ({ slug, sha }) => await pipelineFindRun(slug, sha),
+
+    publishNpm: async ({ repo, otp }) => {
+      const current = live()
+      const target = findEntry(current, { repo })
+      if (!target.ok) return { ok: false, code: 'bad-request', message: target.message }
+      const result = await runNpmPublish(current, target, { otp })
+      if (result.ok !== true) {
+        return { ok: false, code: result.code, message: result.message, value: result.value }
+      }
+      const value = result.value ?? {}
+      return { ok: true, detail: `${String(value.packageName ?? '')}@${String(value.version ?? '')} 已推送到 ${String(value.registry ?? '')}` }
+    },
+
+    /* A published release is exactly the moment an update note becomes true, so the
+       sweep is asked now rather than at the next tick — and not awaited, because the
+       comment is Bilibili's business and this answer is the release's. */
+    announce: () => {
+      void sweepBilibili('release-all')
+    },
+  }
+
+  const pipelineRunner = createPipelineRunner({
+    effects: pipelineEffects,
+    onChange: (pipeline) => storePipeline(pipeline),
+  })
+
+  /**
+   * Move every running pipeline along. One `gh run list` per running repository.
+   *
+   * This is what carries a pipeline across the gap the routes cannot: a build takes
+   * minutes, and the press that started it is long finished by the time there is a
+   * draft to publish. It is also what finishes a pipeline that was mid-flight when
+   * DSH stopped, since the record on disk is where the run id lives.
+   */
+  let pipelineAdvanceRunning = false
+
+  const advancePipelines = async (reason) => {
+    if (pipelineAdvanceRunning) return
+    if (pipelineProblem !== null) return
+    const doc = readPipelines()
+    const running = Object.values(doc.repos).filter((entry) => entry.status === 'running')
+    if (running.length === 0) return
+    pipelineAdvanceRunning = true
+    try {
+      for (const pipeline of running) {
+        try {
+          await pipelineRunner.advance(pipeline)
+        } catch (error) {
+          /* A throw here is this plugin's bug, not a fact about the release: the
+             record stays running and the next tick tries again, which is the only
+             safe direction — cancelling would abandon a draft nobody then publishes. */
+          ctx.logger?.warn?.('dsh-plugin-cicd: pipeline %s failed to advance (%s): %s', pipeline.repo, reason, String(error?.message ?? error))
+        }
+      }
+    } finally {
+      pipelineAdvanceRunning = false
+    }
+  }
+
+  /** Answer with a pipeline: a held one is not an error, a failed one is. */
+  const writePipelineResult = (res, pipeline) => {
+    cache = null
+    if (pipeline.status === 'failed') {
+      const code = pipeline.blockedCode ?? 'pipeline-failed'
+      writeJson(res, PIPELINE_REFUSAL_STATUS[code] ?? 502, {
+        ok: false,
+        code,
+        message: pipeline.message,
+        value: { pipeline },
+      })
+      return
+    }
+    writeJson(res, 200, { ok: true, value: { pipeline } })
+  }
+
+  /**
+   * 发布 — the whole pipeline, from one press.
+   *
+   * The body carries the two things this press cannot work out for itself: the
+   * commit message (when the tree is dirty) and an npm one-time password (when the
+   * account has 2FA). Both may be omitted; the refusal names which is missing, and
+   * an OTP that is missing entirely holds the pipeline at the draft rather than
+   * failing it, so the release is still there to be finished.
+   */
+  const releaseAllHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    if (current.oneClickRelease !== true) {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'disabled',
+        message: '一键发布被配置关掉了（oneClickRelease: false）：发布只触发构建，npm 与公开草稿仍是单独的按钮',
+      })
+      return
+    }
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    if (pipelineProblem !== null) {
+      writeJson(res, 500, { ok: false, code: 'pipelines-unreadable', message: pipelineProblem })
+      return
+    }
+    const existing = findPipeline(readPipelines(), target.entry.repo)
+    if (existing !== null && existing.status === 'running') {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'busy',
+        message: `${target.entry.repo} 已经有一条发布流水线在跑，等它结束`,
+        value: { pipeline: existing },
+      })
+      return
+    }
+    if (existing !== null && existing.status === 'blocked') {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'pipeline-blocked',
+        message: `${target.entry.repo} 的上一条流水线停在 npm（${existing.blockedCode ?? '未知原因'}）：补上原因后继续它，或先取消，而不是再起一条——草稿只有一个`,
+        value: { pipeline: existing },
+      })
+      return
+    }
+    const pipeline = await pipelineRunner.start({
+      repo: target.entry.repo,
+      slug: target.slug,
+      message: text(body?.message),
+      otp: text(body?.otp),
+    })
+    writePipelineResult(res, pipeline)
+  }
+
+  /**
+   * Continue a pipeline that npm held at the draft.
+   *
+   * Two ways out, and both are honest: give it a fresh one-time password, or say
+   * "publish the release without npm". The second one exists because npm can be
+   * unreachable for reasons that have nothing to do with this release, and a draft
+   * that can never be published is the state this feature was built to remove.
+   */
+  const releaseAllResumeHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const current = live()
+    const target = findEntry(current, body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    if (pipelineProblem !== null) {
+      writeJson(res, 500, { ok: false, code: 'pipelines-unreadable', message: pipelineProblem })
+      return
+    }
+    const existing = findPipeline(readPipelines(), target.entry.repo)
+    if (existing === null || existing.status !== 'blocked') {
+      writeJson(res, 409, {
+        ok: false,
+        code: 'nothing-to-resume',
+        message: existing === null
+          ? `${target.entry.repo} 没有发布流水线`
+          : `${target.entry.repo} 的流水线状态是 ${existing.status}，没有停在任何地方`,
+        value: { pipeline: existing },
+      })
+      return
+    }
+    const pipeline = await pipelineRunner.resume(existing, {
+      otp: text(body?.otp),
+      skipNpm: body?.skipNpm === true,
+    })
+    writePipelineResult(res, pipeline)
+  }
+
+  /**
+   * Stop following a pipeline. The run on GitHub keeps going — this only means
+   * "stop treating it as mine", which is what a person wants when the version or
+   * the branch was wrong and they are about to start over.
+   */
+  const releaseAllCancelHandler = async (req, res) => {
+    if (!guard(req, res)) return
+    const body = await readJsonBody(req)
+    const target = findEntry(live(), body)
+    if (!target.ok) {
+      writeJson(res, 400, { ok: false, code: 'bad-request', message: target.message })
+      return
+    }
+    if (pipelineProblem !== null) {
+      writeJson(res, 500, { ok: false, code: 'pipelines-unreadable', message: pipelineProblem })
+      return
+    }
+    const existing = findPipeline(readPipelines(), target.entry.repo)
+    if (existing === null) {
+      writeJson(res, 409, { ok: false, code: 'nothing-to-cancel', message: `${target.entry.repo} 没有发布流水线` })
+      return
+    }
+    /* Stopping is not a failure, so this answers `ok` even when the pipeline had
+       already finished: the request's meaning is "this is no longer mine", and a
+       record that is already terminal already satisfies it. */
+    cache = null
+    writeJson(res, 200, { ok: true, value: { pipeline: pipelineRunner.cancel(existing) } })
+  }
+
   /* --------------------------------------------------------------- routes -- */
 
   /**
@@ -4844,6 +5477,13 @@ export function apply(ctx, rawConfig) {
     [`${ROUTE_PREFIX}/run-action`, runActionHandler],
     [`${ROUTE_PREFIX}/release-action`, releaseActionHandler],
     [`${ROUTE_PREFIX}/version-bump`, versionBumpHandler],
+    // 发布同台: one press of 发布 that is the code push, the Release and npm at
+    // once. Registered beside the three separate buttons rather than replacing
+    // them, because the pipeline is those buttons in a fixed order — and a
+    // repository whose release must stay a draft still needs the parts.
+    [`${ROUTE_PREFIX}/release-all`, releaseAllHandler],
+    [`${ROUTE_PREFIX}/release-all-resume`, releaseAllResumeHandler],
+    [`${ROUTE_PREFIX}/release-all-cancel`, releaseAllCancelHandler],
     // The step before 构建 and 发布: a release builds the pushed commit, so the console
     // that can cut a release should be able to get the work to GitHub in the first place.
     [`${ROUTE_PREFIX}/commit`, commitHandler],
@@ -4926,6 +5566,27 @@ export function apply(ctx, rawConfig) {
       startup.bilibiliAuto ? 'on' : 'off',
       startup.bilibiliWatchSeconds,
     )
+  }
+  /*
+   * The 发布同台 clock, and the one catch-up that matters.
+   *
+   * A pipeline spends almost all of its life waiting for CI, so the press that
+   * started it finished long ago. The timer is what turns "the build finished" into
+   * "npm is pushed and the release is public" while nobody is watching — and the
+   * startup tick is what finishes a pipeline that was mid-build when DSH was
+   * closed, since its record (and its run id) is on disk.
+   */
+  if (startup.pipelineWatchSeconds > 0) {
+    const timer = setInterval(() => {
+      void advancePipelines('timer')
+    }, startup.pipelineWatchSeconds * 1000)
+    if (typeof timer.unref === 'function') timer.unref()
+    if (typeof ctx.effect === 'function') ctx.effect(() => () => clearInterval(timer), 'dsh-plugin-cicd: pipeline watch')
+    const boot = setTimeout(() => {
+      void advancePipelines('startup')
+    }, 5_000)
+    if (typeof boot.unref === 'function') boot.unref()
+    if (typeof ctx.effect === 'function') ctx.effect(() => () => clearTimeout(boot), 'dsh-plugin-cicd: pipeline startup tick')
   }
   ctx.logger?.info?.(
     'dsh-plugin-cicd: routes mounted at %s (gh=%s, repos=%d from %s, owner=%s)',

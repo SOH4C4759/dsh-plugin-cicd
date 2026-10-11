@@ -11,6 +11,8 @@
 
 ## 正式发布
 
+**面板上按一次「一键发布」就是这三步**（发布同台，见 README）：它提交并推送代码、在版本已被别的提交占用时自己升一个补丁号、触发 `release.yml` 取草稿、等这次运行成功、推 npm、公开 Release、再补 B 站播报。下面是同一件事的手工路径——没有面板、或故意要自己掌控每一步时用它。
+
 ```bash
 # 1. 改 package.json 的 version —— release 会拿 tag 与它核对
 # 2. 提交并推送
@@ -23,6 +25,8 @@ git push origin v1.2.3
 ```
 
 tag 与 `package.json` 的 version 不一致时 workflow **直接失败**，不会发出版本漂移的包；tag 打错提交也一样会失败，而不是发一个内容不对的 Release。
+
+> **同一个版本号不要重发**：`release.yml` 的第一步会核对 `v<version>` 是否已经属于**另一个提交**，是则直接失败并要求升版本（理由：覆盖属于别的提交的 Release 会让 tag 与资产从此不一致，而且全程静默）。一键发布把这一步提前到了按下按钮之前（`releasePreflight`），所以它会在需要时自己升版本，而不是让你跑一次注定失败的工作流。
 
 ## 手动触发
 
@@ -56,6 +60,9 @@ CI 上跑的就是这几条命令，本地可以原样复现：
 
 ```bash
 node scripts/verify-bundle.mjs
+# 全套离线检查（含 发布同台 的流水线：顺序、拒绝、Host 重启后续跑）
+node tests/host-checks.mjs && node tests/pipeline-check.mjs && node tests/mount-check.mjs \
+  && node tests/bump-e2e.mjs && node tests/client-render.mjs && node tests/bilibili-check.mjs
 mkdir -p dist
 NAME=$(node -p 'require("./package.json").name'); VERSION=$(node -p 'require("./package.json").version')
 git archive --format=zip --prefix="$NAME-$VERSION/" -o "dist/$NAME-$VERSION.zip" HEAD

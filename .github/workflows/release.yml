@@ -157,6 +157,10 @@ jobs:
           # is in the `files` allow-list, so a broken one would ship unremarked if
           # only the checkout ran its suite.
           node "$STAGE/${NAME}-${VERSION}/tests/bilibili-check.mjs" "$STAGE/${NAME}-${VERSION}"
+          # 发布同台 ships in the same allow-list: `lib/pipeline.mjs` and the routes
+          # that drive it, so the released bytes are exercised for the order that
+          # keeps a refused npm push from leaving a public release behind.
+          node "$STAGE/${NAME}-${VERSION}/tests/pipeline-check.mjs" "$STAGE/${NAME}-${VERSION}"
 
       - name: Prove the tarball is self-contained
         env:
@@ -176,6 +180,7 @@ jobs:
           node "$STAGE/package/tests/bump-e2e.mjs" "$STAGE/package"
           node "$STAGE/package/tests/client-render.mjs" "$STAGE/package"
           node "$STAGE/package/tests/bilibili-check.mjs" "$STAGE/package"
+          node "$STAGE/package/tests/pipeline-check.mjs" "$STAGE/package"
           # The decisive one: mount the published copy and serve its routes.
           node "$STAGE/package/tests/mount-check.mjs" "$STAGE/package"
 

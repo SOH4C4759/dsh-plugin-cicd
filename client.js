@@ -82,7 +82,7 @@ window.__ModuleLoader__.load({
      * be missing while the button that calls it is on screen. Comparing this
      * number turns that into one sentence instead of a bare HTTP status.
      */
-    const PROTOCOL = 6
+    const PROTOCOL = 7
     const STATUS_TIMEOUT_MS = 20_000
     const OVERVIEW_TIMEOUT_MS = 60_000
     const ACTION_TIMEOUT_MS = 45_000
@@ -99,6 +99,13 @@ window.__ModuleLoader__.load({
      * status gets a short bound and the publish shares the update's long one.
      */
     const NPM_TIMEOUT_MS = 45_000
+    /**
+     * 发布同台's two calls are the long ones, and for the same reason an update is:
+     * the first pushes a branch and dispatches a build, and the resume runs a real
+     * `pnpm publish` (the Host gives that 180 s on its own), so borrowing the 45 s of
+     * a dispatch would time out on a press that is working perfectly.
+     */
+    const RELEASE_ALL_TIMEOUT_MS = 240_000
     const NOTICE_TTL_MS = 5_000
     /**
      * While an attempt is pending this polls `/auth-state` — and it is the only
@@ -369,6 +376,67 @@ window.__ModuleLoader__.load({
       'picker.noLocal': '未找到本地检出',
       'picker.hint': '勾选即添加，取消勾选即移除；改动立刻生效，不需要重启。',
       'picker.reload': '重新载入',
+
+      /* -- 发布同台: one press of 发布 -------------------------------------- */
+      'action.releaseAll': '一键发布',
+      'action.releaseAllConfirm': '确认发布',
+      'releaseAll.title': '一键发布：代码推送 → 构建 → npm → 公开 Release → B 站播报',
+      'releaseAll.note': '一次点击做完这四件事，顺序是有理由的：构建跑的是推上去的那个提交（所以代码先推），npm 推送不可逆而草稿不是（所以 npm 通了才公开 Release）。npm 失败时 Release 会留在草稿——对外是全有或全无，补上原因就能继续。',
+      'releaseAll.order': '顺序',
+      'releaseAll.messageLabel': '提交信息',
+      'releaseAll.messagePlaceholder': '这次改了什么（会作为提交信息）',
+      'releaseAll.messageRequired': '工作区有未提交改动，一键发布要先提交它们，所以需要一条提交信息。',
+      'releaseAll.otpLabel': 'npm 一次性密码（可选）',
+      'releaseAll.otpPlaceholder': '账号开了 2FA 才填',
+      'releaseAll.otpHint': '现在填就在这次发布里用掉；不填也没关系——npm 要求时会停下来等你，草稿不会跑掉。',
+      'releaseAll.stage': '阶段',
+      'releaseAll.skipped': '不适用，已跳过',
+      'releaseAll.blocked': '停住了：{reason}',
+      'releaseAll.failed': '没走完：{reason}',
+      'releaseAll.running': '进行中——构建要几分钟，面板每 {seconds} 秒看一次。',
+      'releaseAll.done': '全部完成：代码已推送、Release 已公开、npm 已推送。',
+      'releaseAll.doneNoNpm': '全部完成：代码已推送、Release 已公开（npm 这一步按原因跳过）。',
+      'releaseAll.cancelled': '已不再跟进这条流水线（GitHub 上的运行不会因此停止）。',
+      'releaseAll.resume': '继续',
+      'releaseAll.skipNpm': '跳过 npm 并公开 Release',
+      'releaseAll.cancel': '不再跟进',
+      'releaseAll.runLink': '看这次运行',
+      'releaseAll.blockedHint.otp-required': 'npm 要求一次性密码：填在下面再点【继续】。',
+      'releaseAll.blockedHint.email-unverified': '账号邮箱还没验证：先去邮箱点确认链接，再回来点【继续】。',
+      'releaseAll.blockedHint.not-logged-in': 'npm 凭据无效或已过期：在 设置 → 插件 → 发布台 · npm 里换一个 token，再回来点【继续】。',
+      'releaseAll.blockedHint.forbidden': '这个 token 没有被授权发布这个包：检查 token 的 Packages 范围，再点【继续】。',
+      'releaseAll.blockedHint.registry-unreachable': '连不上 npm 源：网络恢复后点【继续】；如果 npm 本来就不是这个仓库的渠道，可以【跳过 npm 并公开 Release】。',
+      'releaseAll.blockedHint.network': '连不上 npm 源：网络恢复后点【继续】，或【跳过 npm 并公开 Release】。',
+      'releaseAll.blockedHint.timeout': 'npm 超时了：重试一次；仍失败可以【跳过 npm 并公开 Release】。',
+      'releaseAll.blockedHint.dirty-tree': '工作区又变脏了：先提交或暂存，再点【继续】。',
+      'releaseAll.blockedHint.unknown': '看下面 Host 给出的原话，再决定【继续】还是【跳过 npm 并公开 Release】。',
+      'releaseAll.confirmFirst': '还没有发布流水线。',
+      'releaseAll.step.push': '代码推送',
+      'releaseAll.step.version': '版本号',
+      'releaseAll.step.dispatch': '触发构建',
+      'releaseAll.step.build': '等待构建',
+      'releaseAll.step.npm': 'npm 推送',
+      'releaseAll.step.release': '公开 Release',
+      'releaseAll.step.announce': 'B 站播报',
+      'releaseAll.status.pending': '待做',
+      'releaseAll.status.active': '进行中',
+      'releaseAll.status.done': '完成',
+      'releaseAll.status.skipped': '跳过',
+      'releaseAll.status.blocked': '停住',
+      'releaseAll.status.failed': '失败',
+      'releaseAll.status.cancelled': '已停止',
+      'releaseAll.stepHint.push': '有改动就提交并推送；干净且领先就只推送',
+      'releaseAll.stepHint.version': '版本已被别的提交占用时，自动升一个补丁号',
+      'releaseAll.stepHint.dispatch': '触发 release.yml，并明确要一份草稿',
+      'releaseAll.stepHint.build': '等这次 CI 跑完（几分钟）',
+      'releaseAll.stepHint.npm': '把本地版本推到 npm',
+      'releaseAll.stepHint.release': 'npm 通了才把草稿公开',
+      'releaseAll.stepHint.announce': '在绑定的视频下面留一条更新说明',
+      'state.releaseAllStarted': '发布流水线已启动：{repo}。构建结束后我会自己接着推 npm、公开 Release。',
+      'state.releaseAllHeld': '流水线停在 npm（{reason}）：Release 还是草稿，补上原因就能继续。',
+      'state.releaseAllDone': '{repo} 的发布流水线走完了。',
+      'state.releaseAllResumed': '已继续，并推进到当前能走到的位置。',
+      'state.releaseAllCancelled': '已不再跟进 {repo} 的发布流水线。',
 
       /* -- Bilibili update notes ------------------------------------------- */
       'settings.segment.bilibili': 'Bilibili',
@@ -717,6 +785,67 @@ window.__ModuleLoader__.load({
       'picker.noLocal': 'no local checkout found',
       'picker.hint': 'Ticking adds, unticking removes; the change applies at once, with no restart.',
       'picker.reload': 'Reload',
+
+      /* -- 发布同台: one press of 发布 -------------------------------------- */
+      'action.releaseAll': 'Release all',
+      'action.releaseAllConfirm': 'Release',
+      'releaseAll.title': 'One press: push the code, build, push npm, publish the Release, announce',
+      'releaseAll.note': 'One press does all four, and the order is the reason: a build runs the PUSHED commit (so the code goes first), and an npm publish is irreversible while a draft is not (so npm goes before the Release is made public). If npm refuses, the Release stays a draft — all or nothing in public — and continuing finishes it.',
+      'releaseAll.order': 'Order',
+      'releaseAll.messageLabel': 'Commit message',
+      'releaseAll.messagePlaceholder': 'What changed (used as the commit message)',
+      'releaseAll.messageRequired': 'The working tree has uncommitted changes and this press has to commit them first, so it needs a message.',
+      'releaseAll.otpLabel': 'npm one-time password (optional)',
+      'releaseAll.otpPlaceholder': 'only with 2FA on the account',
+      'releaseAll.otpHint': 'Filling it now spends it on this release. Leaving it empty is fine too: if npm asks, the pipeline stops and waits, and the draft is not going anywhere.',
+      'releaseAll.stage': 'Stage',
+      'releaseAll.skipped': 'not applicable, skipped',
+      'releaseAll.blocked': 'Held: {reason}',
+      'releaseAll.failed': 'Did not finish: {reason}',
+      'releaseAll.running': 'Running — a build takes minutes, and the panel looks every {seconds}s.',
+      'releaseAll.done': 'All done: the code is pushed, the Release is public, and npm has it.',
+      'releaseAll.doneNoNpm': 'All done: the code is pushed and the Release is public (npm was skipped for the reason above).',
+      'releaseAll.cancelled': 'This pipeline is no longer being followed (the run on GitHub is not stopped by that).',
+      'releaseAll.resume': 'Continue',
+      'releaseAll.skipNpm': 'Publish the Release without npm',
+      'releaseAll.cancel': 'Stop following',
+      'releaseAll.runLink': 'See the run',
+      'releaseAll.blockedHint.otp-required': 'npm wants a one-time password: enter it below and press Continue.',
+      'releaseAll.blockedHint.email-unverified': 'The account email is unverified: confirm the link npm sent you, then press Continue.',
+      'releaseAll.blockedHint.not-logged-in': 'The npm credential is invalid or expired: write a new token in Settings → Plugins → Release Console · npm, then press Continue.',
+      'releaseAll.blockedHint.forbidden': 'This token may not publish this package: check its Packages scope, then press Continue.',
+      'releaseAll.blockedHint.registry-unreachable': 'The registry cannot be reached: press Continue once the network is back — or, if npm is simply not this repository\'s channel, publish the Release without npm.',
+      'releaseAll.blockedHint.network': 'The registry cannot be reached: press Continue after the network recovers, or publish the Release without npm.',
+      'releaseAll.blockedHint.timeout': 'npm timed out: try Continue once more; if it fails again, publish the Release without npm.',
+      'releaseAll.blockedHint.dirty-tree': 'The working tree is dirty again: commit or stash, then press Continue.',
+      'releaseAll.blockedHint.unknown': 'Read the Host\'s own words below, then choose Continue or publish the Release without npm.',
+      'releaseAll.confirmFirst': 'No release pipeline has run yet.',
+      'releaseAll.step.push': 'Push the code',
+      'releaseAll.step.version': 'Version',
+      'releaseAll.step.dispatch': 'Trigger the build',
+      'releaseAll.step.build': 'Wait for the build',
+      'releaseAll.step.npm': 'Push to npm',
+      'releaseAll.step.release': 'Publish the Release',
+      'releaseAll.step.announce': 'Announce on Bilibili',
+      'releaseAll.status.pending': 'pending',
+      'releaseAll.status.active': 'running',
+      'releaseAll.status.done': 'done',
+      'releaseAll.status.skipped': 'skipped',
+      'releaseAll.status.blocked': 'held',
+      'releaseAll.status.failed': 'failed',
+      'releaseAll.status.cancelled': 'stopped',
+      'releaseAll.stepHint.push': 'Commit and push if there are changes; push only if the tree is ahead',
+      'releaseAll.stepHint.version': 'Bump a patch when the version already belongs to another commit',
+      'releaseAll.stepHint.dispatch': 'Trigger release.yml, explicitly asking for a draft',
+      'releaseAll.stepHint.build': 'Wait for that CI run (a few minutes)',
+      'releaseAll.stepHint.npm': 'Publish the local version to npm',
+      'releaseAll.stepHint.release': 'Make the draft public only once npm has it',
+      'releaseAll.stepHint.announce': 'Leave an update note under the bound video',
+      'state.releaseAllStarted': 'Release pipeline started for {repo}. Once the build finishes it pushes npm and publishes the Release by itself.',
+      'state.releaseAllHeld': 'The pipeline is held at npm ({reason}): the Release is still a draft, and continuing finishes it.',
+      'state.releaseAllDone': 'The release pipeline for {repo} finished.',
+      'state.releaseAllResumed': 'Continued, and advanced as far as it can go right now.',
+      'state.releaseAllCancelled': 'No longer following the release pipeline for {repo}.',
 
       /* -- Bilibili update notes ------------------------------------------- */
       'settings.segment.bilibili': 'Bilibili',
@@ -1420,8 +1549,166 @@ window.__ModuleLoader__.load({
     }
 
     /** One repository row, expandable into path, releases, runs and logs. */
+    /**
+     * 发布同台's state for one repository — the stages, and what stopped them.
+     *
+     * This is the panel's answer to "what is happening?" for something that takes
+     * minutes and finishes while the page is open. The stages are shown even after
+     * the fact, because the interesting failures are the ones where four of five
+     * steps succeeded: a draft that npm refused, a build that went red before
+     * anything was published. A row that only said "failed" would hide exactly the
+     * part a person needs — which half of the release is already out there.
+     *
+     * A held pipeline is the one state with controls, and it has two because the
+     * two are genuinely different: give npm what it asked for, or decide that npm
+     * is not this repository's channel today and publish the release anyway.
+     */
+    function ReleasePipeline(props) {
+      const { t, pipeline, busy, onResume, onCancel } = props
+      const [otp, setOtp] = React.useState('')
+      if (pipeline === null || pipeline === undefined) return null
+      const stages = Array.isArray(pipeline.stages) ? pipeline.stages : []
+      const status = String(pipeline.status ?? '')
+      const blocked = status === 'blocked'
+      const running = status === 'running'
+      const skippedNpm = stages.some((stage) => stage.id === 'npm' && stage.status === 'skipped')
+      const chipFor = (value) => ({ done: 'success', skipped: 'idle', active: 'busy', blocked: 'warn', failed: 'danger' }[value] ?? 'idle')
+      const head = status === 'done'
+        ? t(skippedNpm ? 'releaseAll.doneNoNpm' : 'releaseAll.done')
+        : status === 'cancelled'
+          ? t('releaseAll.cancelled')
+          : status === 'blocked'
+            ? (() => {
+                const key = `releaseAll.blockedHint.${String(pipeline.blockedCode ?? 'unknown')}`
+                const text = t(key, {})
+                return t('releaseAll.blocked', { reason: text === key ? t('releaseAll.blockedHint.unknown') : text })
+              })()
+            : status === 'failed'
+              ? t('releaseAll.failed', { reason: String(pipeline.message ?? '') })
+              : t('releaseAll.running', { seconds: '20' })
+      return h(
+        'div',
+        { className: 'dsc-sub' },
+        h(
+          'div',
+          { className: 'dsc-line' },
+          h('span', { className: 'dsc-grow' }, t('releaseAll.title')),
+          pipeline.tag !== null && pipeline.tag !== undefined && pipeline.tag !== ''
+            ? h(Chip, { state: chipFor(status === 'running' ? 'active' : status === 'done' ? 'done' : status) }, String(pipeline.tag))
+            : null,
+          running ? h(Chip, { state: 'busy' }, t('releaseAll.stage')) : null,
+        ),
+        h('span', { className: status === 'blocked' || status === 'failed' ? 'dsc-warn' : null }, head),
+        h(
+          'div',
+          { className: 'dsc-commit' },
+          stages.map((stage) => h(
+            'div',
+            { className: 'dsc-line', key: stage.id },
+            h('span', { className: 'dsc-grow' }, t(`releaseAll.step.${String(stage.id)}`)),
+            h(Chip, { state: chipFor(stage.status) }, t(`releaseAll.status.${String(stage.status)}`)),
+            stage.detail !== ''
+              ? h('span', { className: 'dsc-quiet' }, String(stage.detail))
+              : h('span', { className: 'dsc-quiet' }, t(`releaseAll.stepHint.${String(stage.id)}`)),
+          )),
+        ),
+        pipeline.runUrl !== null && pipeline.runUrl !== undefined && pipeline.runUrl !== ''
+          ? h('div', { className: 'dsc-line' }, h(Btn, { kind: 'quiet', onClick: () => globalThis.open(String(pipeline.runUrl), '_blank', 'noopener,noreferrer') }, t('releaseAll.runLink')))
+          : null,
+        blocked
+          ? h(
+              'div',
+              { className: 'dsc-line' },
+              h('input', {
+                className: 'dsc-input',
+                type: 'password',
+                autoComplete: 'off',
+                spellCheck: 'false',
+                placeholder: t('releaseAll.otpPlaceholder'),
+                'aria-label': t('releaseAll.otpLabel'),
+                value: otp,
+                onChange: (event) => setOtp(String(event?.target?.value ?? '')),
+              }),
+              h(Btn, { kind: 'primary', disabled: busy !== '', onClick: () => onResume(otp, false) }, t('releaseAll.resume')),
+              h(Btn, { disabled: busy !== '', onClick: () => onResume('', true) }, t('releaseAll.skipNpm')),
+              h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: onCancel }, t('releaseAll.cancel')),
+            )
+          : running
+            ? h('div', { className: 'dsc-line' }, h(Btn, { kind: 'quiet', disabled: busy !== '', onClick: onCancel }, t('releaseAll.cancel')))
+            : null,
+      )
+    }
+
+    /**
+     * 发布同台's confirmation: the order, and the two things only a person knows.
+     *
+     * The stage list is not decoration. This button commits the working tree, moves
+     * a version, triggers a build, publishes a package nobody can unpublish and makes
+     * a release public — so the answer to "what is about to happen" has to be on
+     * screen before it happens, in the order it happens, including the part that is
+     * deliberately last (npm before 公开 Release, so a refusal leaves nothing public).
+     */
+    function ReleaseAllConfirm(props) {
+      const { t, dirty, files, needsMessage, message, setMessage, otp, setOtp, busy, canRelease, onConfirm, onCancel } = props
+      const steps = ['push', 'version', 'dispatch', 'build', 'npm', 'release', 'announce']
+      return h(
+        'div',
+        { className: 'dsc-commit' },
+        h('span', { className: 'dsc-setup-strong' }, t('releaseAll.title')),
+        h('span', null, t('releaseAll.note')),
+        h(
+          'div',
+          null,
+          steps.map((step, index) => h(
+            'div',
+            { className: 'dsc-line', key: step },
+            h('span', { className: 'dsc-grow' }, `${String(index + 1)}. ${t(`releaseAll.step.${step}`)}`),
+            h('span', { className: 'dsc-quiet' }, t(`releaseAll.stepHint.${step}`)),
+          )),
+        ),
+        needsMessage
+          ? h('span', null, t('commit.willCommit', { count: String(dirty) }))
+          : h('span', { className: 'dsc-quiet' }, t('commit.nothing')),
+        needsMessage && Array.isArray(files) && files.length > 0
+          ? h('span', { className: 'dsc-mono dsc-quiet' }, files.join('  ·  '))
+          : null,
+        needsMessage
+          ? h('input', {
+              className: 'dsc-input',
+              type: 'text',
+              value: message,
+              placeholder: t('releaseAll.messagePlaceholder'),
+              'aria-label': t('releaseAll.messageLabel'),
+              onChange: (event) => setMessage(String(event?.target?.value ?? '')),
+            })
+          : null,
+        h('span', { className: 'dsc-quiet' }, t('releaseAll.otpHint')),
+        h('input', {
+          className: 'dsc-input',
+          type: 'password',
+          autoComplete: 'off',
+          spellCheck: 'false',
+          placeholder: t('releaseAll.otpPlaceholder'),
+          'aria-label': t('releaseAll.otpLabel'),
+          value: otp,
+          onChange: (event) => setOtp(String(event?.target?.value ?? '')),
+        }),
+        h(
+          'div',
+          { className: 'dsc-line' },
+          h(Btn, {
+            kind: 'danger',
+            disabled: busy !== '' || canRelease !== true,
+            title: canRelease === true ? undefined : t('releaseAll.messageRequired'),
+            onClick: onConfirm,
+          }, t('action.releaseAllConfirm')),
+          h(Btn, { kind: 'quiet', onClick: onCancel }, t('confirm.cancel')),
+        ),
+      )
+    }
+
     function RepoRow(props) {
-      const { t, data, busy, onAction, onBump, onCommit, onClone, onPublish, onUpdate, npm, onNpmPublish, bili, onBiliBind, onBiliPreview, onBiliAnnounce, logs, onLogs } = props
+      const { t, data, busy, onAction, onBump, onCommit, onClone, onPublish, onUpdate, npm, onNpmPublish, bili, onBiliBind, onBiliPreview, onBiliAnnounce, logs, onLogs, onReleaseAll, onReleaseAllResume, onReleaseAllCancel } = props
       const [open, setOpen] = React.useState(false)
       /**
        * A draft release is the panel's one invisible outcome: it exists, it is not
@@ -1445,6 +1732,20 @@ window.__ModuleLoader__.load({
       /** A publish cannot be undone, so it asks first — and 2FA needs somewhere to type. */
       const [publishing, setPublishing] = React.useState(false)
       const [otp, setOtp] = React.useState('')
+      /**
+       * 发布同台's own two confirmations.
+       *
+       * The press asks for the same two things the Host may need — a commit message
+       * when the tree is dirty, an npm one-time password when the account has 2FA —
+       * because both are cheap to ask for up front and expensive to discover as a
+       * failure: the first would refuse the whole press, and the second would leave a
+       * draft waiting. The resume line asks for the one-time password again, since a
+       * code npm already rejected is dead.
+       */
+      const [releasing, setReleasing] = React.useState(false)
+      const [releaseMessage, setReleaseMessage] = React.useState('')
+      const [releaseOtp, setReleaseOtp] = React.useState('')
+      const [resumeOtp, setResumeOtp] = React.useState('')
       const run = data.latestRun
       const local = data.local ?? { available: false }
       const dirty = Number.isFinite(local.dirty) ? local.dirty : null
@@ -1467,6 +1768,26 @@ window.__ModuleLoader__.load({
           : canPush
             ? t('commit.willPush', { count: String(ahead) })
             : t('commit.nothing')
+      /**
+       * 发布同台: whether 发布 is the whole pipeline or only the dispatch.
+       *
+       * The Host decides, because the button and the route must agree about what a
+       * press does. With it on, 发布 stops being "trigger a build that creates a
+       * draft" — the thing that left three different half-finished states behind —
+       * and becomes the four pushes in the one order that cannot leave a public
+       * mess: push the code, build, push npm, publish.
+       */
+      const oneClick = props.oneClickRelease === true
+      const oneClickBusy = busy === `release-all:${data.repo}`
+      const pipeline = data.pipeline ?? null
+      /**
+       * What the press still needs from the person: a message when the tree has
+       * something to commit. The one-time password is optional — npm only asks for
+       * it when the account has 2FA, and a missing one holds the draft instead of
+       * failing the release.
+       */
+      const releaseNeedsMessage = dirty !== null && dirty > 0
+      const canRelease = local.available === true && (!releaseNeedsMessage || releaseMessage.trim() !== '')
       /**
        * What this profile has installed for this repository's package.
        *
@@ -1636,20 +1957,35 @@ window.__ModuleLoader__.load({
               : null,
             data.hasBuildWorkflow ? h(Btn, { disabled: busy !== '', title: t('action.build'), onClick: () => onAction('build', data) }, busy === `build:${data.repo}` ? '…' : t('action.build')) : null,
             data.hasReleaseWorkflow
-              ? blocked && typeof check.nextTag === 'string' && check.nextTag !== ''
-                /* The version is the obstacle, so the button that works is the one
-                   that removes it — refusing to dispatch and leaving the user to edit
-                   package.json by hand would be the same dead end, one click later. */
+              ? oneClick
+                /* 发布同台: the primary button is the whole pipeline now, so it is
+                   never the "bump first, then press again" two-step — the version
+                   stage moves the version itself when the workflow would refuse it.
+                   What it still cannot decide alone is a commit message, so the
+                   confirmation below asks for that before anything is written. */
                 ? h(Btn, {
                     kind: 'primary',
                     disabled: busy !== '',
-                    title: t('action.bumpRelease'),
+                    title: t('action.releaseAll'),
                     onClick: () => {
                       setOpen(true)
-                      setBumping(true)
+                      setReleasing(true)
                     },
-                  }, busy === `bump:${data.repo}` ? '…' : t('action.bumpRelease'))
-                : h(Btn, { kind: 'primary', disabled: busy !== '', title: t('action.release'), onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? '…' : t('action.release'))
+                  }, oneClickBusy ? '…' : t('action.releaseAll'))
+                : blocked && typeof check.nextTag === 'string' && check.nextTag !== ''
+                  /* The version is the obstacle, so the button that works is the one
+                     that removes it — refusing to dispatch and leaving the user to edit
+                     package.json by hand would be the same dead end, one click later. */
+                  ? h(Btn, {
+                      kind: 'primary',
+                      disabled: busy !== '',
+                      title: t('action.bumpRelease'),
+                      onClick: () => {
+                        setOpen(true)
+                        setBumping(true)
+                      },
+                    }, busy === `bump:${data.repo}` ? '…' : t('action.bumpRelease'))
+                  : h(Btn, { kind: 'primary', disabled: busy !== '', title: t('action.release'), onClick: () => onAction('release', data) }, busy === `release:${data.repo}` ? '…' : t('action.release'))
               : null,
             /* The other half of the loop the console exists for: 发布 cuts the
                release, this one installs it into the profile that is running. */
@@ -1683,6 +2019,44 @@ window.__ModuleLoader__.load({
                     onClone: (repo, url) => { void onClone(repo, url) },
                   }),
               data.problems.length > 0 ? h('div', { className: 'dsc-warn' }, data.problems.join(' · ')) : null,
+
+              /* 发布同台's state, above the release warnings because it is the state
+                 of the thing that was just pressed — including the minutes when the
+                 answer is "a build is running and there is nothing to see yet". */
+              oneClick
+                ? h(ReleasePipeline, {
+                    t,
+                    pipeline,
+                    busy,
+                    onResume: (resumeOtp, skipNpm) => { void onReleaseAllResume(data, { otp: resumeOtp, skipNpm }) },
+                    onCancel: () => { void onReleaseAllCancel(data) },
+                  })
+                : null,
+              releasing
+                ? h(ReleaseAllConfirm, {
+                    t,
+                    dirty,
+                    files: local.files,
+                    needsMessage: releaseNeedsMessage,
+                    message: releaseMessage,
+                    setMessage: setReleaseMessage,
+                    otp: releaseOtp,
+                    setOtp: setReleaseOtp,
+                    busy,
+                    canRelease,
+                    onConfirm: () => {
+                      const body = { message: releaseMessage.trim(), otp: releaseOtp.trim() }
+                      setReleasing(false)
+                      setReleaseMessage('')
+                      setReleaseOtp('')
+                      void onReleaseAll(data, body)
+                    },
+                    onCancel: () => {
+                      setReleasing(false)
+                      setReleaseOtp('')
+                    },
+                  })
+                : null,
 
               /* Why 发布 cannot work, and what would make it work. Both notes are
                  about the same trap: a release builds the pushed commit, so anything
@@ -2206,6 +2580,112 @@ window.__ModuleLoader__.load({
           void run(`publish:${repo}`, '/release-action', { repo, tag, action: 'publish' }, 'state.published', { tag })
         },
         [run],
+      )
+
+      /**
+       * 发布同台: one press that is 代码推送 + Release + npm.
+       *
+       * The answer to this call is not one sentence, it is a record — the press may
+       * still be running (a build takes minutes) or it may have stopped at npm with
+       * the draft still unpublished. So the notice says which of those happened and
+       * the row renders the stages, rather than the panel claiming "done" about a
+       * release that has not been built yet.
+       */
+      const onReleaseAll = React.useCallback(
+        async (data, body) => {
+          const key = `release-all:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson(
+            '/release-all',
+            { repo: data.repo, message: String(body?.message ?? ''), otp: String(body?.otp ?? '') },
+            RELEASE_ALL_TIMEOUT_MS,
+          )
+          setBusy('')
+          await loadOverview({ force: true })
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return
+          }
+          const payload = result.payload ?? {}
+          const pipeline = payload?.value?.pipeline ?? null
+          if (payload?.ok !== true) {
+            /* "Held at npm" is not a red failure: the release is still a draft and
+               the row is about to offer the two ways to finish it. */
+            if (payload?.code === 'pipeline-blocked' && pipeline !== null) {
+              setNotice(t('state.releaseAllHeld', { reason: String(pipeline.blockedCode ?? '') }))
+              return
+            }
+            setError(t('state.actionFailed', { reason: payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            return
+          }
+          if (pipeline !== null && pipeline.status === 'blocked') {
+            setNotice(t('state.releaseAllHeld', { reason: String(pipeline.blockedCode ?? '') }))
+            return
+          }
+          setNotice(t('state.releaseAllStarted', { repo: data.repo }))
+        },
+        [loadOverview, setError, t],
+      )
+
+      /** Continue a pipeline npm held at the draft, with a fresh code or without npm. */
+      const onReleaseAllResume = React.useCallback(
+        async (data, options) => {
+          const key = `release-all:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson(
+            '/release-all-resume',
+            { repo: data.repo, otp: String(options?.otp ?? ''), skipNpm: options?.skipNpm === true },
+            RELEASE_ALL_TIMEOUT_MS,
+          )
+          setBusy('')
+          await loadOverview({ force: true })
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return
+          }
+          const payload = result.payload ?? {}
+          const pipeline = payload?.value?.pipeline ?? null
+          if (payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            return
+          }
+          if (pipeline !== null && pipeline.status === 'done') {
+            setNotice(t('state.releaseAllDone', { repo: data.repo }))
+            return
+          }
+          if (pipeline !== null && pipeline.status === 'blocked') {
+            setNotice(t('state.releaseAllHeld', { reason: String(pipeline.blockedCode ?? '') }))
+            return
+          }
+          setNotice(t('state.releaseAllResumed'))
+        },
+        [loadOverview, setError, t],
+      )
+
+      const onReleaseAllCancel = React.useCallback(
+        async (data) => {
+          const key = `release-all:${data.repo}`
+          setBusy(key)
+          setNotice(null)
+          setError(null)
+          const result = await postJson('/release-all-cancel', { repo: data.repo }, ACTION_TIMEOUT_MS)
+          setBusy('')
+          if (!result.ok) {
+            setError(result.aborted ? 'timeout' : 'host')
+            return
+          }
+          if (!result.response.ok || result.payload?.ok !== true) {
+            setError(t('state.actionFailed', { reason: result.payload?.message ?? `HTTP ${String(result.response.status)}` }))
+            return
+          }
+          setNotice(t('state.releaseAllCancelled', { repo: data.repo }))
+          await loadOverview({ force: true })
+        },
+        [loadOverview, setError, t],
       )
 
       /**
@@ -2860,6 +3340,13 @@ window.__ModuleLoader__.load({
                 onClone: (row, url) => { void onClone(row, url) },
                 onPublish: (tag) => onPublish(data.repo, tag),
                 onUpdate: () => { void onUpdate(data) },
+                /* 发布同台: with the flag on, 发布 is the pipeline; the row renders the
+                   stages and the two ways out of a pipeline npm held. `oneClickRelease`
+                   comes from the Host so the button and the route agree. */
+                oneClickRelease: status?.config?.oneClickRelease === true,
+                onReleaseAll,
+                onReleaseAllResume,
+                onReleaseAllCancel,
                 npm: npmByRepo.get(data.repo) ?? null,
                 onNpmPublish,
                 bili: biliByRepo.get(data.repo) ?? null,
@@ -2881,6 +3368,9 @@ window.__ModuleLoader__.load({
                 onCommit: () => {},
                 onClone: () => {},
                 onPublish: () => {},
+                onReleaseAll: () => {},
+                onReleaseAllResume: () => {},
+                onReleaseAllCancel: () => {},
                 logs: null,
                 onLogs: async () => {},
               })),

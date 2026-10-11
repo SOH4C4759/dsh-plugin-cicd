@@ -73,6 +73,13 @@ const EXPECTED = [
   // that belongs to another commit, so the console has to be able to move the
   // version forward itself.
   '/api/dsh-cicd/version-bump',
+  // 发布同台: one press of 发布 that is 代码推送, the Release and npm at once — the
+  // three buttons above run in a fixed order, plus the two routes that make a
+  // pipeline usable after the press: continuing one that npm held at the draft,
+  // and abandoning one whose version or branch turned out to be wrong.
+  '/api/dsh-cicd/release-all',
+  '/api/dsh-cicd/release-all-resume',
+  '/api/dsh-cicd/release-all-cancel',
   // The step before 构建 and 发布: a release builds the PUSHED commit, so the console
   // that can cut a release has to be able to get the work onto GitHub first.
   '/api/dsh-cicd/commit',
@@ -176,6 +183,29 @@ try {
 
   const badTag = await call('/api/dsh-cicd/release-action', { repo: 'octocat/Hello-World', tag: '$(rm -rf /)', action: 'publish' })
   check('an unusable tag is refused before gh runs', badTag.status === 400, badTag.payload?.message ?? '')
+
+  /* --- 发布同台 ---------------------------------------------------------------
+     One press of 发布 is 代码推送 + Release + npm, and the route order is the whole
+     claim: everything that can be decided locally is decided BEFORE anything is
+     written. This repository is registered with no local checkout, so the press has
+     to be refused with a reason and no `git` or `gh` child at all. */
+  const pipelineNoRepo = await call('/api/dsh-cicd/release-all', { repo: 'someone/else' })
+  check('one-press release refuses an unconfigured repository', pipelineNoRepo.status === 400 && /not configured/.test(pipelineNoRepo.payload?.message ?? ''), pipelineNoRepo.payload?.message ?? '')
+
+  const cancelIdlePipeline = await call('/api/dsh-cicd/release-all-cancel', { repo: 'octocat/Hello-World' })
+  check('cancelling a pipeline that never existed is refused', cancelIdlePipeline.status === 409 && cancelIdlePipeline.payload?.code === 'nothing-to-cancel', cancelIdlePipeline.payload?.code ?? '')
+
+  const noCheckoutPipeline = await call('/api/dsh-cicd/release-all', { repo: 'octocat/Hello-World' })
+  check('one-press release refuses a repository with no checkout', noCheckoutPipeline.status === 400 && noCheckoutPipeline.payload?.code === 'no-checkout', noCheckoutPipeline.payload?.message ?? '')
+  const refusedPipeline = noCheckoutPipeline.payload?.value?.pipeline ?? null
+  check('the refusal carries the pipeline record, so the row can show the stage it stopped at', refusedPipeline?.status === 'failed' && Array.isArray(refusedPipeline?.stages) && refusedPipeline.stages.length > 0, JSON.stringify(refusedPipeline?.stages ?? null))
+  check('a refusal before any stage leaves every stage untouched, and says why in words', refusedPipeline?.stages?.every((stage) => stage.status === 'pending') === true && typeof refusedPipeline?.message === 'string' && refusedPipeline.message !== '', JSON.stringify((refusedPipeline?.stages ?? []).map((stage) => `${stage.id}:${stage.status}`)))
+
+  const resumeNothing = await call('/api/dsh-cicd/release-all-resume', { repo: 'octocat/Hello-World' })
+  check('continuing a pipeline that is not held is refused', resumeNothing.status === 409 && resumeNothing.payload?.code === 'nothing-to-resume', resumeNothing.payload?.code ?? '')
+
+  const cancelledPipeline = await call('/api/dsh-cicd/release-all-cancel', { repo: 'octocat/Hello-World' })
+  check('a stopped pipeline is reported rather than refused', cancelledPipeline.status === 200 && cancelledPipeline.payload?.ok === true, `HTTP ${cancelledPipeline.status}`)
 
   /* --- taking a release ---------------------------------------------------
      The two refusals below are the ones that must happen BEFORE any network call,

@@ -55,6 +55,12 @@ jobs:
       # account cannot test it (the second run of a live test is the bug).
       - name: bilibili notes
         run: node tests/bilibili-check.mjs
+      # 发布同台, with every outside action injected: the order (npm before the draft
+      # goes public), the refusals, and what a Host restart in the middle of a build
+      # leaves behind. A real release takes minutes, publishes what the whole world
+      # sees, and cannot be taken back — so the pipeline is driven here instead.
+      - name: release pipeline
+        run: node tests/pipeline-check.mjs
 
   # The bundle half of CI: continuous build. It checks the manifest contract and
   # then builds the exact archive the release workflow would publish, so a broken
@@ -125,6 +131,7 @@ jobs:
           node "$STAGE/package/tests/host-checks.mjs"
           node "$STAGE/package/tests/mount-check.mjs" "$STAGE/package"
           node "$STAGE/package/tests/bilibili-check.mjs" "$STAGE/package"
+          node "$STAGE/package/tests/pipeline-check.mjs" "$STAGE/package"
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ github.event.repository.name }}-build
